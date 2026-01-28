@@ -148,17 +148,18 @@ impl DeviceHandler {
             .map(|s| s.to_string().to_ascii_lowercase())
             .collect();
 
-        let mut regexs: Vec<S> = Vec::new();
+        // Change from Vec<S> to Vec<String> to support modification
+        let mut regexs: Vec<String> = Vec::new();
         let mut regex_index_map = HashMap::new();
 
         let start_offset = regexs.len();
-        regexs.extend(more_regex);
+        regexs.extend(more_regex.into_iter().map(|s| s.as_ref().to_string()));
         for i in start_offset..regexs.len() {
             regex_index_map.insert(i, 1);
         }
 
         let start_offset = regexs.len();
-        regexs.extend(error_regex);
+        regexs.extend(error_regex.into_iter().map(|s| s.as_ref().to_string()));
         for i in start_offset..regexs.len() {
             regex_index_map.insert(i, 2);
         }
@@ -169,7 +170,12 @@ impl DeviceHandler {
             all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
-            regexs.extend(regex_iter);
+            // Automatically prepend the common prefix to prompt regexes
+            // We strip any existing leading '^' to avoid duplication
+            let modified_regexs = regex_iter
+                .into_iter()
+                .map(|s| format!(r"^\x00*\r{{0,1}}{}", s.as_ref().trim_start_matches('^')));
+            regexs.extend(modified_regexs);
 
             for i in start_offset..regexs.len() {
                 regex_index_map.insert(i, state_index);
@@ -187,9 +193,13 @@ impl DeviceHandler {
 
             let start_offset = regexs.len();
 
-            catch_map.insert(start_offset, (Regex::new(regex.as_ref()).unwrap(), catch));
+            // Prepend prefix to prompt_with_sys regex as well
+            let modified_regex =
+                format!(r"^\x00*\r{{0,1}}{}", regex.as_ref().trim_start_matches('^'));
 
-            regexs.push(regex);
+            catch_map.insert(start_offset, (Regex::new(&modified_regex).unwrap(), catch));
+
+            regexs.push(modified_regex);
 
             regex_index_map.insert(start_offset, state_index);
         }
@@ -206,7 +216,7 @@ impl DeviceHandler {
             all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
-            regexs.extend(regex_iter);
+            regexs.extend(regex_iter.into_iter().map(|s| s.as_ref().to_string()));
 
             input_map.insert(state.to_ascii_lowercase(), cmd);
 

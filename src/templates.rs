@@ -12,9 +12,9 @@ pub fn cisco() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            ("Config".to_string(), vec![r"^\x00*\r{0,1}\S+\(\S+\)#\s*$"]),
-            ("Enable".to_string(), vec![r"^\x00*\r{0,1}[^\s#]+#\s*$"]),
-            ("Login".to_string(), vec![r"^\x00*\r{0,1}[^\s<]+>\s*$"]),
+            ("Config".to_string(), vec![r"^\S+\(\S+\)#\s*$"]),
+            ("Enable".to_string(), vec![r"^[^\s#]+#\s*$"]),
+            ("Login".to_string(), vec![r"^[^\s<]+>\s*$"]),
         ],
         // Prompt with sys (empty for cisco in db)
         vec![],
@@ -84,14 +84,8 @@ pub fn huawei() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            (
-                "Config".to_string(),
-                vec![r"^\x00*\r{0,1}(HRP_M|HRP_S){0,1}\[.+]+\s*$"],
-            ),
-            (
-                "Enable".to_string(),
-                vec![r"^\x00*\r{0,1}(RBM_P|RBM_S)?<.+>\s*$"],
-            ),
+            ("Config".to_string(), vec![r"^(HRP_M|HRP_S){0,1}\[.+]+\s*$"]),
+            ("Enable".to_string(), vec![r"^(RBM_P|RBM_S)?<.+>\s*$"]),
         ],
         // Prompt with sys
         vec![],
@@ -154,14 +148,8 @@ pub fn h3c() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            (
-                "Config".to_string(),
-                vec![r"^\x00*\r{0,1}(RBM_P|RBM_S)?\[.+\]\s*$"],
-            ),
-            (
-                "Enable".to_string(),
-                vec![r"^\x00*\r{0,1}(RBM_P|RBM_S)?<.+>\s*$"],
-            ),
+            ("Config".to_string(), vec![r"^(RBM_P|RBM_S)?\[.+\]\s*$"]),
+            ("Enable".to_string(), vec![r"^(RBM_P|RBM_S)?<.+>\s*$"]),
         ],
         // Prompt with sys
         vec![],
@@ -206,10 +194,10 @@ pub fn hillstone() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            ("Enable".to_string(), vec![r"^\x00*\r{0,1}.+#\s\r{0,1}$"]),
+            ("Enable".to_string(), vec![r"^.+#\s\r{0,1}$"]),
             (
                 "Config".to_string(),
-                vec![r"^\x00*\r{0,1}.+\(config.*\)\s*#\s\r{0,1}$"],
+                vec![r"^.+\(config.*\)\s*#\s\r{0,1}$"],
                 // Note: adjusted regex slightly from raw string to be valid rust string if needed,
                 // raw string `^\\x00*\\r{0,1}.+\\(config.*\\)#\\s\\r{0,1}$` -> `r"^\x00*\r{0,1}.+\(config.*\)\#\s\r{0,1}$"`
                 // Actually the db has `(config.*)` so we need `\(config.*\)` in regex.
@@ -296,8 +284,8 @@ pub fn juniper() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            ("Config".to_string(), vec![r"^\x00*\r{0,1}\S+@\S+#\s*$"]),
-            ("Enable".to_string(), vec![r"^\x00*\r{0,1}\S+@\S+>\s*$"]),
+            ("Config".to_string(), vec![r"^\S+@\S+#\s*$"]),
+            ("Enable".to_string(), vec![r"^\S+@\S+>\s*$"]),
         ],
         // Prompt with sys
         vec![],
@@ -354,21 +342,21 @@ pub fn array() -> DeviceHandler {
     DeviceHandler::new(
         // Prompt
         vec![
-            ("Login".to_string(), vec![r"^\x00*\r{0,1}[^\s<]+>\s*$"]),
-            ("Enable".to_string(), vec![r"^\x00*\r{0,1}[^\s#]+#\s*$"]),
-            ("Config".to_string(), vec![r"^\x00*\r{0,1}\S+\(\S+\)#\s*$"]),
+            ("Login".to_string(), vec![r"^[^\s<]+>\s*$"]),
+            ("Enable".to_string(), vec![r"^[^\s#]+#\s*$"]),
+            ("Config".to_string(), vec![r"^\S+\(\S+\)#\s*$"]),
         ],
         // Prompt with sys
         vec![
             (
                 "VSiteConfig".to_string(),
                 "VS",
-                r"^\x00*\r{0,1}(?<VS>\S+)\(\S+\)\$\s*$".to_string(),
+                r"^(?<VS>\S+)\(\S+\)\$\s*$".to_string(),
             ),
             (
                 "VSiteEnable".to_string(),
                 "VS",
-                r"^\x00*\r{0,1}(?<VS>\S+)\$\s*$".to_string(),
+                r"^(?<VS>\S+)\$\s*$".to_string(),
             ),
         ],
         // Write
