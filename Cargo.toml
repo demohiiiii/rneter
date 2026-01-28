@@ -1,0 +1,26 @@
+[package]
+name = "rneter"
+version = "0.1.0"
+edition = "2021"
+authors = ["demohiiiii"]
+license = "MIT"
+description = "SSH connection manager for network devices with intelligent state machine handling"
+documentation = "https://docs.rs/rneter"
+repository = "https://github.com/demohiiiii/rneter"
+homepage = "https://github.com/demohiiiii/rneter"
+readme = "README.md"
+keywords = ["ssh", "network", "device", "automation", "cisco"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+russh = { version = "0.55.0", features = ["des", "dsa"] }
+async-ssh2-tokio = { version = "0.12.2" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+moka = { version = "0.12.13", features = ["future"] }
+once_cell = "1.21.3"
+regex = "1.12.2"
+serde = "1.0.219"
+log = "0.4.27"
+thiserror = "2.0.12"
+anyhow = "1.0.98"
+schemars = { version = "0.9.0" }
