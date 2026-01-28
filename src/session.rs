@@ -16,6 +16,7 @@ use async_ssh2_tokio::{Config, ServerCheckMethod};
 use log::{debug, trace};
 use moka::future::Cache;
 use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
 
 use russh::{ChannelMsg, Preferred};
 use schemars::JsonSchema;
@@ -33,88 +34,79 @@ use crate::error::ConnectError;
 use super::device::{DeviceHandler, IGNORE_START_LINE};
 
 /// Global singleton SSH connection manager.
-///
-/// This is the main entry point for obtaining SSH connections. It automatically
-/// manages connection pooling, caching, and lifecycle.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use rneter::session::MANAGER;
-/// # async fn example() {
-/// let sender = MANAGER.get(
-///     "admin".to_string(),
-///     "192.168.1.1".to_string(),
-///     22,
-///     "password".to_string(),
-///     None,
-///     handler,
-/// ).await.unwrap();
-/// # }
-/// ```
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
 
 /// A shared SSH client instance with state machine tracking.
-///
-/// This struct wraps an SSH client connection and integrates it with a
-/// device handler for intelligent state management and command execution.
 pub struct SharedSshClient {
     client: Client,
     sender: Sender<String>,
     recv: Receiver<String>,
-    handler: DeviceHandler,
-    enable_password: Option<String>,
+    handler: Option<DeviceHandler>,
     prompt: String,
+
+    /// SHA-256 hash of the password, used for connection parameter comparison
+    password_hash: [u8; 32],
+
+    /// SHA-256 hash of the enable password (if present)
+    enable_password_hash: Option<[u8; 32]>,
+
+    /// Initial output captured upon connection (used for device type identification)
+    initial_output: Option<String>,
 }
 
 /// Configuration for a command to execute on a device.
-///
-/// This struct defines all parameters needed to execute a command,
-/// including the target device mode and timeout settings.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Command {
-    /// Type of command (e.g., "show", "config")
+    /// Command type - Identifies the functional category of the command
+    /// Common values:
+    /// - "show": Query commands, used to retrieve device status information
+    /// - "config": Configuration commands, used to modify device settings
+    /// - "exec": Execution commands, used to perform specific operations
+    /// - "debug": Debug commands, used for troubleshooting
     pub cmd_type: String,
 
-    /// Target device mode/state for command execution
+    /// Execution mode - Specifies the device mode in which the command should run
+    /// Common values:
+    /// - "Login": User mode (limited privileges)
+    /// - "Enable": Privileged mode (admin privileges)
+    /// - "Config": Configuration mode (for modifying settings)
+    /// - Specific mode names depend on the device type and vendor
     pub mode: String,
 
-    /// The actual command string to execute
+    /// The actual command content to execute on the device
+    /// Examples:
+    /// - "show version" - Display device version information
+    /// - "show interface status" - Display interface status
+    /// - "configure terminal" - Enter configuration mode
+    /// - "interface GigabitEthernet0/1" - Enter interface configuration
     pub command: String,
 
-    /// Optional template for command output parsing
+    /// Output parsing template - Name of the template used to structure the command output
+    /// Supports TextFSM templates to convert unstructured text output into structured data
+    /// Examples:
+    /// - "cisco_ios_show_version" - Parse Cisco device version info
+    /// - "cisco_ios_show_interface" - Parse interface status info
+    /// - If empty, the raw text output is returned
     pub template: String,
 
-    /// Timeout in seconds for command execution
-    pub timeout: u64,
+    /// Single command timeout (seconds) - Maximum execution time for this command
+    /// If None, defaults to 60 seconds
+    /// If command execution exceeds this value, it will be forcibly terminated
+    pub timeout: Option<u64>,
 }
 
 /// A job representing a command execution request.
-///
-/// This struct is used internally for passing command execution requests
-/// through async channels with a oneshot responder for the result.
 pub struct CmdJob {
-    /// The command to execute
     pub data: Command,
-
-    /// Optional system name for state-specific command execution
     pub sys: Option<String>,
-
     /// Oneshot channel sender for returning the execution result
     pub responder: oneshot::Sender<Result<Output, ConnectError>>,
 }
 
 /// The output result of a command execution.
-///
-/// Contains both the cleaned command output and execution status.
 pub struct Output {
-    /// Whether the command executed successfully (no errors detected)
     pub success: bool,
-
-    /// Cleaned output content with prompt and echo removed
     pub content: String,
-
-    /// Complete raw output including prompts and echoed command
     pub all: String,
 }
 
@@ -122,24 +114,6 @@ pub struct Output {
 ///
 /// Manages a cache of SSH connections with automatic reconnection and
 /// connection pooling. Connections are cached for 5 minutes of inactivity.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use rneter::session::SshConnectionManager;
-///
-/// # async fn example() {
-/// let manager = SshConnectionManager::new();
-/// let sender = manager.get(
-///     "admin".to_string(),
-///     "192.168.1.1".to_string(),
-///     22,
-///     "password".to_string(),
-///     None, // No enable password
-///     handler,
-/// ).await.unwrap();
-/// # }
-/// ```
 #[derive(Clone)]
 pub struct SshConnectionManager {
     cache: Cache<String, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
@@ -147,11 +121,8 @@ pub struct SshConnectionManager {
 
 impl SshConnectionManager {
     /// Creates a new SSH connection manager.
-    ///
-    /// The manager caches up to 100 connections and automatically evicts
-    /// connections that have been idle for more than 5 minutes.
     pub fn new() -> Self {
-        // Cache up to 100 connections, evict after 5 minutes of inactivity
+        // Cache up to 100 connections. Evict after 5 minutes of inactivity.
         let cache = Cache::builder()
             .max_capacity(100)
             .time_to_idle(Duration::from_secs(5 * 60)) // Evict after 5 minutes idle
@@ -163,26 +134,8 @@ impl SshConnectionManager {
     /// Gets a cached SSH client or creates a new one.
     ///
     /// This method first checks the cache for an existing healthy connection.
-    /// If found and the connection is still active, it returns the sender for
-    /// that connection. Otherwise, it creates a new connection, caches it, and
-    /// returns a sender.
-    ///
-    /// # Arguments
-    ///
-    /// * `user` - SSH username
-    /// * `addr` - Device IP address or hostname
-    /// * `port` - SSH port (typically 22)
-    /// * `password` - SSH password
-    /// * `enable_password` - Optional enable/privileged mode password
-    /// * `handler` - Device state machine handler
-    ///
-    /// # Returns
-    ///
-    /// A sender channel for submitting command jobs to the connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the SSH connection cannot be established.
+    /// If found and the connection parameters match, it reuses the connection.
+    /// Otherwise, it creates a new connection, caches it, and returns the sender.
     pub async fn get(
         &self,
         user: String,
@@ -197,10 +150,42 @@ impl SshConnectionManager {
         // Check if a healthy, usable connection exists in the cache
         if let Some((sender, client)) = self.cache.get(&device_addr).await {
             debug!("Cache hit: {}", device_addr);
-            if client.read().await.is_connected() {
-                return Ok(sender);
+
+            let client_guard = client.read().await;
+            if client_guard.is_connected() {
+                // Check if connection parameters match
+                if client_guard.matches_connection_params(
+                    &password,
+                    &enable_password,
+                    &Some(&handler),
+                ) {
+                    debug!("Cached connection params match, reusing: {}", device_addr);
+                    return Ok(sender);
+                } else {
+                    debug!(
+                        "Cached connection params mismatch, recreating: {}",
+                        device_addr
+                    );
+                    // Release read lock
+                    drop(client_guard);
+
+                    // Safely disconnect the old connection
+                    match self
+                        .safely_disconnect_cached_connection(&device_addr, client.clone())
+                        .await
+                    {
+                        Ok(_) => debug!("Old connection safely disconnected: {}", device_addr),
+                        Err(e) => debug!(
+                            "Error disconnecting old connection: {} - {}",
+                            device_addr, e
+                        ),
+                    }
+
+                    // Remove from cache
+                    self.cache.invalidate(&device_addr).await;
+                }
             } else {
-                // If the connection is closed, remove it from the cache
+                // If connection is closed, remove from cache
                 debug!("Cached connection {} is closed. Removing.", device_addr);
                 self.cache.invalidate(&device_addr).await;
             }
@@ -208,10 +193,10 @@ impl SshConnectionManager {
             debug!("Cache miss, creating new connection for {}...", device_addr);
         }
 
-        // Create a new client. The `new` function now automatically detects prompts
-        // and ensures the shell is ready
+        // Create a new client. `new` automatically detects prompt and ensures shell is ready.
         let ssh_client =
-            SharedSshClient::new(user, addr, port, password, enable_password, handler).await?;
+            SharedSshClient::new(user, addr, port, password, enable_password, Some(handler))
+                .await?;
         let client_arc = Arc::new(RwLock::new(ssh_client));
 
         let (tx, mut rx) = mpsc::channel::<CmdJob>(32);
@@ -227,8 +212,14 @@ impl SshConnectionManager {
                     }
                     let res = {
                         let mut client_guard = client_clone.write().await;
+                        let timeout = Duration::from_secs(job.data.timeout.unwrap_or(60));
                         client_guard
-                            .write_with_mode(&job.data.command, &job.data.mode, job.sys.as_ref())
+                            .write_with_mode_and_timeout(
+                                &job.data.command,
+                                &job.data.mode,
+                                job.sys.as_ref(),
+                                timeout,
+                            )
                             .await
                     };
 
@@ -244,6 +235,63 @@ impl SshConnectionManager {
 
         Ok(tx)
     }
+
+    /// Gets the initial output from a connection.
+    pub async fn get_initial_output(
+        &self,
+        user: String,
+        addr: String,
+        port: u16,
+    ) -> Result<Option<String>, ConnectError> {
+        let device_addr = format!("{user}@{addr}:{port}_no_handler");
+
+        // Get connection from cache
+        if let Some((_, client)) = self.cache.get(&device_addr).await {
+            let client_guard = client.read().await;
+
+            if !client_guard.is_connected() {
+                return Err(ConnectError::ConnectClosedError);
+            }
+
+            Ok(client_guard.get_initial_output().cloned())
+        } else {
+            Err(ConnectError::InternalServerError(format!(
+                "Connection not found: {}",
+                device_addr
+            )))
+        }
+    }
+
+    /// Safely disconnects a cached connection.
+    async fn safely_disconnect_cached_connection(
+        &self,
+        device_addr: &str,
+        client_arc: Arc<RwLock<SharedSshClient>>,
+    ) -> Result<(), ConnectError> {
+        debug!("Safely disconnecting cached connection: {}", device_addr);
+
+        // Get write lock to ensure exclusive access
+        let mut client_guard = client_arc.write().await;
+
+        // Check if connection is still active
+        if !client_guard.is_connected() {
+            debug!("Connection {} already disconnected, skipping", device_addr);
+            return Ok(());
+        }
+
+        // Safely close connection
+        match client_guard.close().await {
+            Ok(_) => {
+                debug!("Connection {} safely closed", device_addr);
+                Ok(())
+            }
+            Err(e) => {
+                debug!("Error closing connection {}: {}", device_addr, e);
+                // Consider success even on error as connection will be dropped
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Default for SshConnectionManager {
@@ -253,43 +301,103 @@ impl Default for SshConnectionManager {
 }
 
 impl SharedSshClient {
-    /// Creates a new SSH client connection.
-    ///
-    /// Establishes an SSH connection, sets up a PTY, starts a shell, and waits
-    /// for the initial prompt to appear. This ensures the connection is fully
-    /// ready before returning.
-    ///
-    /// # Arguments
-    ///
-    /// * `user` - SSH username
-    /// * `addr` - Device IP address or hostname  
-    /// * `port` - SSH port
-    /// * `password` - SSH password
-    /// * `enable_password` - Optional enable password for privileged mode
-    /// * `handler` - Device state machine handler
-    ///
-    /// # Returns
-    ///
-    /// A ready-to-use `SharedSshClient` instance.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if connection fails or the initial prompt is not detected
-    /// within 60 seconds.
+    /// Calculates SHA-256 hash of the password.
+    fn calculate_password_hash(password: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        hasher.finalize().into()
+    }
+
+    /// Calculates SHA-256 hash of the enable password (if present).
+    fn calculate_enable_password_hash(enable_password: &Option<String>) -> Option<[u8; 32]> {
+        enable_password.as_ref().map(|pwd| {
+            let mut hasher = Sha256::new();
+            hasher.update(pwd.as_bytes());
+            hasher.finalize().into()
+        })
+    }
+
+    /// Checks if connection parameters match (used for cache validation).
+    pub fn matches_connection_params(
+        &self,
+        password: &str,
+        enable_password: &Option<String>,
+        handler: &Option<&DeviceHandler>,
+    ) -> bool {
+        // Compare password hash
+        let password_hash = Self::calculate_password_hash(password);
+        if self.password_hash != password_hash {
+            debug!("Password hash mismatch");
+            return false;
+        }
+
+        // Compare enable password hash
+        let enable_password_hash = Self::calculate_enable_password_hash(enable_password);
+        if self.enable_password_hash != enable_password_hash {
+            debug!("Enable password hash mismatch");
+            return false;
+        }
+
+        // Compare handler (compare core configuration)
+        match (&self.handler, handler) {
+            (Some(self_handler), Some(other_handler)) => {
+                if !self_handler.is_equivalent(other_handler) {
+                    debug!("Device handler configuration mismatch");
+                    return false;
+                }
+            }
+            (None, None) => {
+                // Both have no handler, match
+            }
+            _ => {
+                debug!("Handler presence mismatch");
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Safely closes the connection.
+    pub async fn close(&mut self) -> Result<(), ConnectError> {
+        debug!("Safely closing SSH connection...");
+
+        // 1. Stop receiving new data
+        self.recv.close();
+
+        // 2. Try sending exit command (if connected)
+        if self.is_connected() {
+            // Send exit command to attempt graceful exit
+            if let Err(e) = self.sender.send("exit\n".to_string()).await {
+                debug!("Failed to send exit command: {:?}", e);
+            }
+
+            // Give some time for command execution
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // 3. Close underlying SSH client
+        // async-ssh2-tokio Client currently closes automatically on drop
+        // but we can explicitly call disconnect if available/needed
+
+        debug!("SSH connection safely closed");
+        Ok(())
+    }
+
     async fn new(
         user: String,
         addr: String,
         port: u16,
         password: String,
         enable_password: Option<String>,
-        handler: DeviceHandler,
+        mut handler: Option<DeviceHandler>,
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
 
         let config = Config {
             preferred: Preferred {
                 kex: Cow::Borrowed(config::ALL_KEX_ORDER),
-                key: Cow::Borrowed(&config::ALL_KEY_TYPES),
+                key: Cow::Borrowed(config::ALL_KEY_TYPES),
                 cipher: Cow::Borrowed(config::ALL_CIPHERS),
                 mac: Cow::Borrowed(config::ALL_MAC_ALGORITHMS),
                 compression: Cow::Borrowed(config::ALL_COMPRESSION_ALGORITHMS),
@@ -306,14 +414,14 @@ impl SharedSshClient {
             config,
         )
         .await?;
-        debug!("{}  TCP connection successful", device_addr);
+        debug!("{} TCP connection successful", device_addr);
 
         let mut channel = client.get_channel().await?;
         channel
             .request_pty(false, "xterm", 800, 600, 0, 0, &[])
             .await?;
         channel.request_shell(false).await?;
-        debug!("{}  Shell request successful", device_addr);
+        debug!("{} Shell request successful", device_addr);
 
         let (sender_to_shell, mut receiver_from_user) = mpsc::channel::<String>(256);
         let (sender_to_user, mut receiver_from_shell) = mpsc::channel::<String>(256);
@@ -330,15 +438,14 @@ impl SharedSshClient {
                     Some(msg) = channel.wait() => {
                         match msg {
                             ChannelMsg::Data { ref data } => {
-                                if let Ok(s) = std::str::from_utf8(data) {
-                                    if sender_to_user.send(s.to_string()).await.is_err() {
-                                        debug!("{} Shell output receiver has been dropped. Closing task.", device_addr);
+                                if let Ok(s) = std::str::from_utf8(data)
+                                    && sender_to_user.send(s.to_string()).await.is_err() {
+                                        debug!("{} Shell output receiver dropped. Closing task.", device_addr);
                                         break;
                                     }
-                                }
                             }
                             ChannelMsg::ExitStatus { exit_status } => {
-                                debug!("{} Shell has exited with status code: {}", device_addr, exit_status);
+                                debug!("{} Shell exited with status code: {}", device_addr, exit_status);
                                 let _ = channel.eof().await;
                                 break;
                             }
@@ -351,52 +458,68 @@ impl SharedSshClient {
                     }
                 }
             }
-            debug!("{} SSH I/O task has ended.", device_addr);
+            let _ = MANAGER.cache.invalidate(&device_addr).await;
+            debug!("{} SSH I/O task ended.", device_addr);
         });
 
         let mut buffer = String::new();
-        let mut params = HashMap::new();
-        if let Some(enable) = enable_password.as_ref() {
-            params.insert("EnablePassword".to_string(), format!("{}\n", enable));
-        }
         let mut prompt = String::new();
+        let mut initial_output = String::new();
 
-        let mut handler = handler;
+        // If handler exists, perform initial setup
+        if let Some(ref mut h) = handler {
+            let mut params = HashMap::new();
+            if let Some(enable) = enable_password.as_ref() {
+                params.insert("EnablePassword".to_string(), format!("{}\n", enable));
+            }
+            h.dyn_param = params;
+        }
 
-        handler.dyn_param = params;
-
-        // Wait for prompt output
+        // Wait for prompt output or collect initial output
         let _ = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if let Some(data) = receiver_from_shell.recv().await {
                     trace!("{:?}", data);
                     buffer.push_str(&data);
+                    initial_output.push_str(&data);
 
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer.drain(..=newline_pos).collect::<String>();
-                        let trimmed_line = line.trim_end();
+                    // If handler exists, perform normal prompt recognition flow
+                    if let Some(ref mut h) = handler {
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer.drain(..=newline_pos).collect::<String>();
+                            let trimmed_line = line.trim_end();
 
-                        handler.read(trimmed_line);
-                    }
-
-                    if !buffer.is_empty() {
-                        if handler.read_prompt(&buffer) {
-                            prompt.push_str(&buffer);
-                            handler.read(&buffer);
-                            return Ok(());
+                            h.read(trimmed_line);
                         }
-                        if let Some((c, _)) = handler.read_need_write(&buffer) {
-                            handler.read(&buffer);
-                            sender_to_shell.send(c).await?;
+
+                        if !buffer.is_empty() {
+                            if h.read_prompt(&buffer) {
+                                prompt.push_str(&buffer);
+                                h.read(&buffer);
+                                return Ok(());
+                            }
+                            if let Some((c, _)) = h.read_need_write(&buffer) {
+                                h.read(&buffer);
+                                sender_to_shell.send(c).await?;
+                            }
+                        }
+                    } else {
+                        // If no handler, just collect data (handled in new_without_handler scenarios)
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            buffer.drain(..=newline_pos);
                         }
                     }
                 } else {
-                    // Channel has closed
+                    // Channel closed
                     return Err(ConnectError::ChannelDisconnectError);
                 }
             }
         })
         .await;
+
+        // Calculate and store password hash
+        let password_hash = Self::calculate_password_hash(&password);
+        let enable_password_hash = Self::calculate_enable_password_hash(&enable_password);
 
         Ok(Self {
             client,
@@ -404,65 +527,66 @@ impl SharedSshClient {
             recv: receiver_from_shell,
             handler,
             prompt,
-            enable_password,
+            password_hash,
+            enable_password_hash,
+            initial_output: if initial_output.is_empty() {
+                None
+            } else {
+                Some(initial_output)
+            },
         })
     }
 
-    /// Checks if the underlying SSH client is still connected.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the connection is active, `false` if it has been closed.
+    /// Gets the initial output captured during connection establishment.
+    pub fn get_initial_output(&self) -> Option<&String> {
+        self.initial_output.as_ref()
+    }
+
+    /// Checks if the underlying SSH connection is still active.
     pub fn is_connected(&self) -> bool {
         !self.client.is_closed()
     }
 
-    /// Executes a command and waits for its complete output by matching the prompt.
+    /// Executes a command and waits for the full output by matching the prompt.
     ///
-    /// This method sends a command to the device, reads the output line by line,
-    /// and waits until the prompt is detected, indicating the command has completed.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The command to execute
-    ///
-    /// # Returns
-    ///
-    /// An `Output` containing the command results.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The channel is disconnected
-    /// - The command times out (60 seconds)
-    /// - An error state is detected
+    /// Uses the default timeout of 60 seconds.
     pub async fn write(&mut self, command: &str) -> Result<Output, ConnectError> {
-        let Self {
-            recv,
-            prompt,
-            .. // ignore other fields like `client`
-        } = self;
+        self.write_with_timeout(command, Duration::from_secs(60))
+            .await
+    }
 
-        // 1. Clear any residual data from the receiver
+    /// Executes a command with a custom timeout.
+    pub async fn write_with_timeout(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<Output, ConnectError> {
+        // Ensure handler exists
+        let handler = self.handler.as_mut().ok_or_else(|| {
+            ConnectError::InternalServerError("Connection handler not initialized".to_string())
+        })?;
+
+        let recv = &mut self.recv;
+        let prompt = &mut self.prompt;
+
+        // 1. Clear any residual data in the receiver
         while recv.try_recv().is_ok() {}
 
-        // 2. Send the command to the remote shell
+        // 2. Send command to remote shell
         let full_command = format!("{}\n", command);
 
         self.sender.send(full_command).await?;
 
         // 3. Receive data
         let mut clean_output = String::new();
-        let mut line_buffer = String::new(); // Buffer for assembling data into complete lines
-        let command_timeout = Duration::from_secs(60); // Overall timeout for the command
+        let mut line_buffer = String::new(); // Accumulates data into complete lines
 
         let mut line = String::new();
 
-        let result = tokio::time::timeout(command_timeout, async {
+        let result = tokio::time::timeout(timeout, async {
             let mut is_error = false;
             loop {
                 if let Some(data) = recv.recv().await {
-                    // trace!("{:?}", data);
                     line_buffer.push_str(&data);
 
                     while let Some(newline_pos) = line_buffer.find('\n') {
@@ -471,20 +595,20 @@ impl SharedSshClient {
                         let trim_start = IGNORE_START_LINE.replace(&line, "");
                         let trimmed_line = trim_start.trim_end();
 
-                        self.handler.read(trimmed_line);
+                        handler.read(trimmed_line);
 
-                        if self.handler.error() {
+                        if handler.error() {
                             is_error = true;
                         }
 
                         clean_output.push_str(&trim_start);
                     }
 
-                    // Stage 2: Check remaining incomplete line in line_buffer (likely the prompt)
-                    // This check is crucial for handling prompts without newlines
+                    // Stage 2: Check remaining incomplete line in buffer (likely the prompt)
+                    // Critical for prompts without newlines
                     if !line_buffer.is_empty() {
-                        if self.handler.read_prompt(&line_buffer) {
-                            self.handler.read(&line_buffer);
+                        if handler.read_prompt(&line_buffer) {
+                            handler.read(&line_buffer);
                             clean_output.push_str(&line_buffer);
                             *prompt = line_buffer;
                             if is_error {
@@ -492,8 +616,8 @@ impl SharedSshClient {
                             }
                             return Ok(true);
                         }
-                        if let Some((c, is_record)) = self.handler.read_need_write(&line_buffer) {
-                            self.handler.read(&line_buffer);
+                        if let Some((c, is_record)) = handler.read_need_write(&line_buffer) {
+                            handler.read(&line_buffer);
                             if !is_record {
                                 line_buffer.clear();
                             }
@@ -502,7 +626,7 @@ impl SharedSshClient {
                         }
                     }
                 } else {
-                    // Channel has closed
+                    // Channel closed
                     return Err(ConnectError::ChannelDisconnectError);
                 }
             }
@@ -513,26 +637,26 @@ impl SharedSshClient {
             return Err(ConnectError::ExecTimeout(clean_output));
         }
 
-        let success;
-
-        match result.unwrap() {
-            Ok(b) => success = b,
+        let success = match result.unwrap() {
+            Ok(b) => b,
             Err(err) => {
                 return Err(err);
             }
-        }
+        };
 
         let all = clean_output;
 
         let mut content = all.as_str();
 
+        // Remove the echoed command from the beginning of the output
         if !command.is_empty() && content.starts_with(command) {
             content = content
                 .strip_prefix(command)
                 .unwrap_or(content)
-                .trim_start_matches(|c| c == '\n' || c == '\r');
+                .trim_start_matches(['\n', '\r']);
         }
 
+        // Remove the trailing prompt
         let content = if let Some(pos) = content.rfind('\n') {
             &content[..pos]
         } else {
@@ -540,59 +664,64 @@ impl SharedSshClient {
         };
 
         Ok(Output {
-            success: success,
+            success,
             content: content.to_string(),
-            all: all,
+            all,
         })
     }
 
     /// Executes a command in a specific device mode.
     ///
-    /// This method handles automatic state transitions before executing the command.
-    /// If the device is not in the target mode, it will automatically execute the
-    /// necessary commands to transition to that mode.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The command to execute
-    /// * `mode` - The target device mode/state
-    /// * `sys` - Optional system name for system-specific states
-    ///
-    /// # Returns
-    ///
-    /// An `Output` containing the combined output of all transition commands
-    /// and the final command.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - State transition fails
-    /// - The target state is unreachable
-    /// - Command execution fails
+    /// Automatically handles state transitions to reach the target mode.
     pub async fn write_with_mode(
         &mut self,
         command: &str,
         mode: &str,
         sys: Option<&String>,
     ) -> Result<Output, ConnectError> {
-        let trans_cmds = self.handler.trans_state_write(mode, sys)?;
+        self.write_with_mode_and_timeout(command, mode, sys, Duration::from_secs(60))
+            .await
+    }
+
+    /// Executes a command in a specific device mode with a custom timeout.
+    pub async fn write_with_mode_and_timeout(
+        &mut self,
+        command: &str,
+        mode: &str,
+        sys: Option<&String>,
+        timeout: Duration,
+    ) -> Result<Output, ConnectError> {
+        // Ensure handler exists
+        let handler = self.handler.as_ref().ok_or_else(|| {
+            ConnectError::InternalServerError("Connection handler not initialized".to_string())
+        })?;
+
+        let temp_mode = mode.to_ascii_lowercase();
+        let mode = temp_mode.as_str();
+
+        let trans_cmds = handler.trans_state_write(mode, sys)?;
         let mut all = self.prompt.clone();
+
+        // Execute transition commands
         for (t_cmd, target_state) in trans_cmds {
-            debug!("trans state command: {}", t_cmd);
-            let mut mode_output = self.write(&t_cmd).await?;
+            debug!("Trans state command: {}", t_cmd);
+            let mut mode_output = self.write_with_timeout(&t_cmd, timeout).await?;
             all.push_str(mode_output.all.as_str());
-            if mode_output.success == false {
+            if !mode_output.success {
                 mode_output.all = all;
                 return Ok(mode_output);
             }
 
-            if !self.handler.current_state().eq(&target_state) {
+            let handler = self.handler.as_ref().unwrap(); // Handler definitely exists here
+            if !handler.current_state().eq(&target_state) {
                 mode_output.success = false;
                 mode_output.all = all;
                 return Ok(mode_output);
             }
         }
-        let mut cmd_output = self.write(command).await?;
+
+        // Execute the actual command
+        let mut cmd_output = self.write_with_timeout(command, timeout).await?;
 
         all.push_str(cmd_output.all.as_str());
 

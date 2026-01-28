@@ -31,22 +31,12 @@ rneter = "0.1"
 
 ```rust
 use rneter::session::{MANAGER, Command, CmdJob};
-use rneter::device::DeviceHandler;
-use std::collections::HashMap;
+use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 配置设备处理器的状态机
-    let handler = DeviceHandler::new(
-        vec![("UserMode".to_string(), vec![r">\s*$"])],
-        vec![],
-        vec![],
-        vec![r"--More--"],
-        vec![r"% Invalid"],
-        vec![],
-        vec![],
-        HashMap::new(),
-    );
+    // 使用预定义的设备模板（例如：Cisco）
+    let handler = templates::cisco();
 
     // 从管理器获取一个连接
     let sender = MANAGER.get(
@@ -63,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = CmdJob {
         data: Command {
             cmd_type: "show".to_string(),
-            mode: "UserMode".to_string(),
+            mode: "Enable".to_string(), // Cisco 模板使用 "Enable" 模式
             command: "show version".to_string(),
             template: String::new(),
             timeout: 60,

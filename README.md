@@ -31,22 +31,12 @@ rneter = "0.1"
 
 ```rust
 use rneter::session::{MANAGER, Command, CmdJob};
-use rneter::device::DeviceHandler;
-use std::collections::HashMap;
+use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure device handler with state machine
-    let handler = DeviceHandler::new(
-        vec![("UserMode".to_string(), vec![r">\s*$"])],
-        vec![],
-        vec![],
-        vec![r"--More--"],
-        vec![r"% Invalid"],
-        vec![],
-        vec![],
-        HashMap::new(),
-    );
+    // Use a predefined device template (e.g., Cisco)
+    let handler = templates::cisco();
 
     // Get a connection from the manager
     let sender = MANAGER.get(
@@ -63,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = CmdJob {
         data: Command {
             cmd_type: "show".to_string(),
-            mode: "UserMode".to_string(),
+            mode: "Enable".to_string(), // Cisco template uses "Enable" mode
             command: "show version".to_string(),
             template: String::new(),
             timeout: 60,

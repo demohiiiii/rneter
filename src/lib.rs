@@ -17,23 +17,13 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use rneter::session::{MANAGER, Command};
-//! use rneter::device::DeviceHandler;
-//! use std::collections::HashMap;
+//! use rneter::session::{MANAGER, Command, CmdJob};
+//! use rneter::templates;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure device handler with state machine
-//!     let handler = DeviceHandler::new(
-//!         vec![("UserMode".to_string(), vec![r">\s*$"])],
-//!         vec![],
-//!         vec![],
-//!         vec![r"--More--"],
-//!         vec![r"% Invalid"],
-//!         vec![],
-//!         vec![],
-//!         HashMap::new(),
-//!     );
+//!     // Use a predefined device template (e.g., Cisco)
+//!     let handler = templates::cisco();
 //!
 //!     // Get a connection from the manager
 //!     let sender = MANAGER.get(
@@ -47,10 +37,10 @@
 //!
 //!     // Execute a command
 //!     let (tx, rx) = tokio::sync::oneshot::channel();
-//!     let cmd = rneter::session::CmdJob {
+//!     let cmd = CmdJob {
 //!         data: Command {
 //!             cmd_type: "show".to_string(),
-//!             mode: "UserMode".to_string(),
+//!             mode: "Enable".to_string(), // Cisco template uses "Enable" mode
 //!             command: "show version".to_string(),
 //!             template: String::new(),
 //!             timeout: 60,
@@ -72,9 +62,11 @@
 //! - [`session::SshConnectionManager`] - Manages SSH connection pool and lifecycle
 //! - [`device::DeviceHandler`] - Handles device state machine and transitions
 //! - [`error::ConnectError`] - Error types for connection and state operations
-//! - [`config`] - SSH configuration constants for maximum compatibility
+//! - [`config`] - SSH configuration constants
+//! - [`templates`] - Predefined device configurations for common vendors for maximum compatibility
 
 pub mod config;
 pub mod device;
 pub mod error;
 pub mod session;
+pub mod templates;

@@ -10,41 +10,26 @@ use tokio::sync::mpsc::error::SendError;
 #[derive(Error, Debug)]
 pub enum ConnectError {
     /// The target state cannot be reached from the current state.
-    ///
-    /// This occurs when trying to transition to a state that is not reachable
-    /// through any path in the device's state graph.
     #[error("unreachable state {0}")]
     UnreachableState(String),
 
-    /// The target state does not exist in the device's state configuration.
-    #[error("target state not exist")]
+    /// The target state does not exist in the configuration.
+    #[error("target state does not exist")]
     TargetStateNotExistError,
 
     /// The SSH channel was disconnected while waiting for a prompt.
-    ///
-    /// This typically happens when the remote device closes the connection
-    /// unexpectedly during initialization or command execution.
-    #[error("channel disconnect on wait prompt")]
+    #[error("channel disconnected while waiting for prompt")]
     ChannelDisconnectError,
 
     /// The SSH connection has been closed.
-    ///
-    /// This error is returned when attempting to use a connection that has
-    /// already been closed or terminated.
-    #[error("connect closed")]
+    #[error("connection closed")]
     ConnectClosedError,
 
     /// No exit command is defined for the specified state.
-    ///
-    /// This occurs when trying to exit from a state that doesn't have an
-    /// exit path configured in the device handler.
     #[error("{0} no exit command")]
     NoExitCommandError(String),
 
     /// Command execution timed out.
-    ///
-    /// The command did not complete within the configured timeout period.
-    /// The error contains the partial output received before the timeout.
     #[error("exec command timeout: {0}")]
     ExecTimeout(String),
 
@@ -59,4 +44,8 @@ pub enum ConnectError {
     /// Failed to send data through the channel.
     #[error("Failed to send data: {0}")]
     SendDataError(#[from] SendError<String>),
+
+    /// An internal server error occurred.
+    #[error("Internal server error: {0}")]
+    InternalServerError(String),
 }

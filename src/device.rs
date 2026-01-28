@@ -12,19 +12,6 @@ use regex::{Regex, RegexSet};
 
 use crate::error::ConnectError;
 
-/// A state machine handler for managing device interactions.
-///
-/// `DeviceHandler` implements a finite state machine that tracks the current state
-/// of a network device (e.g., user mode, enable mode, config mode) and handles
-/// automatic transitions between states. It uses regex patterns to detect prompts
-/// and state changes, and maintains a graph of possible state transitions.
-///
-/// # State Machine Concepts
-///
-/// - **States**: Different modes the device can be in (e.g., "UserMode", "EnableMode")
-/// - **Prompts**: Regex patterns that identify when the device is in a particular state
-/// - **Transitions**: Commands that move the device from one state to another
-/// - **Edges**: The graph of allowed state transitions with associated commands
 pub struct DeviceHandler {
     /// Index of the current state in the `all_states` vector
     current_state_index: usize,
@@ -68,11 +55,6 @@ pub struct DeviceHandler {
 }
 
 /// Predefined states that exist in every device handler.
-///
-/// These states are always present and have special meanings:
-/// - `Output`: Default state for regular command output
-/// - `More`: State for paginated output (e.g., "--More--" prompts)
-/// - `Error`: State indicating an error occurred
 static PRE_STATE: Lazy<Vec<String>> = Lazy::new(|| {
     vec![
         "Output".to_string(),
@@ -82,6 +64,59 @@ static PRE_STATE: Lazy<Vec<String>> = Lazy::new(|| {
 });
 
 impl DeviceHandler {
+    /// Checks if two DeviceHandlers are equivalent (used for connection parameter comparison).
+    pub fn is_equivalent(&self, other: &DeviceHandler) -> bool {
+        // Compare core state configurations
+        if self.all_states != other.all_states {
+            return false;
+        }
+
+        // Compare edge configurations (state transition graph)
+        if self.edges != other.edges {
+            return false;
+        }
+
+        // Compare input map
+        if self.input_map != other.input_map {
+            return false;
+        }
+
+        // Compare prompt index range
+        if self.prompt_index != other.prompt_index {
+            return false;
+        }
+
+        if self.sys_prompt_index != other.sys_prompt_index {
+            return false;
+        }
+
+        // Compare catch map (compare keys and capture group names only)
+        if self.catch_map.len() != other.catch_map.len() {
+            return false;
+        }
+
+        for (key, (_, group_name)) in &self.catch_map {
+            if let Some((_, other_group_name)) = other.catch_map.get(key) {
+                if group_name != other_group_name {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Compare regex index map
+        if self.regex_index_map != other.regex_index_map {
+            return false;
+        }
+
+        // Note: We do not compare current_state_index, dyn_param, sys, etc., as these
+        // are runtime states that change during the connection.
+        // We also don't compare regex content directly because RegexSet doesn't support comparison.
+
+        true
+    }
+
     /// Creates a new `DeviceHandler` with the specified state machine configuration.
     ///
     /// # Arguments
@@ -94,24 +129,6 @@ impl DeviceHandler {
     /// * `edges` - State transition graph: (from, command, to, is_exit, needs_format)
     /// * `ignore_errors` - Regex patterns for errors that should be ignored
     /// * `dyn_param` - Dynamic parameters for command/input substitution
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use rneter::device::DeviceHandler;
-    /// use std::collections::HashMap;
-    ///
-    /// let handler = DeviceHandler::new(
-    ///     vec![("UserMode".to_string(), vec![r">"])],
-    ///     vec![],
-    ///     vec![],
-    ///     vec![r"--More--"],
-    ///     vec![r"% Invalid"],
-    ///     vec![],
-    ///     vec![],
-    ///     HashMap::new(),
-    /// );
-    /// ```
     pub fn new<I, S>(
         prompt: Vec<(String, I)>,
         prompt_with_sys: Vec<(String, S, String)>,
@@ -126,7 +143,10 @@ impl DeviceHandler {
         S: AsRef<str> + Clone,
         I: IntoIterator<Item = S>,
     {
-        let mut all_states: Vec<String> = PRE_STATE.iter().map(|s| s.to_string()).collect();
+        let mut all_states: Vec<String> = PRE_STATE
+            .iter()
+            .map(|s| s.to_string().to_ascii_lowercase())
+            .collect();
 
         let mut regexs: Vec<S> = Vec::new();
         let mut regex_index_map = HashMap::new();
@@ -146,7 +166,7 @@ impl DeviceHandler {
         for (state, regex_iter) in prompt {
             // The new state's index is the current length of all_states
             let state_index = all_states.len();
-            all_states.push(state);
+            all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
             regexs.extend(regex_iter);
@@ -163,11 +183,11 @@ impl DeviceHandler {
         for (state, regex, catch) in prompt_with_sys {
             // The new state's index is the current length of all_states
             let state_index = all_states.len();
-            all_states.push(state.clone());
+            all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
 
-            catch_map.insert(start_offset, (Regex::new(&regex.as_ref()).unwrap(), catch));
+            catch_map.insert(start_offset, (Regex::new(regex.as_ref()).unwrap(), catch));
 
             regexs.push(regex);
 
@@ -183,19 +203,19 @@ impl DeviceHandler {
         for (state, cmd, regex_iter) in write {
             // The new state's index is the current length of all_states
             let state_index = all_states.len();
-            all_states.push(state.clone());
+            all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
             regexs.extend(regex_iter);
 
-            input_map.insert(state, cmd);
+            input_map.insert(state.to_ascii_lowercase(), cmd);
 
             for i in start_offset..regexs.len() {
                 regex_index_map.insert(i, state_index);
             }
         }
 
-        input_map.insert("More".to_string(), (false, " ".to_string(), false));
+        input_map.insert("more".to_string(), (false, " ".to_string(), false));
 
         let all_regex = RegexSet::new(&regexs).unwrap();
 
@@ -205,6 +225,19 @@ impl DeviceHandler {
         } else {
             Some(RegexSet::new(ignore_iter).unwrap())
         };
+
+        let edges = edges
+            .iter()
+            .map(|(start, cmd, end, exit, format)| {
+                (
+                    start.to_ascii_lowercase(),
+                    cmd.clone(),
+                    end.to_ascii_lowercase(),
+                    *exit,
+                    *format,
+                )
+            })
+            .collect();
 
         Self {
             current_state_index: 0,
@@ -238,16 +271,15 @@ impl DeviceHandler {
     fn line2state(&self, line: &str, need_catch: bool) -> (usize, &str, Option<String>) {
         let matches: Vec<_> = self.all_regex.matches(line).into_iter().collect();
         if matches.is_empty() {
-            return (0, self.all_states.get(0).unwrap(), None);
+            return (0, self.all_states.first().unwrap(), None);
         }
         let mut current_state_catch = None;
-        let index = matches.get(0).unwrap();
-        if need_catch {
-            if let Some((regex, catch)) = self.catch_map.get(index) {
-                if let Some(caps) = regex.captures(line) {
-                    current_state_catch = caps.name(catch).map(|s| s.as_str().to_string());
-                }
-            }
+        let index = matches.first().unwrap();
+        if need_catch
+            && let Some((regex, catch)) = self.catch_map.get(index)
+            && let Some(caps) = regex.captures(line)
+        {
+            current_state_catch = caps.name(catch).map(|s| s.as_str().to_string());
         }
         let state_index = *self.regex_index_map.get(index).unwrap();
         (
@@ -394,16 +426,19 @@ impl DeviceHandler {
         if !self.match_sys_prompt(self.current_state_index) {
             return Ok(None);
         }
-        let mut exit_edges = self.edges.iter().filter(|(_, _, _, exit, _)| *exit);
+        let exit_edges = self.edges.iter().filter(|(_, _, _, exit, _)| *exit);
         let mut edge_map = HashMap::new();
-        while let Some((start, cmd, end, _, format)) = exit_edges.next() {
+        for (start, cmd, end, _, format) in exit_edges {
             edge_map.insert(start, (cmd, end, format));
         }
         let mut path = Vec::new();
         let mut current = &self.current_state().to_string();
         loop {
             if let Some((cmd, end, format)) = edge_map.get(current) {
-                path.push((Self::format_cmd(**format, *cmd, sys), (*end).to_string()));
+                path.push((
+                    Self::format_cmd(**format, cmd, sys.map(|s| s.as_str())),
+                    (*end).to_string(),
+                ));
                 if let Some(index) = self.all_states.iter().position(|v| v.eq(*end)) {
                     if !self.match_sys_prompt(index) {
                         return Ok(Some((*end, path)));
@@ -421,15 +456,15 @@ impl DeviceHandler {
     /// Formats a command string with system name substitution.
     ///
     /// If `format` is true, replaces "{}" in the command with the system name.
-    fn format_cmd(format: bool, cmd: &String, sys: Option<&String>) -> String {
+    fn format_cmd(format: bool, cmd: &str, sys: Option<&str>) -> String {
         if format {
-            if sys.is_some() {
-                cmd.replace("{}", sys.as_ref().unwrap())
+            if let Some(s) = sys {
+                cmd.replace("{}", s)
             } else {
                 String::new()
             }
         } else {
-            cmd.clone()
+            cmd.to_string()
         }
     }
 
@@ -462,17 +497,15 @@ impl DeviceHandler {
 
         let mut switch_path = Vec::new();
 
-        if self.sys.is_some() && sys.is_some() {
-            if self.sys.as_ref().unwrap() != sys.unwrap() {
-                trace!(
-                    "Need to switch system: {} to {}",
-                    self.sys.as_ref().unwrap(),
-                    sys.unwrap()
-                );
-                if let Some((node, exit_path)) = self.exit_until_no_sys(sys)? {
-                    start_node = node;
-                    switch_path.extend(exit_path);
-                }
+        if self.sys.is_some() && sys.is_some() && self.sys.as_ref().unwrap() != sys.unwrap() {
+            trace!(
+                "Need to switch system: {} to {}",
+                self.sys.as_ref().unwrap(),
+                sys.unwrap()
+            );
+            if let Some((node, exit_path)) = self.exit_until_no_sys(sys)? {
+                start_node = node;
+                switch_path.extend(exit_path);
             }
         }
 
@@ -486,10 +519,10 @@ impl DeviceHandler {
         // lists of all outgoing edges `(neighbor_node, edge_label)`.
         let mut adj_list: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (from, label, to, _, format) in &self.edges {
-            adj_list
-                .entry(from.clone())
-                .or_default()
-                .push((to.clone(), Self::format_cmd(*format, label, sys)));
+            adj_list.entry(from.clone()).or_default().push((
+                to.clone(),
+                Self::format_cmd(*format, label, sys.map(|s| s.as_str())),
+            ));
         }
 
         // --- 2. Initialize BFS data structures ---
@@ -543,7 +576,7 @@ impl DeviceHandler {
         let mut path = Vec::new();
 
         // Backtrack from destination to start using the predecessor map
-        while &current != start_node {
+        while current != start_node {
             if let Some((parent, edge_label)) = predecessors.get(&current) {
                 path.push((edge_label.clone(), current.clone()));
                 current = parent.clone();
