@@ -52,10 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let cmd = CmdJob {
         data: Command {
-            cmd_type: "show".to_string(),
             mode: "Enable".to_string(), // Cisco template uses "Enable" mode
             command: "show version".to_string(),
-            template: String::new(),
             timeout: Some(60),
         },
         sys: None,

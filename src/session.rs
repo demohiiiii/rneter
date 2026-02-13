@@ -135,14 +135,6 @@ pub struct SharedSshClient {
 /// Configuration for a command to execute on a device.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Command {
-    /// Command type - Identifies the functional category of the command
-    /// Common values:
-    /// - "show": Query commands, used to retrieve device status information
-    /// - "config": Configuration commands, used to modify device settings
-    /// - "exec": Execution commands, used to perform specific operations
-    /// - "debug": Debug commands, used for troubleshooting
-    pub cmd_type: String,
-
     /// Execution mode - Specifies the device mode in which the command should run
     /// Common values:
     /// - "Login": User mode (limited privileges)
@@ -158,14 +150,6 @@ pub struct Command {
     /// - "configure terminal" - Enter configuration mode
     /// - "interface GigabitEthernet0/1" - Enter interface configuration
     pub command: String,
-
-    /// Output parsing template - Name of the template used to structure the command output
-    /// Supports TextFSM templates to convert unstructured text output into structured data
-    /// Examples:
-    /// - "cisco_ios_show_version" - Parse Cisco device version info
-    /// - "cisco_ios_show_interface" - Parse interface status info
-    /// - If empty, the raw text output is returned
-    pub template: String,
 
     /// Single command timeout (seconds) - Maximum execution time for this command
     /// If None, defaults to 60 seconds
