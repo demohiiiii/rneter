@@ -1,0 +1,43 @@
+name: Release to crates.io
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "Failed to read package version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
