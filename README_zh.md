@@ -71,6 +71,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### 安全级别
+
+`rneter` 现在支持安全默认值，并可在连接时自定义 SSH 安全级别：
+
+```rust
+use rneter::session::{ConnectionSecurityOptions, MANAGER};
+use rneter::templates;
+
+let handler = templates::cisco();
+
+// 默认安全模式（known_hosts 校验 + 严格算法）
+let _sender = MANAGER.get(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    handler,
+).await?;
+
+// 显式指定安全配置
+let _sender = MANAGER.get_with_security(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco(),
+    ConnectionSecurityOptions::legacy_compatible(),
+).await?;
+```
+
 ## 架构
 
 ### 连接管理

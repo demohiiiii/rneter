@@ -71,6 +71,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Security Levels
+
+`rneter` now supports secure defaults and configurable SSH security levels when connecting:
+
+```rust
+use rneter::session::{ConnectionSecurityOptions, MANAGER};
+use rneter::templates;
+
+let handler = templates::cisco();
+
+// Secure by default (uses known_hosts verification + strict algorithms)
+let _sender = MANAGER.get(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    handler,
+).await?;
+
+// Explicitly choose a security profile
+let _sender = MANAGER.get_with_security(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco(),
+    ConnectionSecurityOptions::legacy_compatible(),
+).await?;
+```
+
 ## Architecture
 
 ### Connection Management

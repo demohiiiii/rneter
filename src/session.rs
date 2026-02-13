@@ -36,6 +36,84 @@ use super::device::{DeviceHandler, IGNORE_START_LINE};
 /// Global singleton SSH connection manager.
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
 
+/// Security level used for SSH algorithm selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SecurityLevel {
+    /// Strict modern algorithms (default).
+    Secure,
+    /// Good security with broader compatibility.
+    Balanced,
+    /// Maximum compatibility with legacy devices.
+    LegacyCompatible,
+}
+
+/// Connection security options for SSH establishment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionSecurityOptions {
+    /// SSH algorithm policy.
+    pub level: SecurityLevel,
+    /// Server host key verification method.
+    pub server_check: ServerCheckMethod,
+}
+
+impl Default for ConnectionSecurityOptions {
+    fn default() -> Self {
+        Self::secure_default()
+    }
+}
+
+impl ConnectionSecurityOptions {
+    /// Secure-by-default profile (recommended).
+    pub fn secure_default() -> Self {
+        Self {
+            level: SecurityLevel::Secure,
+            server_check: ServerCheckMethod::DefaultKnownHostsFile,
+        }
+    }
+
+    /// Balanced profile for mixed environments.
+    pub fn balanced() -> Self {
+        Self {
+            level: SecurityLevel::Balanced,
+            server_check: ServerCheckMethod::DefaultKnownHostsFile,
+        }
+    }
+
+    /// Legacy compatibility profile for older devices.
+    pub fn legacy_compatible() -> Self {
+        Self {
+            level: SecurityLevel::LegacyCompatible,
+            server_check: ServerCheckMethod::NoCheck,
+        }
+    }
+
+    fn preferred(&self) -> Preferred {
+        match self.level {
+            SecurityLevel::Secure => Preferred {
+                kex: Cow::Borrowed(config::SECURE_KEX_ORDER),
+                key: Cow::Borrowed(config::SECURE_KEY_TYPES),
+                cipher: Cow::Borrowed(config::SECURE_CIPHERS),
+                mac: Cow::Borrowed(config::SECURE_MAC_ALGORITHMS),
+                compression: Cow::Borrowed(config::DEFAULT_COMPRESSION_ALGORITHMS),
+            },
+            SecurityLevel::Balanced => Preferred {
+                kex: Cow::Borrowed(config::BALANCED_KEX_ORDER),
+                key: Cow::Borrowed(config::BALANCED_KEY_TYPES),
+                cipher: Cow::Borrowed(config::BALANCED_CIPHERS),
+                mac: Cow::Borrowed(config::BALANCED_MAC_ALGORITHMS),
+                compression: Cow::Borrowed(config::DEFAULT_COMPRESSION_ALGORITHMS),
+            },
+            SecurityLevel::LegacyCompatible => Preferred {
+                kex: Cow::Borrowed(config::LEGACY_KEX_ORDER),
+                key: Cow::Borrowed(config::LEGACY_KEY_TYPES),
+                cipher: Cow::Borrowed(config::LEGACY_CIPHERS),
+                mac: Cow::Borrowed(config::LEGACY_MAC_ALGORITHMS),
+                compression: Cow::Borrowed(config::DEFAULT_COMPRESSION_ALGORITHMS),
+            },
+        }
+    }
+}
+
 /// A shared SSH client instance with state machine tracking.
 pub struct SharedSshClient {
     client: Client,
@@ -52,6 +130,9 @@ pub struct SharedSshClient {
 
     /// Initial output captured upon connection (used for device type identification)
     initial_output: Option<String>,
+
+    /// Effective security options used when the connection was established.
+    security_options: ConnectionSecurityOptions,
 }
 
 /// Configuration for a command to execute on a device.
@@ -145,6 +226,29 @@ impl SshConnectionManager {
         enable_password: Option<String>,
         handler: DeviceHandler,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
+        self.get_with_security(
+            user,
+            addr,
+            port,
+            password,
+            enable_password,
+            handler,
+            ConnectionSecurityOptions::default(),
+        )
+        .await
+    }
+
+    /// Gets a cached SSH client or creates a new one with explicit security options.
+    pub async fn get_with_security(
+        &self,
+        user: String,
+        addr: String,
+        port: u16,
+        password: String,
+        enable_password: Option<String>,
+        handler: DeviceHandler,
+        security_options: ConnectionSecurityOptions,
+    ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
 
         // Check if a healthy, usable connection exists in the cache
@@ -158,6 +262,7 @@ impl SshConnectionManager {
                     &password,
                     &enable_password,
                     &Some(&handler),
+                    &security_options,
                 ) {
                     debug!("Cached connection params match, reusing: {}", device_addr);
                     return Ok(sender);
@@ -194,9 +299,16 @@ impl SshConnectionManager {
         }
 
         // Create a new client. `new` automatically detects prompt and ensures shell is ready.
-        let ssh_client =
-            SharedSshClient::new(user, addr, port, password, enable_password, Some(handler))
-                .await?;
+        let ssh_client = SharedSshClient::new(
+            user,
+            addr,
+            port,
+            password,
+            enable_password,
+            Some(handler),
+            security_options,
+        )
+        .await?;
         let client_arc = Arc::new(RwLock::new(ssh_client));
 
         let (tx, mut rx) = mpsc::channel::<CmdJob>(32);
@@ -323,6 +435,7 @@ impl SharedSshClient {
         password: &str,
         enable_password: &Option<String>,
         handler: &Option<&DeviceHandler>,
+        security_options: &ConnectionSecurityOptions,
     ) -> bool {
         // Compare password hash
         let password_hash = Self::calculate_password_hash(password);
@@ -353,6 +466,11 @@ impl SharedSshClient {
                 debug!("Handler presence mismatch");
                 return false;
             }
+        }
+
+        if &self.security_options != security_options {
+            debug!("Security options mismatch");
+            return false;
         }
 
         true
@@ -391,17 +509,12 @@ impl SharedSshClient {
         password: String,
         enable_password: Option<String>,
         mut handler: Option<DeviceHandler>,
+        security_options: ConnectionSecurityOptions,
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
 
         let config = Config {
-            preferred: Preferred {
-                kex: Cow::Borrowed(config::ALL_KEX_ORDER),
-                key: Cow::Borrowed(config::ALL_KEY_TYPES),
-                cipher: Cow::Borrowed(config::ALL_CIPHERS),
-                mac: Cow::Borrowed(config::ALL_MAC_ALGORITHMS),
-                compression: Cow::Borrowed(config::ALL_COMPRESSION_ALGORITHMS),
-            },
+            preferred: security_options.preferred(),
             inactivity_timeout: Some(Duration::from_secs(60)),
             ..Default::default()
         };
@@ -410,7 +523,7 @@ impl SharedSshClient {
             (addr, port),
             &user,
             AuthMethod::with_password(&password),
-            ServerCheckMethod::NoCheck,
+            security_options.server_check.clone(),
             config,
         )
         .await?;
@@ -534,6 +647,7 @@ impl SharedSshClient {
             } else {
                 Some(initial_output)
             },
+            security_options,
         })
     }
 
