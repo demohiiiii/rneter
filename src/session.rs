@@ -220,6 +220,7 @@ impl SshConnectionManager {
     }
 
     /// Gets a cached SSH client or creates a new one with explicit security options.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_with_security(
         &self,
         user: String,
@@ -772,5 +773,56 @@ impl SharedSshClient {
 
         cmd_output.all = all;
         Ok(cmd_output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, ConnectionSecurityOptions, SecurityLevel};
+    use async_ssh2_tokio::ServerCheckMethod;
+    use russh::{cipher, kex, mac};
+
+    #[test]
+    fn default_security_options_are_secure() {
+        let options = ConnectionSecurityOptions::default();
+        assert_eq!(options.level, SecurityLevel::Secure);
+        assert!(matches!(
+            options.server_check,
+            ServerCheckMethod::DefaultKnownHostsFile
+        ));
+    }
+
+    #[test]
+    fn legacy_profile_uses_no_host_check() {
+        let options = ConnectionSecurityOptions::legacy_compatible();
+        assert_eq!(options.level, SecurityLevel::LegacyCompatible);
+        assert!(matches!(options.server_check, ServerCheckMethod::NoCheck));
+    }
+
+    #[test]
+    fn secure_profile_excludes_weak_algorithms() {
+        let preferred = ConnectionSecurityOptions::secure_default().preferred();
+
+        assert!(preferred.kex.iter().all(|alg| *alg != kex::NONE));
+        assert!(preferred.cipher.iter().all(|alg| *alg != cipher::NONE));
+        assert!(preferred.cipher.iter().all(|alg| *alg != cipher::CLEAR));
+        assert!(preferred.mac.iter().all(|alg| *alg != mac::NONE));
+    }
+
+    #[test]
+    fn legacy_profile_keeps_broad_compatibility_algorithms() {
+        let preferred = ConnectionSecurityOptions::legacy_compatible().preferred();
+
+        assert!(preferred.kex.contains(&kex::DH_G1_SHA1));
+        assert!(preferred.cipher.contains(&cipher::NONE));
+        assert!(preferred.mac.contains(&mac::NONE));
+    }
+
+    #[test]
+    fn command_default_has_no_timeout() {
+        let cmd = Command::default();
+        assert_eq!(cmd.timeout, None);
+        assert!(cmd.mode.is_empty());
+        assert!(cmd.command.is_empty());
     }
 }

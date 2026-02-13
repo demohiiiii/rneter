@@ -54,6 +54,8 @@ pub struct DeviceHandler {
     sys: Option<String>,
 }
 
+type ExitPath = Option<(String, Vec<(String, String)>)>;
+
 /// Predefined states that exist in every device handler.
 static PRE_STATE: Lazy<Vec<String>> = Lazy::new(|| {
     vec![
@@ -129,6 +131,7 @@ impl DeviceHandler {
     /// * `edges` - State transition graph: (from, command, to, is_exit, needs_format)
     /// * `ignore_errors` - Regex patterns for errors that should be ignored
     /// * `dyn_param` - Dynamic parameters for command/input substitution
+    #[allow(clippy::too_many_arguments)]
     pub fn new<I, S>(
         prompt: Vec<(String, I)>,
         prompt_with_sys: Vec<(String, S, String)>,
@@ -460,10 +463,7 @@ impl DeviceHandler {
     ///
     /// When in a system-specific state (e.g., a specific configuration context),
     /// this method finds the sequence of commands needed to exit to a non-system state.
-    fn exit_until_no_sys(
-        &self,
-        sys: Option<&String>,
-    ) -> Result<Option<(&str, Vec<(String, String)>)>, ConnectError> {
+    fn exit_until_no_sys(&self, sys: Option<&String>) -> Result<ExitPath, ConnectError> {
         if !self.match_sys_prompt(self.current_state_index) {
             return Ok(None);
         }
@@ -482,7 +482,7 @@ impl DeviceHandler {
                 ));
                 if let Some(index) = self.all_states.iter().position(|v| v.eq(*end)) {
                     if !self.match_sys_prompt(index) {
-                        return Ok(Some((*end, path)));
+                        return Ok(Some(((*end).to_string(), path)));
                     }
                     current = *end;
                 } else {
@@ -532,14 +532,13 @@ impl DeviceHandler {
         state: &str,
         sys: Option<&String>,
     ) -> Result<Vec<(String, String)>, ConnectError> {
-        let mut start_node = self.current_state();
+        let mut start_node = self.current_state().to_string();
 
         let end_node = state;
 
         let mut switch_path = Vec::new();
 
-        if let (Some(current_sys), Some(target_sys)) = (&self.sys, sys)
-            && current_sys != target_sys
+        if let (Some(current_sys), Some(target_sys)) = (&self.sys, sys) && current_sys != target_sys
         {
             trace!("Need to switch system: {} to {}", current_sys, target_sys);
             if let Some((node, exit_path)) = self.exit_until_no_sys(sys)? {
@@ -567,11 +566,11 @@ impl DeviceHandler {
         // --- 2. Initialize BFS data structures ---
         // Queue for storing nodes to visit
         let mut queue = VecDeque::new();
-        queue.push_back(start_node.to_string());
+        queue.push_back(start_node.clone());
 
         // Set of visited nodes to prevent revisits and infinite loops
         let mut visited = HashSet::new();
-        visited.insert(start_node.to_string());
+        visited.insert(start_node.clone());
 
         // Predecessor map for backtracking the path.
         // Key: child node, Value: (parent node, edge label connecting them)
@@ -648,18 +647,66 @@ pub static IGNORE_START_LINE: Lazy<Regex> =
 #[cfg(test)]
 mod tests {
     use super::DeviceHandler;
+    use crate::error::ConnectError;
     use std::collections::HashMap;
 
     fn build_test_handler() -> DeviceHandler {
+        let mut dyn_param = HashMap::new();
+        dyn_param.insert("EnablePassword".to_string(), "secret\n".to_string());
+
         DeviceHandler::new(
-            vec![("Login".to_string(), vec![r"^test>\s*$"])],
+            vec![
+                ("Login".to_string(), vec![r"^dev>\s*$"]),
+                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+                ("Config".to_string(), vec![r"^dev\(cfg\)#\s*$"]),
+            ],
             vec![],
-            vec![],
+            vec![
+                (
+                    "EnablePassword".to_string(),
+                    (true, "EnablePassword".to_string(), true),
+                    vec![r"^Password:\s*$"],
+                ),
+                (
+                    "Confirm".to_string(),
+                    (false, "y".to_string(), false),
+                    vec![r"^\[y\/n\]\?\s*$"],
+                ),
+            ],
             vec![r"^--More--$"],
             vec![r"^ERROR: .+$"],
-            vec![],
-            vec![],
-            HashMap::new(),
+            vec![
+                (
+                    "Login".to_string(),
+                    "enable".to_string(),
+                    "Enable".to_string(),
+                    false,
+                    false,
+                ),
+                (
+                    "Enable".to_string(),
+                    "configure terminal".to_string(),
+                    "Config".to_string(),
+                    false,
+                    false,
+                ),
+                (
+                    "Config".to_string(),
+                    "exit".to_string(),
+                    "Enable".to_string(),
+                    true,
+                    false,
+                ),
+                (
+                    "Enable".to_string(),
+                    "exit".to_string(),
+                    "Login".to_string(),
+                    true,
+                    false,
+                ),
+            ],
+            vec![r"^ERROR: benign$"],
+            dyn_param,
         )
         .expect("test handler config should be valid")
     }
@@ -671,5 +718,85 @@ mod tests {
         assert!(!handler.error());
         handler.read("ERROR: invalid command");
         assert!(handler.error());
+    }
+
+    #[test]
+    fn ignore_error_pattern_resets_to_output_state() {
+        let mut handler = build_test_handler();
+
+        handler.read("ERROR: benign");
+        assert_eq!(handler.current_state(), "output");
+        assert!(!handler.error());
+    }
+
+    #[test]
+    fn read_need_write_supports_dynamic_and_static_inputs() {
+        let mut handler = build_test_handler();
+
+        assert_eq!(
+            handler.read_need_write("Password:"),
+            Some(("secret\n".to_string(), true))
+        );
+        assert_eq!(
+            handler.read_need_write("[y/n]?"),
+            Some(("y".to_string(), false))
+        );
+        assert_eq!(handler.read_need_write("no input"), None);
+    }
+
+    #[test]
+    fn transition_path_is_found_for_reachable_state() {
+        let mut handler = build_test_handler();
+        handler.read("dev>");
+
+        let path = handler
+            .trans_state_write("config", None)
+            .expect("reachable path should be found");
+
+        assert_eq!(
+            path,
+            vec![
+                ("enable".to_string(), "enable".to_string()),
+                ("configure terminal".to_string(), "config".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn transition_to_unknown_state_returns_error() {
+        let mut handler = build_test_handler();
+        handler.read("dev>");
+
+        let err = handler
+            .trans_state_write("does-not-exist", None)
+            .expect_err("unknown target state should return error");
+        match err {
+            ConnectError::UnreachableState(s) => assert_eq!(s, "does-not-exist"),
+            other => panic!("unexpected error type: {other}"),
+        }
+    }
+
+    #[test]
+    fn invalid_handler_regex_returns_config_error() {
+        let err = match DeviceHandler::new(
+            vec![("Login".to_string(), vec![r"["])],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![],
+            vec![],
+            HashMap::new(),
+        ) {
+            Ok(_) => panic!("invalid regex should fail handler construction"),
+            Err(err) => err,
+        };
+
+        match err {
+            ConnectError::InvalidDeviceHandlerConfig(msg) => {
+                assert!(msg.contains("failed to build state regex set"));
+            }
+            other => panic!("unexpected error type: {other}"),
+        }
     }
 }
