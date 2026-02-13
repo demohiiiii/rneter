@@ -119,7 +119,7 @@ pub struct SharedSshClient {
     client: Client,
     sender: Sender<String>,
     recv: Receiver<String>,
-    handler: Option<DeviceHandler>,
+    handler: DeviceHandler,
     prompt: String,
 
     /// SHA-256 hash of the password, used for connection parameter comparison
@@ -127,9 +127,6 @@ pub struct SharedSshClient {
 
     /// SHA-256 hash of the enable password (if present)
     enable_password_hash: Option<[u8; 32]>,
-
-    /// Initial output captured upon connection (used for device type identification)
-    initial_output: Option<String>,
 
     /// Effective security options used when the connection was established.
     security_options: ConnectionSecurityOptions,
@@ -261,7 +258,7 @@ impl SshConnectionManager {
                 if client_guard.matches_connection_params(
                     &password,
                     &enable_password,
-                    &Some(&handler),
+                    &handler,
                     &security_options,
                 ) {
                     debug!("Cached connection params match, reusing: {}", device_addr);
@@ -305,7 +302,7 @@ impl SshConnectionManager {
             port,
             password,
             enable_password,
-            Some(handler),
+            handler,
             security_options,
         )
         .await?;
@@ -346,32 +343,6 @@ impl SshConnectionManager {
         debug!("New connection for {} has been cached.", device_addr);
 
         Ok(tx)
-    }
-
-    /// Gets the initial output from a connection.
-    pub async fn get_initial_output(
-        &self,
-        user: String,
-        addr: String,
-        port: u16,
-    ) -> Result<Option<String>, ConnectError> {
-        let device_addr = format!("{user}@{addr}:{port}_no_handler");
-
-        // Get connection from cache
-        if let Some((_, client)) = self.cache.get(&device_addr).await {
-            let client_guard = client.read().await;
-
-            if !client_guard.is_connected() {
-                return Err(ConnectError::ConnectClosedError);
-            }
-
-            Ok(client_guard.get_initial_output().cloned())
-        } else {
-            Err(ConnectError::InternalServerError(format!(
-                "Connection not found: {}",
-                device_addr
-            )))
-        }
     }
 
     /// Safely disconnects a cached connection.
@@ -434,7 +405,7 @@ impl SharedSshClient {
         &self,
         password: &str,
         enable_password: &Option<String>,
-        handler: &Option<&DeviceHandler>,
+        handler: &DeviceHandler,
         security_options: &ConnectionSecurityOptions,
     ) -> bool {
         // Compare password hash
@@ -451,21 +422,9 @@ impl SharedSshClient {
             return false;
         }
 
-        // Compare handler (compare core configuration)
-        match (&self.handler, handler) {
-            (Some(self_handler), Some(other_handler)) => {
-                if !self_handler.is_equivalent(other_handler) {
-                    debug!("Device handler configuration mismatch");
-                    return false;
-                }
-            }
-            (None, None) => {
-                // Both have no handler, match
-            }
-            _ => {
-                debug!("Handler presence mismatch");
-                return false;
-            }
+        if !self.handler.is_equivalent(handler) {
+            debug!("Device handler configuration mismatch");
+            return false;
         }
 
         if &self.security_options != security_options {
@@ -508,7 +467,7 @@ impl SharedSshClient {
         port: u16,
         password: String,
         enable_password: Option<String>,
-        mut handler: Option<DeviceHandler>,
+        mut handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
@@ -579,47 +538,36 @@ impl SharedSshClient {
         let mut prompt = String::new();
         let mut initial_output = String::new();
 
-        // If handler exists, perform initial setup
-        if let Some(ref mut h) = handler {
-            let mut params = HashMap::new();
-            if let Some(enable) = enable_password.as_ref() {
-                params.insert("EnablePassword".to_string(), format!("{}\n", enable));
-            }
-            h.dyn_param = params;
+        // Initialize dynamic params in handler.
+        let mut params = HashMap::new();
+        if let Some(enable) = enable_password.as_ref() {
+            params.insert("EnablePassword".to_string(), format!("{}\n", enable));
         }
+        handler.dyn_param = params;
 
-        // Wait for prompt output or collect initial output
-        let _ = tokio::time::timeout(Duration::from_secs(60), async {
+        // Wait for prompt output.
+        let init_result = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if let Some(data) = receiver_from_shell.recv().await {
                     trace!("{:?}", data);
                     buffer.push_str(&data);
                     initial_output.push_str(&data);
 
-                    // If handler exists, perform normal prompt recognition flow
-                    if let Some(ref mut h) = handler {
-                        while let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer.drain(..=newline_pos).collect::<String>();
-                            let trimmed_line = line.trim_end();
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer.drain(..=newline_pos).collect::<String>();
+                        let trimmed_line = line.trim_end();
+                        handler.read(trimmed_line);
+                    }
 
-                            h.read(trimmed_line);
+                    if !buffer.is_empty() {
+                        if handler.read_prompt(&buffer) {
+                            prompt.push_str(&buffer);
+                            handler.read(&buffer);
+                            return Ok(());
                         }
-
-                        if !buffer.is_empty() {
-                            if h.read_prompt(&buffer) {
-                                prompt.push_str(&buffer);
-                                h.read(&buffer);
-                                return Ok(());
-                            }
-                            if let Some((c, _)) = h.read_need_write(&buffer) {
-                                h.read(&buffer);
-                                sender_to_shell.send(c).await?;
-                            }
-                        }
-                    } else {
-                        // If no handler, just collect data (handled in new_without_handler scenarios)
-                        while let Some(newline_pos) = buffer.find('\n') {
-                            buffer.drain(..=newline_pos);
+                        if let Some((c, _)) = handler.read_need_write(&buffer) {
+                            handler.read(&buffer);
+                            sender_to_shell.send(c).await?;
                         }
                     }
                 } else {
@@ -629,6 +577,18 @@ impl SharedSshClient {
             }
         })
         .await;
+
+        match init_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                return Err(ConnectError::InitTimeout(if initial_output.is_empty() {
+                    "waiting for initial prompt".to_string()
+                } else {
+                    initial_output.clone()
+                }));
+            }
+        }
 
         // Calculate and store password hash
         let password_hash = Self::calculate_password_hash(&password);
@@ -642,18 +602,8 @@ impl SharedSshClient {
             prompt,
             password_hash,
             enable_password_hash,
-            initial_output: if initial_output.is_empty() {
-                None
-            } else {
-                Some(initial_output)
-            },
             security_options,
         })
-    }
-
-    /// Gets the initial output captured during connection establishment.
-    pub fn get_initial_output(&self) -> Option<&String> {
-        self.initial_output.as_ref()
     }
 
     /// Checks if the underlying SSH connection is still active.
@@ -676,9 +626,7 @@ impl SharedSshClient {
         timeout: Duration,
     ) -> Result<Output, ConnectError> {
         // Ensure handler exists
-        let handler = self.handler.as_mut().ok_or_else(|| {
-            ConnectError::InternalServerError("Connection handler not initialized".to_string())
-        })?;
+        let handler = &mut self.handler;
 
         let recv = &mut self.recv;
         let prompt = &mut self.prompt;
@@ -806,9 +754,7 @@ impl SharedSshClient {
         timeout: Duration,
     ) -> Result<Output, ConnectError> {
         // Ensure handler exists
-        let handler = self.handler.as_ref().ok_or_else(|| {
-            ConnectError::InternalServerError("Connection handler not initialized".to_string())
-        })?;
+        let handler = &self.handler;
 
         let temp_mode = mode.to_ascii_lowercase();
         let mode = temp_mode.as_str();
@@ -826,8 +772,7 @@ impl SharedSshClient {
                 return Ok(mode_output);
             }
 
-            let handler = self.handler.as_ref().unwrap(); // Handler definitely exists here
-            if !handler.current_state().eq(&target_state) {
+            if !self.handler.current_state().eq(&target_state) {
                 mode_output.success = false;
                 mode_output.all = all;
                 return Ok(mode_output);

@@ -33,6 +33,10 @@ pub enum ConnectError {
     #[error("exec command timeout: {0}")]
     ExecTimeout(String),
 
+    /// SSH connection initialization timed out while waiting for initial prompt.
+    #[error("connection initialization timeout: {0}")]
+    InitTimeout(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),
