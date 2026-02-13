@@ -5,10 +5,11 @@
 //! error messages, and state transitions.
 
 use crate::device::DeviceHandler;
+use crate::error::ConnectError;
 use std::collections::HashMap;
 
 /// Returns a `DeviceHandler` configured for Cisco IOS/IOS-XE devices.
-pub fn cisco() -> DeviceHandler {
+pub fn cisco() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![
@@ -80,7 +81,7 @@ pub fn cisco() -> DeviceHandler {
 }
 
 /// Returns a `DeviceHandler` configured for Huawei VRP devices.
-pub fn huawei() -> DeviceHandler {
+pub fn huawei() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![
@@ -144,7 +145,7 @@ pub fn huawei() -> DeviceHandler {
 }
 
 /// Returns a `DeviceHandler` configured for H3C devices.
-pub fn h3c() -> DeviceHandler {
+pub fn h3c() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![
@@ -190,7 +191,7 @@ pub fn h3c() -> DeviceHandler {
 }
 
 /// Returns a `DeviceHandler` configured for Hillstone devices.
-pub fn hillstone() -> DeviceHandler {
+pub fn hillstone() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![
@@ -280,7 +281,7 @@ pub fn hillstone() -> DeviceHandler {
 }
 
 /// Returns a `DeviceHandler` configured for Juniper JunOS devices.
-pub fn juniper() -> DeviceHandler {
+pub fn juniper() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![
@@ -338,7 +339,7 @@ pub fn juniper() -> DeviceHandler {
 }
 
 /// Returns a `DeviceHandler` configured for Array Networks devices.
-pub fn array() -> DeviceHandler {
+pub fn array() -> Result<DeviceHandler, ConnectError> {
     DeviceHandler::new(
         // Prompt
         vec![

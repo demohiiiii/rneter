@@ -295,6 +295,7 @@ impl SshConnectionManager {
         let (tx, mut rx) = mpsc::channel::<CmdJob>(32);
 
         let client_clone = client_arc.clone();
+        let worker_device_addr = device_addr.clone();
 
         tokio::spawn(async move {
             loop {
@@ -317,6 +318,12 @@ impl SshConnectionManager {
                     };
 
                     let _ = job.responder.send(res);
+                } else {
+                    debug!(
+                        "Command channel closed for {}, stopping worker.",
+                        worker_device_addr
+                    );
+                    break;
                 }
             }
         });
@@ -679,15 +686,10 @@ impl SharedSshClient {
         })
         .await;
 
-        if result.is_err() {
-            return Err(ConnectError::ExecTimeout(clean_output));
-        }
-
-        let success = match result.unwrap() {
-            Ok(b) => b,
-            Err(err) => {
-                return Err(err);
-            }
+        let success = match result {
+            Err(_) => return Err(ConnectError::ExecTimeout(clean_output)),
+            Ok(Err(err)) => return Err(err),
+            Ok(Ok(success)) => success,
         };
 
         let all = clean_output;

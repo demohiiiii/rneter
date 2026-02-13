@@ -36,7 +36,7 @@ use rneter::templates;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use a predefined device template (e.g., Cisco)
-    let handler = templates::cisco();
+    let handler = templates::cisco()?;
 
     // Get a connection from the manager
     let sender = MANAGER.get(
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use rneter::session::{ConnectionSecurityOptions, MANAGER};
 use rneter::templates;
 
-let handler = templates::cisco();
+let handler = templates::cisco()?;
 
 // Secure by default (uses known_hosts verification + strict algorithms)
 let _sender = MANAGER.get(
@@ -96,7 +96,7 @@ let _sender = MANAGER.get_with_security(
     22,
     "password".to_string(),
     None,
-    templates::cisco(),
+    templates::cisco()?,
     ConnectionSecurityOptions::legacy_compatible(),
 ).await?;
 ```

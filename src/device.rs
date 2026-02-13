@@ -138,7 +138,7 @@ impl DeviceHandler {
         edges: Vec<(String, String, String, bool, bool)>,
         ignore_errors: I,
         dyn_param: HashMap<String, String>,
-    ) -> DeviceHandler
+    ) -> Result<DeviceHandler, ConnectError>
     where
         S: AsRef<str> + Clone,
         I: IntoIterator<Item = S>,
@@ -197,7 +197,13 @@ impl DeviceHandler {
             let modified_regex =
                 format!(r"^\x00*\r{{0,1}}{}", regex.as_ref().trim_start_matches('^'));
 
-            catch_map.insert(start_offset, (Regex::new(&modified_regex).unwrap(), catch));
+            let regex = Regex::new(&modified_regex).map_err(|err| {
+                ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "invalid prompt_with_sys regex for state '{}': {}",
+                    state, err
+                ))
+            })?;
+            catch_map.insert(start_offset, (regex, catch));
 
             regexs.push(modified_regex);
 
@@ -227,13 +233,23 @@ impl DeviceHandler {
 
         input_map.insert("more".to_string(), (false, " ".to_string(), false));
 
-        let all_regex = RegexSet::new(&regexs).unwrap();
+        let all_regex = RegexSet::new(&regexs).map_err(|err| {
+            ConnectError::InvalidDeviceHandlerConfig(format!(
+                "failed to build state regex set: {}",
+                err
+            ))
+        })?;
 
         let mut ignore_iter = ignore_errors.into_iter().peekable();
         let ignore_errors = if ignore_iter.peek().is_none() {
             None
         } else {
-            Some(RegexSet::new(ignore_iter).unwrap())
+            Some(RegexSet::new(ignore_iter).map_err(|err| {
+                ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "invalid ignore_errors regex set: {}",
+                    err
+                ))
+            })?)
         };
 
         let edges = edges
@@ -249,7 +265,7 @@ impl DeviceHandler {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             current_state_index: 0,
             prompt_index,
             sys_prompt_index,
@@ -262,7 +278,7 @@ impl DeviceHandler {
             dyn_param,
             catch_map,
             sys: None,
-        }
+        })
     }
 
     /// Converts a line of output to a state.
@@ -281,20 +297,32 @@ impl DeviceHandler {
     fn line2state(&self, line: &str, need_catch: bool) -> (usize, &str, Option<String>) {
         let matches: Vec<_> = self.all_regex.matches(line).into_iter().collect();
         if matches.is_empty() {
-            return (0, self.all_states.first().unwrap(), None);
+            let state = self.all_states.first().map(|s| s.as_str()).unwrap_or("output");
+            return (0, state, None);
         }
         let mut current_state_catch = None;
-        let index = matches.first().unwrap();
+        let index = match matches.first() {
+            Some(v) => *v,
+            None => {
+                let state = self.all_states.first().map(|s| s.as_str()).unwrap_or("output");
+                return (0, state, None);
+            }
+        };
         if need_catch
-            && let Some((regex, catch)) = self.catch_map.get(index)
+            && let Some((regex, catch)) = self.catch_map.get(&index)
             && let Some(caps) = regex.captures(line)
         {
             current_state_catch = caps.name(catch).map(|s| s.as_str().to_string());
         }
-        let state_index = *self.regex_index_map.get(index).unwrap();
+        let state_index = self.regex_index_map.get(&index).copied().unwrap_or(0);
+        let state = self
+            .all_states
+            .get(state_index)
+            .map(|s| s.as_str())
+            .unwrap_or("output");
         (
             state_index,
-            self.all_states.get(state_index).unwrap(),
+            state,
             current_state_catch,
         )
     }
@@ -327,11 +355,10 @@ impl DeviceHandler {
 
     /// Checks if a line matches an error pattern that should be ignored.
     fn ignore_error(&self, line: &str) -> bool {
-        if self.ignore_errors.is_none() {
-            return false;
-        }
-
-        self.ignore_errors.as_ref().unwrap().is_match(line)
+        self.ignore_errors
+            .as_ref()
+            .map(|set| set.is_match(line))
+            .unwrap_or(false)
     }
 
     /// Checks if a state index corresponds to a prompt state.
@@ -413,7 +440,10 @@ impl DeviceHandler {
     ///
     /// The name of the current state
     pub fn current_state(&self) -> &str {
-        self.all_states.get(self.current_state_index).unwrap()
+        self.all_states
+            .get(self.current_state_index)
+            .map(|s| s.as_str())
+            .unwrap_or("output")
     }
 
     /// Checks if the current state is an error state.
@@ -508,12 +538,10 @@ impl DeviceHandler {
 
         let mut switch_path = Vec::new();
 
-        if self.sys.is_some() && sys.is_some() && self.sys.as_ref().unwrap() != sys.unwrap() {
-            trace!(
-                "Need to switch system: {} to {}",
-                self.sys.as_ref().unwrap(),
-                sys.unwrap()
-            );
+        if let (Some(current_sys), Some(target_sys)) = (&self.sys, sys)
+            && current_sys != target_sys
+        {
+            trace!("Need to switch system: {} to {}", current_sys, target_sys);
             if let Some((node, exit_path)) = self.exit_until_no_sys(sys)? {
                 start_node = node;
                 switch_path.extend(exit_path);
@@ -592,8 +620,10 @@ impl DeviceHandler {
                 path.push((edge_label.clone(), current.clone()));
                 current = parent.clone();
             } else {
-                // Theoretically, this shouldn't happen if the destination is reachable
-                unimplemented!();
+                return Err(ConnectError::InternalServerError(format!(
+                    "failed to backtrack path from '{}' to '{}'",
+                    end_node, start_node
+                )));
             }
         }
 
@@ -610,7 +640,10 @@ impl DeviceHandler {
 /// This pattern matches carriage returns and backspace characters that may appear
 /// at the beginning of terminal output, which can interfere with proper line parsing.
 pub static IGNORE_START_LINE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(\r+(\s+\r+)*)|(\u{8}+(\s+\u{8}+)*)").unwrap());
+    Lazy::new(|| match Regex::new(r"^(\r+(\s+\r+)*)|(\u{8}+(\s+\u{8}+)*)") {
+        Ok(re) => re,
+        Err(err) => panic!("invalid IGNORE_START_LINE regex: {err}"),
+    });
 
 #[cfg(test)]
 mod tests {
@@ -628,6 +661,7 @@ mod tests {
             vec![],
             HashMap::new(),
         )
+        .expect("test handler config should be valid")
     }
 
     #[test]

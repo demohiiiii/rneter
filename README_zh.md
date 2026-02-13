@@ -36,7 +36,7 @@ use rneter::templates;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 使用预定义的设备模板（例如：Cisco）
-    let handler = templates::cisco();
+    let handler = templates::cisco()?;
 
     // 从管理器获取一个连接
     let sender = MANAGER.get(
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use rneter::session::{ConnectionSecurityOptions, MANAGER};
 use rneter::templates;
 
-let handler = templates::cisco();
+let handler = templates::cisco()?;
 
 // 默认安全模式（known_hosts 校验 + 严格算法）
 let _sender = MANAGER.get(
@@ -96,7 +96,7 @@ let _sender = MANAGER.get_with_security(
     22,
     "password".to_string(),
     None,
-    templates::cisco(),
+    templates::cisco()?,
     ConnectionSecurityOptions::legacy_compatible(),
 ).await?;
 ```

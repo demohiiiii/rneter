@@ -37,6 +37,10 @@ pub enum ConnectError {
     #[error("connection initialization timeout: {0}")]
     InitTimeout(String),
 
+    /// Device handler configuration is invalid.
+    #[error("invalid device handler config: {0}")]
+    InvalidDeviceHandlerConfig(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),

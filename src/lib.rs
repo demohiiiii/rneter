@@ -23,7 +23,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Use a predefined device template (e.g., Cisco)
-//!     let handler = templates::cisco();
+//!     let handler = templates::cisco()?;
 //!
 //!     // Get a connection from the manager
 //!     let sender = MANAGER.get(
