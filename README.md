@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "Enable".to_string(), // Cisco template uses "Enable" mode
             command: "show version".to_string(),
             template: String::new(),
-            timeout: 60,
+            timeout: Some(60),
         },
         sys: None,
         responder: tx,

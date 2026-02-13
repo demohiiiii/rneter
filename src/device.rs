@@ -422,7 +422,8 @@ impl DeviceHandler {
     ///
     /// `true` if the device is currently in an error state, `false` otherwise
     pub fn error(&self) -> bool {
-        self.current_state().eq("Error")
+        // All states are normalized to lowercase during handler construction.
+        self.current_state().eq("error")
     }
 
     /// Finds the path to exit from system-specific prompts.
@@ -610,3 +611,31 @@ impl DeviceHandler {
 /// at the beginning of terminal output, which can interfere with proper line parsing.
 pub static IGNORE_START_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\r+(\s+\r+)*)|(\u{8}+(\s+\u{8}+)*)").unwrap());
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceHandler;
+    use std::collections::HashMap;
+
+    fn build_test_handler() -> DeviceHandler {
+        DeviceHandler::new(
+            vec![("Login".to_string(), vec![r"^test>\s*$"])],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![],
+            vec![],
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn error_state_is_detected_after_error_line() {
+        let mut handler = build_test_handler();
+
+        assert!(!handler.error());
+        handler.read("ERROR: invalid command");
+        assert!(handler.error());
+    }
+}
