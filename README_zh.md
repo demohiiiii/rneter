@@ -164,6 +164,31 @@ assert_eq!(outputs.len(), 2);
 cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
 ```
 
+新增的录制/回放能力：
+
+- Prompt 前后态：每条 `command_output` 都记录 `prompt_before`/`prompt_after`
+- 状态机 prompt 前后态：事件可记录 `fsm_prompt_before`/`fsm_prompt_after`
+- 返回值带 prompt：命令执行与离线回放的 `Output` 现在包含 `prompt`
+- 兼容旧 schema：历史 `connection_established` 的 `prompt`/`state` 字段仍可读取
+- fixture 测试工作流：`tests/fixtures/` 提供成功流/失败流/状态切换样本，`tests/replay_fixtures.rs` 提供快照与质量校验
+
+`command_output` 事件结构示例：
+
+```json
+{
+  "kind": "command_output",
+  "command": "show version",
+  "mode": "Enable",
+  "prompt_before": "router#",
+  "prompt_after": "router#",
+  "fsm_prompt_before": "enable",
+  "fsm_prompt_after": "enable",
+  "success": true,
+  "content": "Version 1.0",
+  "all": "show version\nVersion 1.0\nrouter#"
+}
+```
+
 ## 架构
 
 ### 连接管理
@@ -180,6 +205,52 @@ cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/sessio
 - 使用 BFS 算法查找状态之间的最优路径
 - 处理自动状态转换
 - 支持特定系统状态（例如不同的 VRF 或上下文）
+
+#### 设计思路
+
+这个状态机的设计基于网络设备自动化里的两个稳定事实：
+1. 相比命令文本，Prompt 更适合判断当前模式。
+2. 不同厂商/型号的模式切换路径不同，路径搜索必须数据驱动。
+
+核心设计选择：
+- 状态统一小写，并将 prompt 正则匹配结果映射到状态索引，保证快速定位。
+- 将 prompt 检测（`read_prompt`）与状态更新（`read`）拆开，保证命令循环行为可预测。
+- 将状态转换建模为有向图（`edges`），通过 BFS 找到最短可行切换路径。
+- 将动态输入处理（`read_need_write`）与命令逻辑解耦，复用密码/确认类交互处理。
+- 同时记录 CLI prompt 文本与 FSM prompt（状态名），便于在线诊断和离线回放断言。
+
+这样设计的好处：
+- 可移植性更好：设备差异主要通过配置表达，而不是硬编码分支。
+- 稳定性更好：执行依赖 prompt/状态收敛，而不是脆弱的输出格式假设。
+- 可测试性更好：可通过 record/replay 离线验证状态切换与 prompt 演化，不依赖真实 SSH。
+
+#### 状态转换模型
+
+```mermaid
+flowchart LR
+    O["Output"] --> L["Login Prompt"]
+    L -->|enable| E["Enable Prompt"]
+    E -->|configure terminal| C["Config Prompt"]
+    C -->|exit| E
+    E -->|exit| L
+    E -->|show ...| E
+    C -->|show ... / set ...| C
+```
+
+#### 命令执行流程（带状态感知）
+
+```mermaid
+flowchart TD
+    A["接收命令(mode, command, timeout)"] --> B["读取当前 FSM prompt/state"]
+    B --> C["BFS 规划切换路径: trans_state_write(target_mode)"]
+    C --> D["按顺序执行切换命令"]
+    D --> E["执行目标命令"]
+    E --> F["读取流式输出 -> handler.read(line) 更新状态"]
+    F --> G{"匹配到 prompt?"}
+    G -->|否| F
+    G -->|是| H["构建 Output(success, content, all, prompt)"]
+    H --> I["记录事件: prompt_before/after + fsm_prompt_before/after"]
+```
 
 ### 命令执行
 

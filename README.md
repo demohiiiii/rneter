@@ -164,6 +164,31 @@ To normalize noisy online recordings into stable fixtures:
 cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
 ```
 
+New recording/replay capabilities:
+
+- Prompt tracking: each `command_output` now records both `prompt_before`/`prompt_after`
+- FSM prompt tracking: each event can include `fsm_prompt_before`/`fsm_prompt_after`
+- Output prompt: command/replay results now include `Output.prompt`
+- Schema compatibility: legacy `connection_established` fields (`prompt`/`state`) remain readable
+- Fixture quality workflow: `tests/fixtures/` includes success/failure/state-switch samples and snapshot checks in `tests/replay_fixtures.rs`
+
+Example `command_output` event shape:
+
+```json
+{
+  "kind": "command_output",
+  "command": "show version",
+  "mode": "Enable",
+  "prompt_before": "router#",
+  "prompt_after": "router#",
+  "fsm_prompt_before": "enable",
+  "fsm_prompt_after": "enable",
+  "success": true,
+  "content": "Version 1.0",
+  "all": "show version\nVersion 1.0\nrouter#"
+}
+```
+
 ## Architecture
 
 ### Connection Management
@@ -180,6 +205,52 @@ The `DeviceHandler` implements a finite state machine that:
 - Finds optimal paths between states using BFS
 - Handles automatic state transitions
 - Supports system-specific states (e.g., different VRFs or contexts)
+
+#### Design Rationale
+
+The state machine is designed around two stable facts in network-device automation:
+1. Prompts are more reliable than command text for identifying current mode.
+2. Transition paths vary by vendor/model, so pathfinding must be data-driven.
+
+Core design choices:
+- Normalize states to lowercase and map prompt regex matches to state indexes for fast lookups.
+- Separate prompt detection (`read_prompt`) from state update (`read`) to keep command loops predictable.
+- Model transitions as a directed graph (`edges`) and use BFS to find shortest valid mode switch path.
+- Keep dynamic input handling (`read_need_write`) independent from command logic, so password/confirm flows are reusable.
+- Track both CLI prompt text and FSM prompt (state name) to support online diagnostics and offline replay assertions.
+
+Benefits:
+- Better portability: vendor-specific behavior is mostly data configuration, not hard-coded branches.
+- Better resilience: command execution relies on prompt/state convergence instead of fixed output formats.
+- Better testability: record/replay can validate state transitions and prompt evolution without real SSH sessions.
+
+#### State Transition Model
+
+```mermaid
+flowchart LR
+    O["Output"] --> L["Login Prompt"]
+    L -->|enable| E["Enable Prompt"]
+    E -->|configure terminal| C["Config Prompt"]
+    C -->|exit| E
+    E -->|exit| L
+    E -->|show ...| E
+    C -->|show ... / set ...| C
+```
+
+#### Command Execution Flow (State-Aware)
+
+```mermaid
+flowchart TD
+    A["Receive Command(mode, command, timeout)"] --> B["Read current FSM prompt/state"]
+    B --> C["BFS transition planning: trans_state_write(target_mode)"]
+    C --> D["Execute transition commands sequentially"]
+    D --> E["Execute target command"]
+    E --> F["Read stream chunks -> update handler.read(line)"]
+    F --> G{"Prompt matched?"}
+    G -->|No| F
+    G -->|Yes| H["Build Output(success, content, all, prompt)"]
+    H --> I["Record event: prompt_before/after + fsm_prompt_before/after"]
+```
 
 ### Command Execution
 
