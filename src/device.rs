@@ -52,6 +52,9 @@ pub struct DeviceHandler {
 
     /// Captured system name from the prompt (e.g., hostname)
     sys: Option<String>,
+
+    /// Last prompt text matched by the state machine.
+    current_prompt: Option<String>,
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
@@ -281,6 +284,7 @@ impl DeviceHandler {
             dyn_param,
             catch_map,
             sys: None,
+            current_prompt: None,
         })
     }
 
@@ -300,14 +304,22 @@ impl DeviceHandler {
     fn line2state(&self, line: &str, need_catch: bool) -> (usize, &str, Option<String>) {
         let matches: Vec<_> = self.all_regex.matches(line).into_iter().collect();
         if matches.is_empty() {
-            let state = self.all_states.first().map(|s| s.as_str()).unwrap_or("output");
+            let state = self
+                .all_states
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("output");
             return (0, state, None);
         }
         let mut current_state_catch = None;
         let index = match matches.first() {
             Some(v) => *v,
             None => {
-                let state = self.all_states.first().map(|s| s.as_str()).unwrap_or("output");
+                let state = self
+                    .all_states
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("output");
                 return (0, state, None);
             }
         };
@@ -323,11 +335,7 @@ impl DeviceHandler {
             .get(state_index)
             .map(|s| s.as_str())
             .unwrap_or("output");
-        (
-            state_index,
-            state,
-            current_state_catch,
-        )
+        (state_index, state, current_state_catch)
     }
 
     /// Reads a line of output and updates the current state.
@@ -350,6 +358,7 @@ impl DeviceHandler {
             if self.match_prompt(state_index) {
                 trace!("State captured value: '{:?}'", catch);
                 self.sys = catch;
+                self.current_prompt = Some(line.to_string());
             }
 
             self.current_state_index = state_index;
@@ -449,6 +458,16 @@ impl DeviceHandler {
             .unwrap_or("output")
     }
 
+    /// Returns the currently captured system name, if available.
+    pub fn current_sys(&self) -> Option<&str> {
+        self.sys.as_deref()
+    }
+
+    /// Returns last prompt text matched by the state machine.
+    pub fn current_prompt(&self) -> Option<&str> {
+        self.current_prompt.as_deref()
+    }
+
     /// Checks if the current state is an error state.
     ///
     /// # Returns
@@ -538,7 +557,8 @@ impl DeviceHandler {
 
         let mut switch_path = Vec::new();
 
-        if let (Some(current_sys), Some(target_sys)) = (&self.sys, sys) && current_sys != target_sys
+        if let (Some(current_sys), Some(target_sys)) = (&self.sys, sys)
+            && current_sys != target_sys
         {
             trace!("Need to switch system: {} to {}", current_sys, target_sys);
             if let Some((node, exit_path)) = self.exit_until_no_sys(sys)? {
@@ -639,10 +659,12 @@ impl DeviceHandler {
 /// This pattern matches carriage returns and backspace characters that may appear
 /// at the beginning of terminal output, which can interfere with proper line parsing.
 pub static IGNORE_START_LINE: Lazy<Regex> =
-    Lazy::new(|| match Regex::new(r"^(\r+(\s+\r+)*)|(\u{8}+(\s+\u{8}+)*)") {
-        Ok(re) => re,
-        Err(err) => panic!("invalid IGNORE_START_LINE regex: {err}"),
-    });
+    Lazy::new(
+        || match Regex::new(r"^(\r+(\s+\r+)*)|(\u{8}+(\s+\u{8}+)*)") {
+            Ok(re) => re,
+            Err(err) => panic!("invalid IGNORE_START_LINE regex: {err}"),
+        },
+    );
 
 #[cfg(test)]
 mod tests {
@@ -727,6 +749,15 @@ mod tests {
         handler.read("ERROR: benign");
         assert_eq!(handler.current_state(), "output");
         assert!(!handler.error());
+    }
+
+    #[test]
+    fn current_prompt_is_updated_when_prompt_line_is_read() {
+        let mut handler = build_test_handler();
+        assert_eq!(handler.current_prompt(), None);
+
+        handler.read("dev#");
+        assert_eq!(handler.current_prompt(), Some("dev#"));
     }
 
     #[test]

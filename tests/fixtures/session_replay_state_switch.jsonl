@@ -1,0 +1,5 @@
+{"ts_ms":1735689602000,"event":{"kind":"connection_established","device_addr":"admin@192.168.1.3:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
+{"ts_ms":1735689602100,"event":{"kind":"state_changed","state":"config"}}
+{"ts_ms":1735689602200,"event":{"kind":"command_output","command":"show version","mode":"Config","prompt_before":"router(config)#","prompt_after":"router(config)#","fsm_prompt_before":"config","fsm_prompt_after":"config","success":true,"content":"Version in config context","all":"show version\nVersion in config context\nrouter(config)#"}}
+{"ts_ms":1735689602300,"event":{"kind":"state_changed","state":"enable"}}
+{"ts_ms":1735689602400,"event":{"kind":"command_output","command":"show version","mode":"Enable","prompt_before":"router#","prompt_after":"router#","fsm_prompt_before":"enable","fsm_prompt_after":"enable","success":true,"content":"Version in enable context","all":"show version\nVersion in enable context\nrouter#"}}

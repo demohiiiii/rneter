@@ -1,0 +1,3 @@
+{"ts_ms":1735689601000,"event":{"kind":"connection_established","device_addr":"admin@192.168.1.2:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
+{"ts_ms":1735689601100,"event":{"kind":"command_output","command":"show running-config","mode":"Enable","prompt_before":"router#","prompt_after":"router#","fsm_prompt_before":"enable","fsm_prompt_after":"enable","success":false,"content":"% Invalid input detected","all":"show running-config\n% Invalid input detected\nrouter#"}}
+{"ts_ms":1735689601200,"event":{"kind":"connection_closed","reason":"client_close_called","prompt_before":"router#","fsm_prompt_before":"enable"}}

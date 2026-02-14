@@ -53,6 +53,10 @@ pub enum ConnectError {
     #[error("Failed to send data: {0}")]
     SendDataError(#[from] SendError<String>),
 
+    /// Replay data does not match expected command/mode flow.
+    #[error("replay mismatch: {0}")]
+    ReplayMismatchError(String),
+
     /// An internal server error occurred.
     #[error("Internal server error: {0}")]
     InternalServerError(String),

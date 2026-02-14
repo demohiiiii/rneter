@@ -101,6 +101,69 @@ let _sender = MANAGER.get_with_security(
 ).await?;
 ```
 
+### Session Recording and Replay
+
+```rust
+use rneter::session::{MANAGER, SessionRecordLevel, SessionReplayer};
+use rneter::templates;
+
+let (sender, recorder) = MANAGER.get_with_recording(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+).await?;
+
+// Or record key events only (no raw shell chunks)
+let (_sender2, _recorder2) = MANAGER.get_with_recording_level(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+    SessionRecordLevel::KeyEventsOnly,
+).await?;
+
+// ...send CmdJob through `sender`...
+
+// Export recording as JSONL
+let jsonl = recorder.to_jsonl()?;
+
+// Restore and replay offline
+let restored = rneter::session::SessionRecorder::from_jsonl(&jsonl)?;
+let mut replayer = SessionReplayer::from_recorder(&restored);
+let replayed_output = replayer.replay_next("show version")?;
+println!("Replayed output: {}", replayed_output.content);
+
+// Offline command-flow testing without real SSH
+let script = vec![
+    rneter::session::Command {
+        mode: "Enable".to_string(),
+        command: "terminal length 0".to_string(),
+        timeout: None,
+    },
+    rneter::session::Command {
+        mode: "Enable".to_string(),
+        command: "show version".to_string(),
+        timeout: None,
+    },
+];
+let outputs = replayer.replay_script(&script)?;
+assert_eq!(outputs.len(), 2);
+```
+
+For CI-style offline tests, you can store JSONL recordings under `tests/fixtures/`
+and replay them in integration tests (see `tests/replay_fixtures.rs`).
+
+To normalize noisy online recordings into stable fixtures:
+
+```bash
+cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+```
+
 ## Architecture
 
 ### Connection Management

@@ -101,6 +101,69 @@ let _sender = MANAGER.get_with_security(
 ).await?;
 ```
 
+### 会话录制与回放
+
+```rust
+use rneter::session::{MANAGER, SessionRecordLevel, SessionReplayer};
+use rneter::templates;
+
+let (sender, recorder) = MANAGER.get_with_recording(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+).await?;
+
+// 或者仅记录关键事件（不记录原始 shell 分块）
+let (_sender2, _recorder2) = MANAGER.get_with_recording_level(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+    SessionRecordLevel::KeyEventsOnly,
+).await?;
+
+// ...通过 `sender` 发送 CmdJob...
+
+// 导出为 JSONL
+let jsonl = recorder.to_jsonl()?;
+
+// 恢复并离线回放
+let restored = rneter::session::SessionRecorder::from_jsonl(&jsonl)?;
+let mut replayer = SessionReplayer::from_recorder(&restored);
+let replayed_output = replayer.replay_next("show version")?;
+println!("回放输出: {}", replayed_output.content);
+
+// 无需真实 SSH 的离线命令流程测试
+let script = vec![
+    rneter::session::Command {
+        mode: "Enable".to_string(),
+        command: "terminal length 0".to_string(),
+        timeout: None,
+    },
+    rneter::session::Command {
+        mode: "Enable".to_string(),
+        command: "show version".to_string(),
+        timeout: None,
+    },
+];
+let outputs = replayer.replay_script(&script)?;
+assert_eq!(outputs.len(), 2);
+```
+
+对于 CI 的离线测试，可以将 JSONL 录制文件放在 `tests/fixtures/` 下，
+并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。
+
+将线上录制归一化为稳定 fixture：
+
+```bash
+cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+```
+
 ## 架构
 
 ### 连接管理

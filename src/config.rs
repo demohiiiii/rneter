@@ -158,8 +158,11 @@ pub const SECURE_KEX_ORDER: &[kex::Name] = &[
 ];
 
 /// Strict secure cipher algorithms.
-pub static SECURE_CIPHERS: &[cipher::Name] =
-    &[cipher::AES_256_GCM, cipher::CHACHA20_POLY1305, cipher::AES_256_CTR];
+pub static SECURE_CIPHERS: &[cipher::Name] = &[
+    cipher::AES_256_GCM,
+    cipher::CHACHA20_POLY1305,
+    cipher::AES_256_CTR,
+];
 
 /// Strict secure MAC algorithms.
 pub const SECURE_MAC_ALGORITHMS: &[mac::Name] =

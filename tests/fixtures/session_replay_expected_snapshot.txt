@@ -1,0 +1,2 @@
+terminal length 0|true||router#
+show version|true|Version 1.0|router#
