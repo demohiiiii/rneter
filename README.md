@@ -164,6 +164,29 @@ To normalize noisy online recordings into stable fixtures:
 cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
 ```
 
+### Template and State-Machine Ecosystem
+
+You can manage built-in templates as a catalog and run state-graph diagnostics:
+
+```rust
+use rneter::templates;
+
+let names = templates::available_templates();
+assert!(names.contains(&"cisco"));
+
+let _handler = templates::by_name("juniper")?; // case-insensitive
+
+let report = templates::diagnose_template("cisco")?;
+println!("has issues: {}", report.has_issues());
+println!("dead ends: {:?}", report.dead_end_states);
+
+let catalog = templates::template_catalog();
+println!("template count: {}", catalog.len());
+
+let all_json = templates::diagnose_all_templates_json()?;
+println!("all diagnostics json bytes: {}", all_json.len());
+```
+
 New recording/replay capabilities:
 
 - Prompt tracking: each `command_output` now records both `prompt_before`/`prompt_after`

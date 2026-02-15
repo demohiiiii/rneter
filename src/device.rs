@@ -11,6 +11,8 @@ use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
 
 use crate::error::ConnectError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub struct DeviceHandler {
     /// Index of the current state in the `all_states` vector
@@ -58,6 +60,35 @@ pub struct DeviceHandler {
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
+
+/// Diagnostics summary for a device state machine graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StateMachineDiagnostics {
+    /// Number of declared states.
+    pub total_states: usize,
+    /// States participating in transition graph edges.
+    pub graph_states: Vec<String>,
+    /// Graph entry states (in-degree = 0).
+    pub entry_states: Vec<String>,
+    /// Edge sources that do not exist in declared states.
+    pub missing_edge_sources: Vec<String>,
+    /// Edge targets that do not exist in declared states.
+    pub missing_edge_targets: Vec<String>,
+    /// Graph states unreachable from entry states.
+    pub unreachable_states: Vec<String>,
+    /// Graph states with no outgoing edges.
+    pub dead_end_states: Vec<String>,
+}
+
+impl StateMachineDiagnostics {
+    /// Returns true if diagnostics indicate potential template issues.
+    pub fn has_issues(&self) -> bool {
+        !self.missing_edge_sources.is_empty()
+            || !self.missing_edge_targets.is_empty()
+            || !self.unreachable_states.is_empty()
+            || !self.dead_end_states.is_empty()
+    }
+}
 
 /// Predefined states that exist in every device handler.
 static PRE_STATE: Lazy<Vec<String>> = Lazy::new(|| {
@@ -468,6 +499,114 @@ impl DeviceHandler {
         self.current_prompt.as_deref()
     }
 
+    /// Returns all declared state names.
+    pub fn states(&self) -> Vec<String> {
+        self.all_states.clone()
+    }
+
+    /// Returns all configured transition edges.
+    pub fn edges(&self) -> Vec<(String, String, String, bool, bool)> {
+        self.edges.clone()
+    }
+
+    /// Analyze the state transition graph for common template issues.
+    pub fn diagnose_state_machine(&self) -> StateMachineDiagnostics {
+        let all_states_set: HashSet<String> = self.all_states.iter().cloned().collect();
+        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        let mut out_degree: HashMap<String, usize> = HashMap::new();
+        let mut graph_states_set: HashSet<String> = HashSet::new();
+        let mut missing_edge_sources = HashSet::new();
+        let mut missing_edge_targets = HashSet::new();
+
+        for (from, _cmd, to, _is_exit, _needs_format) in &self.edges {
+            if !all_states_set.contains(from) {
+                missing_edge_sources.insert(from.clone());
+                continue;
+            }
+            if !all_states_set.contains(to) {
+                missing_edge_targets.insert(to.clone());
+                continue;
+            }
+
+            graph_states_set.insert(from.clone());
+            graph_states_set.insert(to.clone());
+
+            adjacency.entry(from.clone()).or_default().push(to.clone());
+            *out_degree.entry(from.clone()).or_insert(0) += 1;
+            *in_degree.entry(to.clone()).or_insert(0) += 1;
+            in_degree.entry(from.clone()).or_insert(0);
+            out_degree.entry(to.clone()).or_insert(0);
+        }
+
+        let mut graph_states = graph_states_set.into_iter().collect::<Vec<_>>();
+        graph_states.sort();
+
+        let mut entry_states = graph_states
+            .iter()
+            .filter(|state| in_degree.get(*state).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        entry_states.sort();
+
+        // Fallback: if no root-like node exists (fully cyclic graph), pick stable seed.
+        let seeds = if entry_states.is_empty() {
+            graph_states
+                .first()
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            entry_states.clone()
+        };
+
+        let mut reachable = HashSet::new();
+        let mut queue = VecDeque::new();
+        for seed in seeds {
+            if reachable.insert(seed.clone()) {
+                queue.push_back(seed);
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adjacency.get(&node) {
+                for next in neighbors {
+                    if reachable.insert(next.clone()) {
+                        queue.push_back(next.clone());
+                    }
+                }
+            }
+        }
+
+        let mut unreachable_states = graph_states
+            .iter()
+            .filter(|state| !reachable.contains(*state))
+            .cloned()
+            .collect::<Vec<_>>();
+        unreachable_states.sort();
+
+        let mut dead_end_states = graph_states
+            .iter()
+            .filter(|state| out_degree.get(*state).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        dead_end_states.sort();
+
+        let mut missing_edge_sources = missing_edge_sources.into_iter().collect::<Vec<_>>();
+        missing_edge_sources.sort();
+        let mut missing_edge_targets = missing_edge_targets.into_iter().collect::<Vec<_>>();
+        missing_edge_targets.sort();
+
+        StateMachineDiagnostics {
+            total_states: self.all_states.len(),
+            graph_states,
+            entry_states,
+            missing_edge_sources,
+            missing_edge_targets,
+            unreachable_states,
+            dead_end_states,
+        }
+    }
+
     /// Checks if the current state is an error state.
     ///
     /// # Returns
@@ -829,5 +968,55 @@ mod tests {
             }
             other => panic!("unexpected error type: {other}"),
         }
+    }
+
+    #[test]
+    fn state_machine_diagnostics_are_clean_for_valid_template() {
+        let handler = build_test_handler();
+        let report = handler.diagnose_state_machine();
+
+        assert!(!report.has_issues());
+        assert!(report.missing_edge_sources.is_empty());
+        assert!(report.missing_edge_targets.is_empty());
+        assert!(report.unreachable_states.is_empty());
+        assert!(report.dead_end_states.is_empty());
+    }
+
+    #[test]
+    fn state_machine_diagnostics_detect_invalid_edges_and_dead_ends() {
+        let handler = DeviceHandler::new(
+            vec![
+                ("Login".to_string(), vec![r"^dev>\s*$"]),
+                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+            ],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![
+                (
+                    "Login".to_string(),
+                    "enable".to_string(),
+                    "Enable".to_string(),
+                    false,
+                    false,
+                ),
+                (
+                    "Enable".to_string(),
+                    "to-ghost".to_string(),
+                    "Ghost".to_string(),
+                    false,
+                    false,
+                ),
+            ],
+            vec![],
+            HashMap::new(),
+        )
+        .expect("handler should build");
+
+        let report = handler.diagnose_state_machine();
+        assert!(report.has_issues());
+        assert_eq!(report.missing_edge_targets, vec!["ghost".to_string()]);
+        assert_eq!(report.dead_end_states, vec!["enable".to_string()]);
     }
 }

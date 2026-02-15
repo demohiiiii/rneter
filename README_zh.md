@@ -164,6 +164,29 @@ assert_eq!(outputs.len(), 2);
 cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
 ```
 
+### 模板与状态机生态
+
+你可以把内置模板当作注册表管理，并直接对状态图做诊断：
+
+```rust
+use rneter::templates;
+
+let names = templates::available_templates();
+assert!(names.contains(&"cisco"));
+
+let _handler = templates::by_name("juniper")?; // 大小写不敏感
+
+let report = templates::diagnose_template("cisco")?;
+println!("是否存在问题: {}", report.has_issues());
+println!("死路状态: {:?}", report.dead_end_states);
+
+let catalog = templates::template_catalog();
+println!("模板数量: {}", catalog.len());
+
+let all_json = templates::diagnose_all_templates_json()?;
+println!("全部诊断 JSON 字节数: {}", all_json.len());
+```
+
 新增的录制/回放能力：
 
 - Prompt 前后态：每条 `command_output` 都记录 `prompt_before`/`prompt_after`

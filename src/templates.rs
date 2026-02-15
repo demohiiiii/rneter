@@ -4,9 +4,165 @@
 //! for common network device types, pre-configured with their prompts,
 //! error messages, and state transitions.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, StateMachineDiagnostics};
 use crate::error::ConnectError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Built-in template names supported by this crate.
+pub const BUILTIN_TEMPLATES: &[&str] = &["cisco", "huawei", "h3c", "hillstone", "juniper", "array"];
+
+/// Capability tags used to describe template compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateCapability {
+    LoginMode,
+    EnableMode,
+    ConfigMode,
+    SysContext,
+    InteractiveInput,
+}
+
+/// Metadata for a built-in device template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TemplateMetadata {
+    pub name: String,
+    pub vendor: String,
+    pub family: String,
+    pub template_version: String,
+    pub capabilities: Vec<TemplateCapability>,
+}
+
+fn metadata_for(name: &str) -> Option<TemplateMetadata> {
+    let meta = match name {
+        "cisco" => TemplateMetadata {
+            name: "cisco".to_string(),
+            vendor: "Cisco".to_string(),
+            family: "IOS/IOS-XE".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "huawei" => TemplateMetadata {
+            name: "huawei".to_string(),
+            vendor: "Huawei".to_string(),
+            family: "VRP".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "h3c" => TemplateMetadata {
+            name: "h3c".to_string(),
+            vendor: "H3C".to_string(),
+            family: "Comware".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+            ],
+        },
+        "hillstone" => TemplateMetadata {
+            name: "hillstone".to_string(),
+            vendor: "Hillstone".to_string(),
+            family: "SG".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "juniper" => TemplateMetadata {
+            name: "juniper".to_string(),
+            vendor: "Juniper".to_string(),
+            family: "JunOS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "array" => TemplateMetadata {
+            name: "array".to_string(),
+            vendor: "Array Networks".to_string(),
+            family: "APV".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::SysContext,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        _ => return None,
+    };
+    Some(meta)
+}
+
+/// Returns names of all built-in templates.
+pub fn available_templates() -> &'static [&'static str] {
+    BUILTIN_TEMPLATES
+}
+
+/// Returns metadata for all built-in templates.
+pub fn template_catalog() -> Vec<TemplateMetadata> {
+    BUILTIN_TEMPLATES
+        .iter()
+        .filter_map(|name| metadata_for(name))
+        .collect()
+}
+
+/// Returns metadata for one template by name (case-insensitive).
+pub fn template_metadata(name: &str) -> Result<TemplateMetadata, ConnectError> {
+    let key = name.to_ascii_lowercase();
+    metadata_for(&key).ok_or_else(|| ConnectError::TemplateNotFound(name.to_string()))
+}
+
+/// Creates a built-in template by name (case-insensitive).
+pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
+    match name.to_ascii_lowercase().as_str() {
+        "cisco" => cisco(),
+        "huawei" => huawei(),
+        "h3c" => h3c(),
+        "hillstone" => hillstone(),
+        "juniper" => juniper(),
+        "array" => array(),
+        _ => Err(ConnectError::TemplateNotFound(name.to_string())),
+    }
+}
+
+/// Builds a template by name and returns its state-machine diagnostics.
+pub fn diagnose_template(name: &str) -> Result<StateMachineDiagnostics, ConnectError> {
+    let handler = by_name(name)?;
+    Ok(handler.diagnose_state_machine())
+}
+
+/// Builds a template by name and exports diagnostics as pretty JSON.
+pub fn diagnose_template_json(name: &str) -> Result<String, ConnectError> {
+    let report = diagnose_template(name)?;
+    serde_json::to_string_pretty(&report)
+        .map_err(|e| ConnectError::InternalServerError(format!("encode diagnostics json: {e}")))
+}
+
+/// Exports diagnostics for all built-in templates as pretty JSON.
+pub fn diagnose_all_templates_json() -> Result<String, ConnectError> {
+    let mut reports = std::collections::BTreeMap::new();
+    for name in BUILTIN_TEMPLATES {
+        reports.insert((*name).to_string(), diagnose_template(name)?);
+    }
+    serde_json::to_string_pretty(&reports)
+        .map_err(|e| ConnectError::InternalServerError(format!("encode diagnostics json: {e}")))
+}
 
 /// Returns a `DeviceHandler` configured for Cisco IOS/IOS-XE devices.
 pub fn cisco() -> Result<DeviceHandler, ConnectError> {
@@ -457,4 +613,72 @@ pub fn array() -> Result<DeviceHandler, ConnectError> {
         // Dyn param
         HashMap::new(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_templates_contains_expected_names() {
+        let names = available_templates();
+        assert!(names.contains(&"cisco"));
+        assert!(names.contains(&"juniper"));
+        assert!(names.contains(&"array"));
+    }
+
+    #[test]
+    fn by_name_is_case_insensitive() {
+        let handler = by_name("CiScO").expect("cisco template should load");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(diagnostics.missing_edge_sources.is_empty());
+        assert!(diagnostics.missing_edge_targets.is_empty());
+    }
+
+    #[test]
+    fn by_name_returns_template_not_found_for_unknown_name() {
+        let err = match by_name("unknown-vendor") {
+            Ok(_) => panic!("unknown template should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ConnectError::TemplateNotFound(_)));
+    }
+
+    #[test]
+    fn diagnose_template_returns_report() {
+        let report = diagnose_template("huawei").expect("diagnostics should succeed");
+        assert!(report.total_states > 0);
+    }
+
+    #[test]
+    fn template_catalog_has_metadata_for_all_builtin_templates() {
+        let catalog = template_catalog();
+        assert_eq!(catalog.len(), BUILTIN_TEMPLATES.len());
+        assert!(catalog.iter().any(|m| m.name == "cisco"));
+        assert!(catalog.iter().any(|m| m.name == "array"));
+    }
+
+    #[test]
+    fn template_metadata_is_case_insensitive() {
+        let meta = template_metadata("JuNiPeR").expect("metadata should resolve");
+        assert_eq!(meta.name, "juniper");
+        assert_eq!(meta.vendor, "Juniper");
+    }
+
+    #[test]
+    fn diagnose_template_json_returns_valid_json() {
+        let json = diagnose_template_json("cisco").expect("json diagnostics");
+        let report: StateMachineDiagnostics =
+            serde_json::from_str(&json).expect("parse diagnostics json");
+        assert!(report.total_states > 0);
+    }
+
+    #[test]
+    fn diagnose_all_templates_json_includes_builtin_template_keys() {
+        let json = diagnose_all_templates_json().expect("all diagnostics json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        for name in BUILTIN_TEMPLATES {
+            assert!(value.get(*name).is_some(), "missing template key: {name}");
+        }
+    }
 }

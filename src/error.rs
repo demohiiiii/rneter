@@ -53,6 +53,10 @@ pub enum ConnectError {
     #[error("Failed to send data: {0}")]
     SendDataError(#[from] SendError<String>),
 
+    /// Requested template is not found.
+    #[error("template not found: {0}")]
+    TemplateNotFound(String),
+
     /// Replay data does not match expected command/mode flow.
     #[error("replay mismatch: {0}")]
     ReplayMismatchError(String),
