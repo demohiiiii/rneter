@@ -57,6 +57,9 @@ pub struct DeviceHandler {
 
     /// Last prompt text matched by the state machine.
     current_prompt: Option<String>,
+
+    /// Prompt regex patterns grouped by state (for diagnostics).
+    prompt_patterns: Vec<(String, String)>,
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
@@ -78,6 +81,14 @@ pub struct StateMachineDiagnostics {
     pub unreachable_states: Vec<String>,
     /// Graph states with no outgoing edges.
     pub dead_end_states: Vec<String>,
+    /// Prompt regex patterns shared by multiple states.
+    pub duplicate_prompt_patterns: Vec<String>,
+    /// States participating in duplicate prompt-pattern groups.
+    pub potentially_ambiguous_prompt_states: Vec<String>,
+    /// States whose outgoing transitions are only self-loop edges.
+    pub self_loop_only_states: Vec<String>,
+    /// Required modes present in graph but unreachable.
+    pub unreachable_required_modes: Vec<String>,
 }
 
 impl StateMachineDiagnostics {
@@ -87,6 +98,9 @@ impl StateMachineDiagnostics {
             || !self.missing_edge_targets.is_empty()
             || !self.unreachable_states.is_empty()
             || !self.dead_end_states.is_empty()
+            || !self.duplicate_prompt_patterns.is_empty()
+            || !self.self_loop_only_states.is_empty()
+            || !self.unreachable_required_modes.is_empty()
     }
 }
 
@@ -201,17 +215,25 @@ impl DeviceHandler {
             regex_index_map.insert(i, 2);
         }
 
+        let mut prompt_patterns: Vec<(String, String)> = Vec::new();
+
         for (state, regex_iter) in prompt {
             // The new state's index is the current length of all_states
+            let normalized_state = state.to_ascii_lowercase();
             let state_index = all_states.len();
-            all_states.push(state.to_ascii_lowercase());
+            all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
             // Automatically prepend the common prefix to prompt regexes
             // We strip any existing leading '^' to avoid duplication
             let modified_regexs = regex_iter
                 .into_iter()
-                .map(|s| format!(r"^\x00*\r{{0,1}}{}", s.as_ref().trim_start_matches('^')));
+                .map(|s| format!(r"^\x00*\r{{0,1}}{}", s.as_ref().trim_start_matches('^')))
+                .collect::<Vec<_>>();
+
+            for pattern in &modified_regexs {
+                prompt_patterns.push((normalized_state.clone(), pattern.clone()));
+            }
             regexs.extend(modified_regexs);
 
             for i in start_offset..regexs.len() {
@@ -225,8 +247,9 @@ impl DeviceHandler {
 
         for (state, regex, catch) in prompt_with_sys {
             // The new state's index is the current length of all_states
+            let normalized_state = state.to_ascii_lowercase();
             let state_index = all_states.len();
-            all_states.push(state.to_ascii_lowercase());
+            all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
 
@@ -242,6 +265,7 @@ impl DeviceHandler {
             })?;
             catch_map.insert(start_offset, (regex, catch));
 
+            prompt_patterns.push((normalized_state, modified_regex.clone()));
             regexs.push(modified_regex);
 
             regex_index_map.insert(start_offset, state_index);
@@ -316,6 +340,7 @@ impl DeviceHandler {
             catch_map,
             sys: None,
             current_prompt: None,
+            prompt_patterns,
         })
     }
 
@@ -511,6 +536,16 @@ impl DeviceHandler {
 
     /// Analyze the state transition graph for common template issues.
     pub fn diagnose_state_machine(&self) -> StateMachineDiagnostics {
+        self.diagnose_state_machine_with_required_modes(&[])
+    }
+
+    /// Analyze state-machine issues with a caller-defined required mode set.
+    ///
+    /// Required modes are matched case-insensitively after ASCII lowercase normalization.
+    pub fn diagnose_state_machine_with_required_modes(
+        &self,
+        required_modes: &[&str],
+    ) -> StateMachineDiagnostics {
         let all_states_set: HashSet<String> = self.all_states.iter().cloned().collect();
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         let mut in_degree: HashMap<String, usize> = HashMap::new();
@@ -596,6 +631,57 @@ impl DeviceHandler {
         let mut missing_edge_targets = missing_edge_targets.into_iter().collect::<Vec<_>>();
         missing_edge_targets.sort();
 
+        let mut duplicate_prompt_patterns = Vec::new();
+        let mut ambiguous_states = HashSet::new();
+        let mut pattern_states: HashMap<String, HashSet<String>> = HashMap::new();
+        for (state, pattern) in &self.prompt_patterns {
+            pattern_states
+                .entry(pattern.clone())
+                .or_default()
+                .insert(state.clone());
+        }
+        for (pattern, states) in pattern_states {
+            if states.len() > 1 {
+                let mut states_vec = states.into_iter().collect::<Vec<_>>();
+                states_vec.sort();
+                for state in &states_vec {
+                    ambiguous_states.insert(state.clone());
+                }
+                duplicate_prompt_patterns.push(format!("{pattern} => {}", states_vec.join(",")));
+            }
+        }
+        duplicate_prompt_patterns.sort();
+        let mut potentially_ambiguous_prompt_states =
+            ambiguous_states.into_iter().collect::<Vec<_>>();
+        potentially_ambiguous_prompt_states.sort();
+
+        let mut self_loop_only_states = graph_states
+            .iter()
+            .filter(|state| {
+                let outs = adjacency.get(*state);
+                out_degree.get(*state).copied().unwrap_or(0) > 0
+                    && outs
+                        .map(|targets| targets.iter().all(|target| target == *state))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self_loop_only_states.sort();
+
+        let required_modes = required_modes
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let mut unreachable_required_modes = required_modes
+            .iter()
+            .filter(|mode| {
+                graph_states.iter().any(|s| s == *mode)
+                    && unreachable_states.iter().any(|s| s == *mode)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        unreachable_required_modes.sort();
+
         StateMachineDiagnostics {
             total_states: self.all_states.len(),
             graph_states,
@@ -604,6 +690,10 @@ impl DeviceHandler {
             missing_edge_targets,
             unreachable_states,
             dead_end_states,
+            duplicate_prompt_patterns,
+            potentially_ambiguous_prompt_states,
+            self_loop_only_states,
+            unreachable_required_modes,
         }
     }
 
@@ -980,6 +1070,54 @@ mod tests {
         assert!(report.missing_edge_targets.is_empty());
         assert!(report.unreachable_states.is_empty());
         assert!(report.dead_end_states.is_empty());
+        assert!(report.duplicate_prompt_patterns.is_empty());
+        assert!(report.potentially_ambiguous_prompt_states.is_empty());
+        assert!(report.self_loop_only_states.is_empty());
+        assert!(report.unreachable_required_modes.is_empty());
+    }
+
+    #[test]
+    fn state_machine_diagnostics_supports_custom_required_modes() {
+        let handler = DeviceHandler::new(
+            vec![
+                ("Login".to_string(), vec![r"^dev>\s*$"]),
+                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+                ("Config".to_string(), vec![r"^dev\(cfg\)#\s*$"]),
+            ],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![
+                (
+                    "Login".to_string(),
+                    "enable".to_string(),
+                    "Enable".to_string(),
+                    false,
+                    false,
+                ),
+                (
+                    "Config".to_string(),
+                    "noop".to_string(),
+                    "Config".to_string(),
+                    false,
+                    false,
+                ),
+            ],
+            vec![],
+            HashMap::new(),
+        )
+        .expect("handler should build");
+
+        let report = handler.diagnose_state_machine_with_required_modes(&["login", "enable"]);
+        assert!(report.unreachable_required_modes.is_empty());
+
+        let report =
+            handler.diagnose_state_machine_with_required_modes(&["login", "enable", "config"]);
+        assert_eq!(
+            report.unreachable_required_modes,
+            vec!["config".to_string()]
+        );
     }
 
     #[test]
@@ -1018,5 +1156,70 @@ mod tests {
         assert!(report.has_issues());
         assert_eq!(report.missing_edge_targets, vec!["ghost".to_string()]);
         assert_eq!(report.dead_end_states, vec!["enable".to_string()]);
+    }
+
+    #[test]
+    fn state_machine_diagnostics_detect_duplicate_prompt_patterns() {
+        let handler = DeviceHandler::new(
+            vec![
+                ("Login".to_string(), vec![r"^dup>\s*$"]),
+                ("Enable".to_string(), vec![r"^dup>\s*$"]),
+            ],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![(
+                "Login".to_string(),
+                "noop".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            )],
+            vec![],
+            HashMap::new(),
+        )
+        .expect("handler should build");
+
+        let report = handler.diagnose_state_machine();
+        assert!(report.has_issues());
+        assert!(!report.duplicate_prompt_patterns.is_empty());
+        assert!(
+            report
+                .potentially_ambiguous_prompt_states
+                .contains(&"enable".to_string())
+        );
+        assert!(
+            report
+                .potentially_ambiguous_prompt_states
+                .contains(&"login".to_string())
+        );
+    }
+
+    #[test]
+    fn state_machine_diagnostics_detect_self_loop_only_states() {
+        let handler = DeviceHandler::new(
+            vec![
+                ("Login".to_string(), vec![r"^dev>\s*$"]),
+                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+            ],
+            vec![],
+            vec![],
+            vec![r"^--More--$"],
+            vec![r"^ERROR: .+$"],
+            vec![(
+                "Enable".to_string(),
+                "noop".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            )],
+            vec![],
+            HashMap::new(),
+        )
+        .expect("handler should build");
+
+        let report = handler.diagnose_state_machine();
+        assert!(report.self_loop_only_states.contains(&"enable".to_string()));
     }
 }

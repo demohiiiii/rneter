@@ -179,12 +179,29 @@ let _handler = templates::by_name("juniper")?; // case-insensitive
 let report = templates::diagnose_template("cisco")?;
 println!("has issues: {}", report.has_issues());
 println!("dead ends: {:?}", report.dead_end_states);
+println!(
+    "unreachable required modes: {:?}",
+    report.unreachable_required_modes
+);
 
 let catalog = templates::template_catalog();
 println!("template count: {}", catalog.len());
+let cisco_meta = templates::template_metadata("cisco")?;
+println!("cisco required modes: {:?}", cisco_meta.required_modes);
 
 let all_json = templates::diagnose_all_templates_json()?;
 println!("all diagnostics json bytes: {}", all_json.len());
+```
+
+`diagnose_template(name)` now validates unreachable modes from each template's
+own `required_modes` metadata, instead of a hard-coded global mode list.
+
+If you build a handler directly, you can define required modes explicitly:
+
+```rust
+let handler = templates::cisco()?;
+let report = handler.diagnose_state_machine_with_required_modes(&["login", "enable", "config"]);
+assert!(report.unreachable_required_modes.is_empty());
 ```
 
 New recording/replay capabilities:

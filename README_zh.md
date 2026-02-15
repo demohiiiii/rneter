@@ -179,12 +179,26 @@ let _handler = templates::by_name("juniper")?; // 大小写不敏感
 let report = templates::diagnose_template("cisco")?;
 println!("是否存在问题: {}", report.has_issues());
 println!("死路状态: {:?}", report.dead_end_states);
+println!("不可达的必需模式: {:?}", report.unreachable_required_modes);
 
 let catalog = templates::template_catalog();
 println!("模板数量: {}", catalog.len());
+let cisco_meta = templates::template_metadata("cisco")?;
+println!("cisco 必需模式: {:?}", cisco_meta.required_modes);
 
 let all_json = templates::diagnose_all_templates_json()?;
 println!("全部诊断 JSON 字节数: {}", all_json.len());
+```
+
+`diagnose_template(name)` 现在会基于模板自身 `required_modes` 元数据来判断
+“必需模式是否不可达”，不再使用固定的全局模式数组。
+
+如果你是直接构建 handler，也可以手工指定必需模式：
+
+```rust
+let handler = templates::cisco()?;
+let report = handler.diagnose_state_machine_with_required_modes(&["login", "enable", "config"]);
+assert!(report.unreachable_required_modes.is_empty());
 ```
 
 新增的录制/回放能力：
