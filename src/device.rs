@@ -87,8 +87,6 @@ pub struct StateMachineDiagnostics {
     pub potentially_ambiguous_prompt_states: Vec<String>,
     /// States whose outgoing transitions are only self-loop edges.
     pub self_loop_only_states: Vec<String>,
-    /// Required modes present in graph but unreachable.
-    pub unreachable_required_modes: Vec<String>,
 }
 
 impl StateMachineDiagnostics {
@@ -100,7 +98,6 @@ impl StateMachineDiagnostics {
             || !self.dead_end_states.is_empty()
             || !self.duplicate_prompt_patterns.is_empty()
             || !self.self_loop_only_states.is_empty()
-            || !self.unreachable_required_modes.is_empty()
     }
 }
 
@@ -536,16 +533,6 @@ impl DeviceHandler {
 
     /// Analyze the state transition graph for common template issues.
     pub fn diagnose_state_machine(&self) -> StateMachineDiagnostics {
-        self.diagnose_state_machine_with_required_modes(&[])
-    }
-
-    /// Analyze state-machine issues with a caller-defined required mode set.
-    ///
-    /// Required modes are matched case-insensitively after ASCII lowercase normalization.
-    pub fn diagnose_state_machine_with_required_modes(
-        &self,
-        required_modes: &[&str],
-    ) -> StateMachineDiagnostics {
         let all_states_set: HashSet<String> = self.all_states.iter().cloned().collect();
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         let mut in_degree: HashMap<String, usize> = HashMap::new();
@@ -668,20 +655,6 @@ impl DeviceHandler {
             .collect::<Vec<_>>();
         self_loop_only_states.sort();
 
-        let required_modes = required_modes
-            .iter()
-            .map(|s| s.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
-        let mut unreachable_required_modes = required_modes
-            .iter()
-            .filter(|mode| {
-                graph_states.iter().any(|s| s == *mode)
-                    && unreachable_states.iter().any(|s| s == *mode)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        unreachable_required_modes.sort();
-
         StateMachineDiagnostics {
             total_states: self.all_states.len(),
             graph_states,
@@ -693,7 +666,6 @@ impl DeviceHandler {
             duplicate_prompt_patterns,
             potentially_ambiguous_prompt_states,
             self_loop_only_states,
-            unreachable_required_modes,
         }
     }
 
@@ -1073,51 +1045,6 @@ mod tests {
         assert!(report.duplicate_prompt_patterns.is_empty());
         assert!(report.potentially_ambiguous_prompt_states.is_empty());
         assert!(report.self_loop_only_states.is_empty());
-        assert!(report.unreachable_required_modes.is_empty());
-    }
-
-    #[test]
-    fn state_machine_diagnostics_supports_custom_required_modes() {
-        let handler = DeviceHandler::new(
-            vec![
-                ("Login".to_string(), vec![r"^dev>\s*$"]),
-                ("Enable".to_string(), vec![r"^dev#\s*$"]),
-                ("Config".to_string(), vec![r"^dev\(cfg\)#\s*$"]),
-            ],
-            vec![],
-            vec![],
-            vec![r"^--More--$"],
-            vec![r"^ERROR: .+$"],
-            vec![
-                (
-                    "Login".to_string(),
-                    "enable".to_string(),
-                    "Enable".to_string(),
-                    false,
-                    false,
-                ),
-                (
-                    "Config".to_string(),
-                    "noop".to_string(),
-                    "Config".to_string(),
-                    false,
-                    false,
-                ),
-            ],
-            vec![],
-            HashMap::new(),
-        )
-        .expect("handler should build");
-
-        let report = handler.diagnose_state_machine_with_required_modes(&["login", "enable"]);
-        assert!(report.unreachable_required_modes.is_empty());
-
-        let report =
-            handler.diagnose_state_machine_with_required_modes(&["login", "enable", "config"]);
-        assert_eq!(
-            report.unreachable_required_modes,
-            vec!["config".to_string()]
-        );
     }
 
     #[test]

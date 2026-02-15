@@ -32,7 +32,6 @@ pub struct TemplateMetadata {
     pub family: String,
     pub template_version: String,
     pub capabilities: Vec<TemplateCapability>,
-    pub required_modes: Vec<String>,
 }
 
 fn metadata_for(name: &str) -> Option<TemplateMetadata> {
@@ -48,11 +47,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            required_modes: vec![
-                "login".to_string(),
-                "enable".to_string(),
-                "config".to_string(),
-            ],
         },
         "huawei" => TemplateMetadata {
             name: "huawei".to_string(),
@@ -64,7 +58,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            required_modes: vec!["enable".to_string(), "config".to_string()],
         },
         "h3c" => TemplateMetadata {
             name: "h3c".to_string(),
@@ -75,7 +68,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
-            required_modes: vec!["enable".to_string(), "config".to_string()],
         },
         "hillstone" => TemplateMetadata {
             name: "hillstone".to_string(),
@@ -87,7 +79,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            required_modes: vec!["enable".to_string(), "config".to_string()],
         },
         "juniper" => TemplateMetadata {
             name: "juniper".to_string(),
@@ -99,7 +90,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            required_modes: vec!["enable".to_string(), "config".to_string()],
         },
         "array" => TemplateMetadata {
             name: "array".to_string(),
@@ -112,11 +102,6 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::SysContext,
                 TemplateCapability::InteractiveInput,
-            ],
-            required_modes: vec![
-                "login".to_string(),
-                "enable".to_string(),
-                "config".to_string(),
             ],
         },
         _ => return None,
@@ -158,14 +143,8 @@ pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
 
 /// Builds a template by name and returns its state-machine diagnostics.
 pub fn diagnose_template(name: &str) -> Result<StateMachineDiagnostics, ConnectError> {
-    let meta = template_metadata(name)?;
     let handler = by_name(name)?;
-    let required_modes = meta
-        .required_modes
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>();
-    Ok(handler.diagnose_state_machine_with_required_modes(&required_modes))
+    Ok(handler.diagnose_state_machine())
 }
 
 /// Builds a template by name and exports diagnostics as pretty JSON.

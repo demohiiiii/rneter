@@ -2,29 +2,44 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.6] - 2026-02-15
+
+### New Features
+- Added a release-oriented changelog workflow that standardizes version notes into feature, optimization, API-change, and risk categories before publishing.
+
+### Optimizations
+- Simplified template/state-machine diagnostics by removing low-signal required-mode checks and focusing diagnostics on graph consistency and prompt/transition quality.
+- Reduced maintenance overhead by removing redundant required-mode metadata wiring from template catalog generation.
+
+### API Changes
+- Removed `StateMachineDiagnostics.unreachable_required_modes`.
+- Removed `DeviceHandler::diagnose_state_machine_with_required_modes(&[&str])`.
+- Removed `TemplateMetadata.required_modes`.
+- `templates::diagnose_template(name)` now directly uses `handler.diagnose_state_machine()`.
+
+### Risks
+- Any downstream code that referenced removed required-mode fields/methods will fail to compile until migrated.
+- Integrations that relied on required-mode diagnostics semantics must switch to other diagnostics fields (for example `unreachable_states`, `dead_end_states`).
+
+---
+
 ## [0.1.5] - 2026-02-15
 
 ### Added
-- Configurable required-mode diagnostics for state machines.
-- New API: `DeviceHandler::diagnose_state_machine_with_required_modes(&[&str])`.
-- Template metadata now includes `required_modes` and is used by template diagnostics.
+- State-machine diagnostics coverage improvements.
 
 ### Changed
-- `StateMachineDiagnostics.unreachable_standard_modes` renamed to `unreachable_required_modes`.
-- `templates::diagnose_template(name)` now validates unreachable modes from each template's own metadata instead of a fixed global mode set.
+- Removed required-mode diagnostics to keep template validation focused on graph structure and prompt/transition quality.
 
 ### Usage
 ```rust
 let handler = rneter::templates::cisco()?;
-let report = handler.diagnose_state_machine_with_required_modes(&["login", "enable", "config"]);
-assert!(report.unreachable_required_modes.is_empty());
-
-let meta = rneter::templates::template_metadata("cisco")?;
-println!("{:?}", meta.required_modes);
+let report = handler.diagnose_state_machine();
+assert!(!report.graph_states.is_empty());
 ```
 
 ### Migration Notes
-- If your code reads `unreachable_standard_modes`, migrate to `unreachable_required_modes`.
+- If your code used required-mode diagnostics APIs/fields, remove those usages and rely on graph diagnostics fields.
 
 ---
 
@@ -117,4 +132,3 @@ cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/sessio
 
 ### Added
 - CI quality improvements (including clippy checks).
-
