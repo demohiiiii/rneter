@@ -1,6 +1,79 @@
 use super::*;
 
 impl SharedSshClient {
+    async fn rollback_committed_block(
+        &mut self,
+        block: &TxBlock,
+        sys: Option<&String>,
+    ) -> Result<(bool, Vec<String>), ConnectError> {
+        if block.kind == CommandBlockKind::Show {
+            return Ok((true, Vec::new()));
+        }
+        let executed = (0..block.steps.len()).collect::<Vec<_>>();
+        let plan = block.plan_rollback(&executed)?;
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxRollbackStarted {
+                block_name: block.name.clone(),
+            });
+        }
+        let mut rollback_succeeded = true;
+        let mut rollback_errors = Vec::new();
+        for (plan_idx, rollback) in plan.into_iter().enumerate() {
+            let timeout = Duration::from_secs(rollback.timeout_secs.unwrap_or(60));
+            match self
+                .write_with_mode_and_timeout(&rollback.command, &rollback.mode, sys, timeout)
+                .await
+            {
+                Ok(output) if output.success => {
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepSucceeded {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                        });
+                    }
+                }
+                Ok(output) => {
+                    rollback_succeeded = false;
+                    let reason = format!(
+                        "workflow rollback command failed for block '{}': '{}' output='{}'",
+                        block.name, rollback.command, output.content
+                    );
+                    rollback_errors.push(reason.clone());
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                            reason,
+                        });
+                    }
+                }
+                Err(err) => {
+                    rollback_succeeded = false;
+                    let reason = format!(
+                        "workflow rollback command error for block '{}': '{}' err={}",
+                        block.name, rollback.command, err
+                    );
+                    rollback_errors.push(reason.clone());
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                            reason,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok((rollback_succeeded, rollback_errors))
+    }
+
     /// Calculates SHA-256 hash of the password.
     fn calculate_password_hash(password: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -488,5 +561,297 @@ impl SharedSshClient {
 
         cmd_output.all = all;
         Ok(cmd_output)
+    }
+
+    /// Execute a transaction-like command block.
+    ///
+    /// For `show` blocks, commands are executed sequentially without rollback.
+    /// For `config` blocks, failure triggers rollback according to policy.
+    pub async fn execute_tx_block(
+        &mut self,
+        block: &TxBlock,
+        sys: Option<&String>,
+    ) -> Result<TxResult, ConnectError> {
+        // Validate invariants once at entry, so runtime branches can assume a valid model.
+        block.validate()?;
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxBlockStarted {
+                block_name: block.name.clone(),
+                block_kind: block.kind,
+            });
+        }
+
+        let mut executed_indices = Vec::new();
+        let mut failure_reason = None;
+        let mut failed_step = None;
+
+        // Forward phase: execute each step in order.
+        for (idx, step) in block.steps.iter().enumerate() {
+            let timeout = Duration::from_secs(step.timeout_secs.unwrap_or(60));
+            match self
+                .write_with_mode_and_timeout(&step.command, &step.mode, sys, timeout)
+                .await
+            {
+                Ok(output) if output.success => {
+                    executed_indices.push(idx);
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxStepSucceeded {
+                            block_name: block.name.clone(),
+                            step_index: idx,
+                            mode: step.mode.clone(),
+                            command: step.command.clone(),
+                        });
+                    }
+                }
+                Ok(output) => {
+                    failed_step = Some(idx);
+                    failure_reason = Some(format!(
+                        "step[{idx}] command failed: '{}' output='{}'",
+                        step.command, output.content
+                    ));
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: idx,
+                            mode: step.mode.clone(),
+                            command: step.command.clone(),
+                            reason: failure_reason.clone().unwrap_or_default(),
+                        });
+                    }
+                    if block.fail_fast {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    failed_step = Some(idx);
+                    failure_reason = Some(format!("step[{idx}] command error: {err}"));
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: idx,
+                            mode: step.mode.clone(),
+                            command: step.command.clone(),
+                            reason: failure_reason.clone().unwrap_or_default(),
+                        });
+                    }
+                    if block.fail_fast {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // All forward steps succeeded -> committed.
+        if failed_step.is_none() {
+            let result = TxResult::committed(block.name.clone(), executed_indices.len());
+            if let Some(recorder) = self.recorder.as_ref() {
+                let _ = recorder.record_event(SessionEvent::TxBlockFinished {
+                    block_name: block.name.clone(),
+                    committed: true,
+                    rollback_attempted: false,
+                    rollback_succeeded: false,
+                });
+            }
+            return Ok(result);
+        }
+
+        // `show` blocks intentionally do not rollback even on failures.
+        if block.kind == CommandBlockKind::Show {
+            let result = TxResult {
+                block_name: block.name.clone(),
+                committed: false,
+                failed_step,
+                executed_steps: executed_indices.len(),
+                rollback_attempted: false,
+                rollback_succeeded: false,
+                rollback_steps: 0,
+                failure_reason,
+                rollback_errors: Vec::new(),
+            };
+            if let Some(recorder) = self.recorder.as_ref() {
+                let _ = recorder.record_event(SessionEvent::TxBlockFinished {
+                    block_name: block.name.clone(),
+                    committed: false,
+                    rollback_attempted: false,
+                    rollback_succeeded: false,
+                });
+            }
+            return Ok(result);
+        }
+
+        // Compensation phase: build rollback commands from executed success path.
+        let rollback_plan = block.plan_rollback(&executed_indices)?;
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxRollbackStarted {
+                block_name: block.name.clone(),
+            });
+        }
+        let mut rollback_succeeded = true;
+        let mut rollback_errors = Vec::new();
+        let mut rollback_steps = 0;
+
+        // Execute rollback commands in planned order (already reversed for per-step policy).
+        for (plan_idx, rollback) in rollback_plan.into_iter().enumerate() {
+            let timeout = Duration::from_secs(rollback.timeout_secs.unwrap_or(60));
+            match self
+                .write_with_mode_and_timeout(&rollback.command, &rollback.mode, sys, timeout)
+                .await
+            {
+                Ok(output) if output.success => {
+                    rollback_steps += 1;
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepSucceeded {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                        });
+                    }
+                }
+                Ok(output) => {
+                    rollback_succeeded = false;
+                    rollback_steps += 1;
+                    let reason = format!(
+                        "rollback command failed: '{}' output='{}'",
+                        rollback.command, output.content
+                    );
+                    rollback_errors.push(reason.clone());
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                            reason,
+                        });
+                    }
+                }
+                Err(err) => {
+                    rollback_succeeded = false;
+                    let reason =
+                        format!("rollback command error: '{}' err={}", rollback.command, err);
+                    rollback_errors.push(reason.clone());
+                    if let Some(recorder) = self.recorder.as_ref() {
+                        let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
+                            block_name: block.name.clone(),
+                            step_index: Some(plan_idx),
+                            mode: rollback.mode.clone(),
+                            command: rollback.command.clone(),
+                            reason,
+                        });
+                    }
+                }
+            }
+        }
+
+        let result = TxResult {
+            block_name: block.name.clone(),
+            committed: false,
+            failed_step,
+            executed_steps: executed_indices.len(),
+            rollback_attempted: true,
+            rollback_succeeded,
+            rollback_steps,
+            failure_reason,
+            rollback_errors,
+        };
+
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxBlockFinished {
+                block_name: block.name.clone(),
+                committed: false,
+                rollback_attempted: true,
+                rollback_succeeded: result.rollback_succeeded,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Execute multi-block workflow with global rollback on failure.
+    pub async fn execute_tx_workflow(
+        &mut self,
+        workflow: &TxWorkflow,
+        sys: Option<&String>,
+    ) -> Result<TxWorkflowResult, ConnectError> {
+        workflow.validate()?;
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxWorkflowStarted {
+                workflow_name: workflow.name.clone(),
+                total_blocks: workflow.blocks.len(),
+            });
+        }
+
+        let mut block_results = Vec::with_capacity(workflow.blocks.len());
+        let mut committed_block_indices = Vec::new();
+        let mut failed_block = None;
+
+        for (idx, block) in workflow.blocks.iter().enumerate() {
+            let result = self.execute_tx_block(block, sys).await?;
+            let committed = result.committed;
+            block_results.push(result);
+            if committed {
+                committed_block_indices.push(idx);
+                continue;
+            }
+            failed_block = Some(idx);
+            if workflow.fail_fast {
+                break;
+            }
+        }
+
+        if failed_block.is_none() {
+            if let Some(recorder) = self.recorder.as_ref() {
+                let _ = recorder.record_event(SessionEvent::TxWorkflowFinished {
+                    workflow_name: workflow.name.clone(),
+                    committed: true,
+                    rollback_attempted: false,
+                    rollback_succeeded: false,
+                });
+            }
+            return Ok(TxWorkflowResult {
+                workflow_name: workflow.name.clone(),
+                committed: true,
+                failed_block: None,
+                block_results,
+                rollback_attempted: false,
+                rollback_succeeded: false,
+                rollback_errors: Vec::new(),
+            });
+        }
+
+        let failed_idx = failed_block.unwrap_or(0);
+        let mut rollback_succeeded = true;
+        let mut rollback_errors = Vec::new();
+
+        // Roll back previously committed blocks in reverse order.
+        for block_idx in workflow_rollback_order(&committed_block_indices, failed_idx) {
+            if let Some(block) = workflow.blocks.get(block_idx) {
+                let (ok, errors) = self.rollback_committed_block(block, sys).await?;
+                if !ok {
+                    rollback_succeeded = false;
+                }
+                rollback_errors.extend(errors);
+            }
+        }
+
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::TxWorkflowFinished {
+                workflow_name: workflow.name.clone(),
+                committed: false,
+                rollback_attempted: true,
+                rollback_succeeded,
+            });
+        }
+
+        Ok(TxWorkflowResult {
+            workflow_name: workflow.name.clone(),
+            committed: false,
+            failed_block,
+            block_results,
+            rollback_attempted: true,
+            rollback_succeeded,
+            rollback_errors,
+        })
     }
 }

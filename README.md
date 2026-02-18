@@ -155,6 +155,99 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
+### Transactional Command Blocks
+
+For configuration commands, you can execute a block with commit-or-rollback behavior:
+
+```rust
+use rneter::session::{MANAGER, CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
+use rneter::templates;
+
+let block = TxBlock {
+    name: "addr-create".to_string(),
+    kind: CommandBlockKind::Config,
+    rollback_policy: RollbackPolicy::WholeResource {
+        mode: "Config".to_string(),
+        undo_command: "no object network WEB01".to_string(),
+        timeout_secs: Some(30),
+    },
+    steps: vec![
+        TxStep {
+            mode: "Config".to_string(),
+            command: "object network WEB01".to_string(),
+            timeout_secs: Some(30),
+            rollback_command: None,
+        },
+        TxStep {
+            mode: "Config".to_string(),
+            command: "host 10.0.0.10".to_string(),
+            timeout_secs: Some(30),
+            rollback_command: None,
+        },
+    ],
+    fail_fast: true,
+};
+
+let result = MANAGER
+    .execute_tx_block(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+        None,
+        templates::cisco()?,
+        block,
+        None,
+    )
+    .await?;
+println!(
+    "committed={}, rollback_succeeded={}",
+    result.committed, result.rollback_succeeded
+);
+```
+
+For multi-block all-or-nothing workflows (for example addresses -> services -> policy):
+
+```rust
+use rneter::session::{TxWorkflow, TxWorkflowResult};
+
+let workflow = TxWorkflow {
+    name: "fw-policy-publish".to_string(),
+    blocks: vec![addr_block, svc_block, policy_block],
+    fail_fast: true,
+};
+
+let workflow_result: TxWorkflowResult = MANAGER
+    .execute_tx_workflow(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+        None,
+        templates::cisco()?,
+        workflow,
+        None,
+    )
+    .await?;
+```
+
+You can also build blocks from template strategies:
+
+```rust
+let cmds = vec![
+    "object network WEB01".to_string(),
+    "host 10.0.0.10".to_string(),
+];
+let block = templates::build_tx_block(
+    "cisco",
+    "addr-create",
+    "Config",
+    &cmds,
+    Some(30),
+    Some("no object network WEB01".to_string()), // whole-resource rollback
+)?;
+```
+
 For CI-style offline tests, you can store JSONL recordings under `tests/fixtures/`
 and replay them in integration tests (see `tests/replay_fixtures.rs`).
 
@@ -192,6 +285,7 @@ New recording/replay capabilities:
 - Prompt tracking: each `command_output` now records both `prompt_before`/`prompt_after`
 - FSM prompt tracking: each event can include `fsm_prompt_before`/`fsm_prompt_after`
 - Output prompt: command/replay results now include `Output.prompt`
+- Transaction lifecycle recording: `tx_block_started`, `tx_step_succeeded`, `tx_step_failed`, `tx_rollback_started`, `tx_rollback_step_succeeded`, `tx_rollback_step_failed`, `tx_block_finished`
 - Schema compatibility: legacy `connection_established` fields (`prompt`/`state`) remain readable
 - Fixture quality workflow: `tests/fixtures/` includes success/failure/state-switch samples and snapshot checks in `tests/replay_fixtures.rs`
 
@@ -209,6 +303,18 @@ Example `command_output` event shape:
   "success": true,
   "content": "Version 1.0",
   "all": "show version\nVersion 1.0\nrouter#"
+}
+```
+
+Example transaction lifecycle event shape:
+
+```json
+{
+  "kind": "tx_block_finished",
+  "block_name": "addr-create",
+  "committed": false,
+  "rollback_attempted": true,
+  "rollback_succeeded": true
 }
 ```
 

@@ -61,6 +61,10 @@ pub enum ConnectError {
     #[error("replay mismatch: {0}")]
     ReplayMismatchError(String),
 
+    /// Transaction block is invalid.
+    #[error("invalid transaction block: {0}")]
+    InvalidTransaction(String),
+
     /// An internal server error occurred.
     #[error("Internal server error: {0}")]
     InternalServerError(String),

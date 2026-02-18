@@ -6,6 +6,7 @@
 
 use crate::device::{DeviceHandler, StateMachineDiagnostics};
 use crate::error::ConnectError;
+use crate::session::{CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -126,6 +127,155 @@ pub fn template_catalog() -> Vec<TemplateMetadata> {
 pub fn template_metadata(name: &str) -> Result<TemplateMetadata, ConnectError> {
     let key = name.to_ascii_lowercase();
     metadata_for(&key).ok_or_else(|| ConnectError::TemplateNotFound(name.to_string()))
+}
+
+/// Classify a command for a specific template.
+///
+/// Current rule is intentionally simple: read-only commands are treated as `show`,
+/// everything else is treated as `config`.
+pub fn classify_command(template: &str, command: &str) -> Result<CommandBlockKind, ConnectError> {
+    let _ = template_metadata(template)?;
+    let cmd = command.trim().to_ascii_lowercase();
+    let show_prefixes = ["show ", "display ", "ping ", "traceroute "];
+    if show_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
+        return Ok(CommandBlockKind::Show);
+    }
+    Ok(CommandBlockKind::Config)
+}
+
+fn infer_rollback_command(template_key: &str, command: &str) -> Option<String> {
+    let cmd = command.trim();
+    let lower = cmd.to_ascii_lowercase();
+
+    if ["show ", "display ", "ping ", "traceroute "]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        return None;
+    }
+
+    // Vendor-specific compensation patterns.
+    match template_key {
+        // JunOS is set/delete style.
+        "juniper" => {
+            if let Some(rest) = cmd.strip_prefix("set ") {
+                Some(format!("delete {rest}"))
+            } else if let Some(rest) = cmd.strip_prefix("activate ") {
+                Some(format!("deactivate {rest}"))
+            } else {
+                cmd.strip_prefix("deactivate ")
+                    .map(|rest| format!("activate {rest}"))
+            }
+        }
+        // VRP/Comware prefer "undo <cmd>".
+        "huawei" | "h3c" => {
+            if lower.starts_with("undo ") {
+                None
+            } else {
+                Some(format!("undo {cmd}"))
+            }
+        }
+        // Cisco/Hillstone/Array style: "no <cmd>".
+        _ => {
+            if lower.starts_with("no ") {
+                None
+            } else {
+                Some(format!("no {cmd}"))
+            }
+        }
+    }
+}
+
+/// Build a transaction-like block from template + command list.
+///
+/// Behavior:
+/// - If all commands are `show`-like, build a `show` block with no rollback.
+/// - Otherwise build a `config` block.
+///   - If `resource_rollback_command` is provided, use `whole_resource`.
+///   - Else infer per-step rollback commands from template rules.
+pub fn build_tx_block(
+    template: &str,
+    block_name: &str,
+    mode: &str,
+    commands: &[String],
+    timeout_secs: Option<u64>,
+    resource_rollback_command: Option<String>,
+) -> Result<TxBlock, ConnectError> {
+    let template_key = template.to_ascii_lowercase();
+    let _ = template_metadata(&template_key)?;
+
+    if commands.is_empty() {
+        return Err(ConnectError::InvalidTransaction(
+            "cannot build tx block with empty commands".to_string(),
+        ));
+    }
+
+    // If every command is read-only, skip rollback and keep a simple show block.
+    let kinds = commands
+        .iter()
+        .map(|cmd| classify_command(&template_key, cmd))
+        .collect::<Result<Vec<_>, _>>()?;
+    let all_show = kinds.iter().all(|k| *k == CommandBlockKind::Show);
+
+    if all_show {
+        return Ok(TxBlock {
+            name: block_name.to_string(),
+            kind: CommandBlockKind::Show,
+            rollback_policy: RollbackPolicy::None,
+            steps: commands
+                .iter()
+                .map(|cmd| TxStep {
+                    mode: mode.to_string(),
+                    command: cmd.clone(),
+                    timeout_secs,
+                    rollback_command: None,
+                })
+                .collect(),
+            fail_fast: true,
+        });
+    }
+
+    // Config blocks choose rollback policy based on caller intent:
+    // - explicit resource rollback command -> whole resource compensation
+    // - otherwise try per-step rollback inference
+    let rollback_policy = if let Some(undo) = resource_rollback_command {
+        RollbackPolicy::WholeResource {
+            mode: mode.to_string(),
+            undo_command: undo,
+            timeout_secs,
+        }
+    } else {
+        RollbackPolicy::PerStep
+    };
+
+    let mut steps = Vec::with_capacity(commands.len());
+    for (i, cmd) in commands.iter().enumerate() {
+        let rollback_command = if matches!(rollback_policy, RollbackPolicy::PerStep) {
+            infer_rollback_command(&template_key, cmd)
+        } else {
+            None
+        };
+        if matches!(rollback_policy, RollbackPolicy::PerStep) && rollback_command.is_none() {
+            return Err(ConnectError::InvalidTransaction(format!(
+                "cannot infer rollback command for step[{i}] '{}'; provide resource_rollback_command",
+                cmd
+            )));
+        }
+        steps.push(TxStep {
+            mode: mode.to_string(),
+            command: cmd.clone(),
+            timeout_secs,
+            rollback_command,
+        });
+    }
+
+    Ok(TxBlock {
+        name: block_name.to_string(),
+        kind: CommandBlockKind::Config,
+        rollback_policy,
+        steps,
+        fail_fast: true,
+    })
 }
 
 /// Creates a built-in template by name (case-insensitive).
@@ -680,5 +830,80 @@ mod tests {
         for name in BUILTIN_TEMPLATES {
             assert!(value.get(*name).is_some(), "missing template key: {name}");
         }
+    }
+
+    #[test]
+    fn classify_show_command_returns_show_kind() {
+        let kind = classify_command("cisco", "show version").expect("classify");
+        assert_eq!(kind, CommandBlockKind::Show);
+    }
+
+    #[test]
+    fn build_tx_block_for_show_uses_none_rollback() {
+        let commands = vec!["show version".to_string(), "show clock".to_string()];
+        let tx = build_tx_block("cisco", "show-block", "Enable", &commands, Some(30), None)
+            .expect("build show tx");
+        assert_eq!(tx.kind, CommandBlockKind::Show);
+        assert!(matches!(tx.rollback_policy, RollbackPolicy::None));
+        assert!(tx.steps.iter().all(|s| s.rollback_command.is_none()));
+    }
+
+    #[test]
+    fn build_tx_block_for_huawei_infers_undo_per_step() {
+        let commands = vec!["acl 3000".to_string(), "rule permit ip".to_string()];
+        let tx = build_tx_block("huawei", "cfg-block", "Config", &commands, Some(30), None)
+            .expect("build config tx");
+        assert_eq!(tx.kind, CommandBlockKind::Config);
+        assert!(matches!(tx.rollback_policy, RollbackPolicy::PerStep));
+        assert_eq!(
+            tx.steps[0].rollback_command.as_deref(),
+            Some("undo acl 3000")
+        );
+        assert_eq!(
+            tx.steps[1].rollback_command.as_deref(),
+            Some("undo rule permit ip")
+        );
+    }
+
+    #[test]
+    fn build_tx_block_for_juniper_infers_delete_from_set() {
+        let commands =
+            vec!["set security zones security-zone trust interfaces ge-0/0/0.0".to_string()];
+        let tx = build_tx_block("juniper", "cfg-block", "Config", &commands, None, None)
+            .expect("build config tx");
+        assert_eq!(
+            tx.steps[0].rollback_command.as_deref(),
+            Some("delete security zones security-zone trust interfaces ge-0/0/0.0")
+        );
+    }
+
+    #[test]
+    fn build_tx_block_supports_whole_resource_rollback() {
+        let commands = vec![
+            "address-object host WEB01".to_string(),
+            "host 10.0.0.10".to_string(),
+        ];
+        let tx = build_tx_block(
+            "cisco",
+            "addr-create",
+            "Config",
+            &commands,
+            Some(20),
+            Some("no address-object host WEB01".to_string()),
+        )
+        .expect("build config tx");
+        assert!(matches!(
+            tx.rollback_policy,
+            RollbackPolicy::WholeResource { .. }
+        ));
+        assert!(tx.steps.iter().all(|s| s.rollback_command.is_none()));
+    }
+
+    #[test]
+    fn build_tx_block_returns_error_when_rollback_cannot_be_inferred() {
+        let commands = vec!["undo acl 3000".to_string()];
+        let err = build_tx_block("huawei", "bad", "Config", &commands, None, None)
+            .expect_err("should fail");
+        assert!(matches!(err, ConnectError::InvalidTransaction(_)));
     }
 }

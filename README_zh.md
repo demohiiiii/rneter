@@ -155,6 +155,99 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
+### 事务化命令块下发
+
+对于配置命令，可以按“块”执行并实现失败补偿回滚：
+
+```rust
+use rneter::session::{MANAGER, CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
+use rneter::templates;
+
+let block = TxBlock {
+    name: "addr-create".to_string(),
+    kind: CommandBlockKind::Config,
+    rollback_policy: RollbackPolicy::WholeResource {
+        mode: "Config".to_string(),
+        undo_command: "no object network WEB01".to_string(),
+        timeout_secs: Some(30),
+    },
+    steps: vec![
+        TxStep {
+            mode: "Config".to_string(),
+            command: "object network WEB01".to_string(),
+            timeout_secs: Some(30),
+            rollback_command: None,
+        },
+        TxStep {
+            mode: "Config".to_string(),
+            command: "host 10.0.0.10".to_string(),
+            timeout_secs: Some(30),
+            rollback_command: None,
+        },
+    ],
+    fail_fast: true,
+};
+
+let result = MANAGER
+    .execute_tx_block(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+        None,
+        templates::cisco()?,
+        block,
+        None,
+    )
+    .await?;
+println!(
+    "committed={}, rollback_succeeded={}",
+    result.committed, result.rollback_succeeded
+);
+```
+
+对于“地址对象 -> 服务对象 -> 策略”这类多块统一成败场景，可使用 workflow：
+
+```rust
+use rneter::session::{TxWorkflow, TxWorkflowResult};
+
+let workflow = TxWorkflow {
+    name: "fw-policy-publish".to_string(),
+    blocks: vec![addr_block, svc_block, policy_block],
+    fail_fast: true,
+};
+
+let workflow_result: TxWorkflowResult = MANAGER
+    .execute_tx_workflow(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+        None,
+        templates::cisco()?,
+        workflow,
+        None,
+    )
+    .await?;
+```
+
+也可以直接用模板策略自动构建事务块：
+
+```rust
+let cmds = vec![
+    "object network WEB01".to_string(),
+    "host 10.0.0.10".to_string(),
+];
+let block = templates::build_tx_block(
+    "cisco",
+    "addr-create",
+    "Config",
+    &cmds,
+    Some(30),
+    Some("no object network WEB01".to_string()), // 整体回滚
+)?;
+```
+
 对于 CI 的离线测试，可以将 JSONL 录制文件放在 `tests/fixtures/` 下，
 并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。
 
@@ -192,6 +285,7 @@ println!("全部诊断 JSON 字节数: {}", all_json.len());
 - Prompt 前后态：每条 `command_output` 都记录 `prompt_before`/`prompt_after`
 - 状态机 prompt 前后态：事件可记录 `fsm_prompt_before`/`fsm_prompt_after`
 - 返回值带 prompt：命令执行与离线回放的 `Output` 现在包含 `prompt`
+- 事务生命周期事件：`tx_block_started`、`tx_step_succeeded`、`tx_step_failed`、`tx_rollback_started`、`tx_rollback_step_succeeded`、`tx_rollback_step_failed`、`tx_block_finished`
 - 兼容旧 schema：历史 `connection_established` 的 `prompt`/`state` 字段仍可读取
 - fixture 测试工作流：`tests/fixtures/` 提供成功流/失败流/状态切换样本，`tests/replay_fixtures.rs` 提供快照与质量校验
 
@@ -209,6 +303,18 @@ println!("全部诊断 JSON 字节数: {}", all_json.len());
   "success": true,
   "content": "Version 1.0",
   "all": "show version\nVersion 1.0\nrouter#"
+}
+```
+
+事务生命周期事件示例：
+
+```json
+{
+  "kind": "tx_block_finished",
+  "block_name": "addr-create",
+  "committed": false,
+  "rollback_attempted": true,
+  "rollback_succeeded": true
 }
 ```
 

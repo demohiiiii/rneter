@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.0] - 2026-02-18
+
+### New Features
+- Added transaction block execution APIs for command groups with rollback support:
+  - `SshConnectionManager::execute_tx_block(...)`
+  - `SharedSshClient::execute_tx_block(...)`
+- Added workflow-level all-or-nothing orchestration for multi-block scenarios (for example firewall address/service/policy publishing):
+  - `TxWorkflow`, `TxWorkflowResult`
+  - `SshConnectionManager::execute_tx_workflow(...)`
+- Added template-level transaction helpers:
+  - `templates::classify_command(...)`
+  - `templates::build_tx_block(...)`
+- Added firewall workflow example with diagnostics precheck and dry-run planning output:
+  - `examples/firewall_workflow.rs`
+
+### Optimizations
+- Improved rollback determinism by extracting global workflow rollback ordering into reusable logic (`workflow_rollback_order`), with dedicated tests.
+- Improved transaction observability by recording lifecycle events for blocks and workflows, including rollback phases.
+- Improved maintainability by centralizing transaction model validation and rollback planning in `src/session/transaction.rs`.
+
+### API Changes
+- Added new transaction model types:
+  - `CommandBlockKind`, `RollbackPolicy`, `TxStep`, `TxBlock`, `TxResult`
+  - `TxWorkflow`, `TxWorkflowResult`
+- Added new error variant: `ConnectError::InvalidTransaction(String)`.
+- Added new session recording events:
+  - `tx_block_started`, `tx_step_succeeded`, `tx_step_failed`
+  - `tx_rollback_started`, `tx_rollback_step_succeeded`, `tx_rollback_step_failed`
+  - `tx_block_finished`, `tx_workflow_started`, `tx_workflow_finished`
+
+### Risks
+- Workflow rollback across previously committed blocks is compensation-based (CLI Saga style), not device-native atomic rollback; devices with side effects outside modeled commands can still drift.
+- Template rollback inference is heuristic per vendor style (`no` / `undo` / `set->delete`); ambiguous commands should use explicit `resource_rollback_command` to avoid incorrect compensation.
+- Existing integrations that parse recording JSONL by strict event whitelist must be updated to tolerate new transaction event kinds.
+
+---
+
 ## [0.1.6] - 2026-02-15
 
 ### New Features

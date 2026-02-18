@@ -38,6 +38,10 @@ pub use recording::{
     SessionRecorder, SessionReplayer,
 };
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
+pub use transaction::{
+    CommandBlockKind, RollbackPolicy, TxBlock, TxResult, TxStep, TxWorkflow, TxWorkflowResult,
+    workflow_rollback_order,
+};
 
 /// Global singleton SSH connection manager.
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
@@ -118,3 +122,4 @@ mod client;
 mod manager;
 mod recording;
 mod security;
+mod transaction;

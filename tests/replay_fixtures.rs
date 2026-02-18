@@ -17,6 +17,14 @@ const NOISY_FIXTURE: &str = r#"{"ts_ms":1,"event":{"kind":"connection_establishe
 const MISSING_PROMPT_AFTER_FIXTURE: &str = r#"{"ts_ms":1,"event":{"kind":"connection_established","device_addr":"admin@192.168.1.1:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
 {"ts_ms":2,"event":{"kind":"command_output","command":"show version","mode":"Enable","success":true,"content":"Version 1.0","all":"show version\nVersion 1.0\nrouter#"}}
 "#;
+const TX_EVENTS_FIXTURE: &str = r#"{"ts_ms":1,"event":{"kind":"connection_established","device_addr":"admin@192.168.1.1:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
+{"ts_ms":2,"event":{"kind":"tx_block_started","block_name":"cfg-1","block_kind":"config"}}
+{"ts_ms":3,"event":{"kind":"tx_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","command":"object network WEB01"}}
+{"ts_ms":4,"event":{"kind":"tx_rollback_started","block_name":"cfg-1"}}
+{"ts_ms":5,"event":{"kind":"tx_rollback_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","command":"no object network WEB01"}}
+{"ts_ms":6,"event":{"kind":"tx_block_finished","block_name":"cfg-1","committed":false,"rollback_attempted":true,"rollback_succeeded":true}}
+{"ts_ms":7,"event":{"kind":"command_output","command":"show version","mode":"Enable","prompt_before":"router#","prompt_after":"router#","fsm_prompt_before":"enable","fsm_prompt_after":"enable","success":true,"content":"Version 1.0","all":"show version\nVersion 1.0\nrouter#"}}
+"#;
 
 #[test]
 fn fixture_exposes_connection_context() {
@@ -160,6 +168,17 @@ fn replay_without_prompt_after_yields_none_output_prompt() {
 }
 
 #[test]
+fn replay_ignores_tx_events_and_still_matches_command_output() {
+    let mut replayer = SessionReplayer::from_jsonl(TX_EVENTS_FIXTURE).expect("load fixture");
+    let output = replayer
+        .replay_next_in_mode("show version", "Enable")
+        .expect("replay");
+    assert!(output.success);
+    assert_eq!(output.content, "Version 1.0");
+    assert_eq!(output.prompt.as_deref(), Some("router#"));
+}
+
+#[test]
 fn failure_fixture_replays_unsuccessful_command_output() {
     let mut replayer = SessionReplayer::from_jsonl(FAILURE_FIXTURE).expect("load fixture");
     let output = replayer
@@ -197,6 +216,7 @@ fn replay_fixtures_have_basic_quality_guarantees() {
         ("legacy", LEGACY_FIXTURE),
         ("noisy", NOISY_FIXTURE),
         ("missing_prompt_after", MISSING_PROMPT_AFTER_FIXTURE),
+        ("tx_events", TX_EVENTS_FIXTURE),
     ];
 
     for (name, content) in fixtures {

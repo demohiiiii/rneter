@@ -81,6 +81,64 @@ pub enum SessionEvent {
     StateChanged {
         state: String,
     },
+    /// Transaction block execution started.
+    TxBlockStarted {
+        block_name: String,
+        /// Block type at runtime (`show` or `config`).
+        block_kind: CommandBlockKind,
+    },
+    /// One forward step inside transaction block succeeded.
+    TxStepSucceeded {
+        block_name: String,
+        step_index: usize,
+        mode: String,
+        command: String,
+    },
+    /// One forward step inside transaction block failed.
+    TxStepFailed {
+        block_name: String,
+        step_index: usize,
+        mode: String,
+        command: String,
+        reason: String,
+    },
+    /// Rollback phase started after forward failure.
+    TxRollbackStarted {
+        block_name: String,
+    },
+    /// One rollback command succeeded.
+    TxRollbackStepSucceeded {
+        block_name: String,
+        step_index: Option<usize>,
+        mode: String,
+        command: String,
+    },
+    /// One rollback command failed.
+    TxRollbackStepFailed {
+        block_name: String,
+        step_index: Option<usize>,
+        mode: String,
+        command: String,
+        reason: String,
+    },
+    TxBlockFinished {
+        block_name: String,
+        committed: bool,
+        rollback_attempted: bool,
+        rollback_succeeded: bool,
+    },
+    /// Multi-block workflow execution started.
+    TxWorkflowStarted {
+        workflow_name: String,
+        total_blocks: usize,
+    },
+    /// Multi-block workflow execution finished.
+    TxWorkflowFinished {
+        workflow_name: String,
+        committed: bool,
+        rollback_attempted: bool,
+        rollback_succeeded: bool,
+    },
     RawChunk {
         data: String,
     },
@@ -632,5 +690,37 @@ mod tests {
         let restored = SessionRecorder::from_jsonl(&normalized).expect("restore normalized");
         let entries = restored.entries().expect("entries");
         assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn tx_events_are_jsonl_roundtrip_compatible() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Full);
+        recorder
+            .record_event(SessionEvent::TxBlockStarted {
+                block_name: "acl-update".to_string(),
+                block_kind: CommandBlockKind::Config,
+            })
+            .expect("record tx started");
+        recorder
+            .record_event(SessionEvent::TxBlockFinished {
+                block_name: "acl-update".to_string(),
+                committed: false,
+                rollback_attempted: true,
+                rollback_succeeded: true,
+            })
+            .expect("record tx finished");
+
+        let jsonl = recorder.to_jsonl().expect("to jsonl");
+        let restored = SessionRecorder::from_jsonl(&jsonl).expect("from jsonl");
+        let entries = restored.entries().expect("entries");
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            entries[0].event,
+            SessionEvent::TxBlockStarted { .. }
+        ));
+        assert!(matches!(
+            entries[1].event,
+            SessionEvent::TxBlockFinished { .. }
+        ));
     }
 }

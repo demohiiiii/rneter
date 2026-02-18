@@ -38,6 +38,76 @@ impl SshConnectionManager {
         .await
     }
 
+    /// Execute a transaction-like block on a managed connection.
+    ///
+    /// This API keeps backward compatibility with `CmdJob` sender-based execution while
+    /// providing block-level commit/rollback semantics for configuration command groups.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_tx_block(
+        &self,
+        user: String,
+        addr: String,
+        port: u16,
+        password: String,
+        enable_password: Option<String>,
+        handler: DeviceHandler,
+        block: TxBlock,
+        sys: Option<String>,
+    ) -> Result<TxResult, ConnectError> {
+        // Ensure connection exists/reused in cache.
+        self.get(
+            user.clone(),
+            addr.clone(),
+            port,
+            password,
+            enable_password,
+            handler,
+        )
+        .await?;
+
+        let device_addr = format!("{user}@{addr}:{port}");
+        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
+            ConnectError::InternalServerError("connection cache miss".to_string())
+        })?;
+
+        let mut client_guard = client.write().await;
+        client_guard.execute_tx_block(&block, sys.as_ref()).await
+    }
+
+    /// Execute a multi-block workflow with global rollback semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_tx_workflow(
+        &self,
+        user: String,
+        addr: String,
+        port: u16,
+        password: String,
+        enable_password: Option<String>,
+        handler: DeviceHandler,
+        workflow: TxWorkflow,
+        sys: Option<String>,
+    ) -> Result<TxWorkflowResult, ConnectError> {
+        self.get(
+            user.clone(),
+            addr.clone(),
+            port,
+            password,
+            enable_password,
+            handler,
+        )
+        .await?;
+
+        let device_addr = format!("{user}@{addr}:{port}");
+        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
+            ConnectError::InternalServerError("connection cache miss".to_string())
+        })?;
+
+        let mut client_guard = client.write().await;
+        client_guard
+            .execute_tx_workflow(&workflow, sys.as_ref())
+            .await
+    }
+
     /// Gets a cached SSH client and enables full session recording.
     #[allow(clippy::too_many_arguments)]
     pub async fn get_with_recording(
