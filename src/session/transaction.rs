@@ -137,6 +137,25 @@ pub fn workflow_rollback_order(
         .collect()
 }
 
+/// Extract initial workflow rollback status from the failed block result itself.
+///
+/// The failed block may already attempt rollback inside `execute_tx_block`.
+/// Workflow-level rollback summary must include this outcome.
+pub fn failed_block_rollback_summary(
+    failed_block_result: Option<&TxResult>,
+) -> (bool, bool, Vec<String>) {
+    if let Some(result) = failed_block_result
+        && result.rollback_attempted
+    {
+        return (
+            true,
+            result.rollback_succeeded,
+            result.rollback_errors.clone(),
+        );
+    }
+    (false, true, Vec::new())
+}
+
 impl TxBlock {
     /// Validate cross-field invariants before execution.
     ///
@@ -402,5 +421,43 @@ mod tests {
     fn workflow_rollback_order_empty_when_first_block_failed() {
         let order = workflow_rollback_order(&[], 0);
         assert!(order.is_empty());
+    }
+
+    #[test]
+    fn failed_block_rollback_summary_propagates_rollback_failure() {
+        let failed = TxResult {
+            block_name: "policy".to_string(),
+            committed: false,
+            failed_step: Some(2),
+            executed_steps: 2,
+            rollback_attempted: true,
+            rollback_succeeded: false,
+            rollback_steps: 1,
+            failure_reason: Some("step failed".to_string()),
+            rollback_errors: vec!["undo command failed".to_string()],
+        };
+        let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
+        assert!(attempted);
+        assert!(!succeeded);
+        assert_eq!(errors, vec!["undo command failed".to_string()]);
+    }
+
+    #[test]
+    fn failed_block_rollback_summary_defaults_when_not_attempted() {
+        let failed = TxResult {
+            block_name: "policy".to_string(),
+            committed: false,
+            failed_step: Some(1),
+            executed_steps: 1,
+            rollback_attempted: false,
+            rollback_succeeded: false,
+            rollback_steps: 0,
+            failure_reason: Some("step failed".to_string()),
+            rollback_errors: vec!["ignored".to_string()],
+        };
+        let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
+        assert!(!attempted);
+        assert!(succeeded);
+        assert!(errors.is_empty());
     }
 }

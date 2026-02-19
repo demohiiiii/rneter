@@ -821,11 +821,12 @@ impl SharedSshClient {
         }
 
         let failed_idx = failed_block.unwrap_or(0);
-        let mut rollback_succeeded = true;
-        let mut rollback_errors = Vec::new();
+        let (mut rollback_attempted, mut rollback_succeeded, mut rollback_errors) =
+            failed_block_rollback_summary(block_results.get(failed_idx));
 
         // Roll back previously committed blocks in reverse order.
         for block_idx in workflow_rollback_order(&committed_block_indices, failed_idx) {
+            rollback_attempted = true;
             if let Some(block) = workflow.blocks.get(block_idx) {
                 let (ok, errors) = self.rollback_committed_block(block, sys).await?;
                 if !ok {
@@ -839,7 +840,7 @@ impl SharedSshClient {
             let _ = recorder.record_event(SessionEvent::TxWorkflowFinished {
                 workflow_name: workflow.name.clone(),
                 committed: false,
-                rollback_attempted: true,
+                rollback_attempted,
                 rollback_succeeded,
             });
         }
@@ -849,7 +850,7 @@ impl SharedSshClient {
             committed: false,
             failed_block,
             block_results,
-            rollback_attempted: true,
+            rollback_attempted,
             rollback_succeeded,
             rollback_errors,
         })

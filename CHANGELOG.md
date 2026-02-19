@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-02-19
+
+### New Features
+- Added reusable transaction helper `failed_block_rollback_summary(...)` to derive workflow rollback state from the failed block execution result.
+- Added regression tests for failed-block rollback state propagation and default fallback behavior in transaction workflow summaries.
+
+### Optimizations
+- Fixed workflow rollback aggregation so failed block rollback errors are merged into `TxWorkflowResult.rollback_errors`.
+- Corrected workflow rollback metadata reporting (`rollback_attempted`, `rollback_succeeded`) to reflect actual rollback paths instead of unconditional success defaults.
+
+### API Changes
+- Re-exported `failed_block_rollback_summary` from `session` transaction public exports.
+- `TxWorkflowResult` rollback status semantics are now stricter: failed block internal rollback outcome is included before committed-block compensation rollback runs.
+
+### Risks
+- Integrations that assumed previous optimistic rollback summary behavior may see changed failure/attempt flags and need assertion updates.
+- Current coverage for this fix is unit-level; end-to-end device rollback behavior still depends on command/device-specific rollback correctness.
+
+---
+
 ## [0.2.0] - 2026-02-18
 
 ### New Features
