@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.2] - 2026-02-21
+
+### New Features
+- Added per-step rollback control flag `TxStep.rollback_on_failure` (default `false`), allowing a failed step to optionally run its own rollback command.
+- Added whole-resource rollback trigger control `RollbackPolicy::WholeResource { trigger_step_index }`, so whole-block rollback runs only after the configured step has executed successfully (default trigger is step `0`).
+
+### Optimizations
+- Improved per-step rollback planning to skip steps without rollback commands instead of rejecting the block.
+- Improved transaction rollback reporting: when no rollback plan is generated, results now record explicit "rollback not attempted" reasons instead of ambiguous success semantics.
+
+### API Changes
+- `TxStep` now includes `rollback_on_failure: bool` (serde default `false`).
+- `RollbackPolicy::WholeResource` now includes `trigger_step_index: usize` (serde default `0`).
+- `TxBlock::plan_rollback(...)` now accepts `failed_step_index: Option<usize>` so planners can include failed-step rollback when enabled.
+
+### Risks
+- Existing code constructing `RollbackPolicy::WholeResource` directly must provide or accept the new trigger semantics; behavior now depends on trigger-step execution status.
+- Tooling that assumed every `PerStep` command has a rollback command may need updates because rollback planning now permits and skips missing/empty rollback commands.
+- Consumers parsing rollback status should handle explicit "not attempted" error messages in addition to command-failure errors.
+
+---
+
 ## [0.2.1] - 2026-02-19
 
 ### New Features

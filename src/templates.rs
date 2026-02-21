@@ -229,6 +229,7 @@ pub fn build_tx_block(
                     command: cmd.clone(),
                     timeout_secs,
                     rollback_command: None,
+                    rollback_on_failure: false,
                 })
                 .collect(),
             fail_fast: true,
@@ -243,6 +244,7 @@ pub fn build_tx_block(
             mode: mode.to_string(),
             undo_command: undo,
             timeout_secs,
+            trigger_step_index: 0,
         }
     } else {
         RollbackPolicy::PerStep
@@ -266,6 +268,7 @@ pub fn build_tx_block(
             command: cmd.clone(),
             timeout_secs,
             rollback_command,
+            rollback_on_failure: false,
         });
     }
 

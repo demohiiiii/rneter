@@ -10,7 +10,7 @@ impl SharedSshClient {
             return Ok((true, Vec::new()));
         }
         let executed = (0..block.steps.len()).collect::<Vec<_>>();
-        let plan = block.plan_rollback(&executed)?;
+        let plan = block.plan_rollback(&executed, None)?;
         if let Some(recorder) = self.recorder.as_ref() {
             let _ = recorder.record_event(SessionEvent::TxRollbackStarted {
                 block_name: block.name.clone(),
@@ -680,15 +680,25 @@ impl SharedSshClient {
         }
 
         // Compensation phase: build rollback commands from executed success path.
-        let rollback_plan = block.plan_rollback(&executed_indices)?;
-        if let Some(recorder) = self.recorder.as_ref() {
+        let rollback_plan = block.plan_rollback(&executed_indices, failed_step)?;
+        let rollback_attempted = !rollback_plan.is_empty();
+        if rollback_attempted && let Some(recorder) = self.recorder.as_ref() {
             let _ = recorder.record_event(SessionEvent::TxRollbackStarted {
                 block_name: block.name.clone(),
             });
         }
-        let mut rollback_succeeded = true;
+        let mut rollback_succeeded = rollback_attempted;
         let mut rollback_errors = Vec::new();
         let mut rollback_steps = 0;
+        if !rollback_attempted {
+            let reason = format!(
+                "rollback not attempted: no rollback commands for executed steps; forward_failure={}",
+                failure_reason
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            rollback_errors.push(reason);
+        }
 
         // Execute rollback commands in planned order (already reversed for per-step policy).
         for (plan_idx, rollback) in rollback_plan.into_iter().enumerate() {
@@ -749,7 +759,7 @@ impl SharedSshClient {
             committed: false,
             failed_step,
             executed_steps: executed_indices.len(),
-            rollback_attempted: true,
+            rollback_attempted,
             rollback_succeeded,
             rollback_steps,
             failure_reason,
@@ -760,7 +770,7 @@ impl SharedSshClient {
             let _ = recorder.record_event(SessionEvent::TxBlockFinished {
                 block_name: block.name.clone(),
                 committed: false,
-                rollback_attempted: true,
+                rollback_attempted: result.rollback_attempted,
                 rollback_succeeded: result.rollback_succeeded,
             });
         }
