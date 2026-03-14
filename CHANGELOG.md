@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-03-14
+
+### New Features
+- Added structured manager request/context APIs:
+  - `ConnectionRequest`
+  - `ExecutionContext`
+  - `SshConnectionManager::get_with_context(...)`
+  - `SshConnectionManager::execute_tx_block_with_context(...)`
+  - `SshConnectionManager::execute_tx_workflow_with_context(...)`
+  - `SshConnectionManager::get_with_recording_and_context(...)`
+  - `SshConnectionManager::get_with_recording_level_and_context(...)`
+- Added client-layer transaction execution tests that validate rollback behavior without requiring a real SSH session.
+
+### Optimizations
+- Refactored transaction execution in `src/session/client.rs` around an internal command runner abstraction, making rollback sequencing easier to test and maintain.
+- Updated library docs, README examples, and the firewall workflow example to use the structured request/context API consistently.
+- Improved workflow dry-run output to expose step-level `rollback_on_failure` behavior in the example printer.
+
+### API Changes
+- Removed the old high-parameter manager entrypoints:
+  - `SshConnectionManager::get(...)`
+  - `SshConnectionManager::get_with_security(...)`
+  - `SshConnectionManager::get_with_recording(...)`
+  - `SshConnectionManager::get_with_recording_level(...)`
+  - `SshConnectionManager::execute_tx_block(...)`
+  - `SshConnectionManager::execute_tx_workflow(...)`
+- Callers must now build `ConnectionRequest` and pass `ExecutionContext` to manager entrypoints.
+- Public examples and migration path now assume `RollbackPolicy::WholeResource { trigger_step_index, ... }` and `TxStep { rollback_on_failure, ... }`.
+
+### Risks
+- This is a breaking API release for callers still using the removed positional-argument manager methods; all such integrations must migrate before upgrading.
+- The new client-layer execution tests use an internal fake runner and improve behavioral coverage, but they do not replace real-device compatibility testing.
+- Downstream wrappers that mirrored the previous manager method signatures may need their own facade refactor to avoid leaking the old shape.
+
+---
+
 ## [0.2.2] - 2026-02-21
 
 ### New Features
