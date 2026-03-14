@@ -12,60 +12,28 @@ impl SshConnectionManager {
         Self { cache }
     }
 
-    /// Gets a cached SSH client or creates a new one.
-    ///
-    /// This method first checks the cache for an existing healthy connection.
-    /// If found and the connection parameters match, it reuses the connection.
-    /// Otherwise, it creates a new connection, caches it, and returns the sender.
-    pub async fn get(
+    /// Gets a cached SSH client using a structured request/context pair.
+    pub async fn get_with_context(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
+        context: ExecutionContext,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
-        self.get_with_security(
-            user,
-            addr,
-            port,
-            password,
-            enable_password,
-            handler,
-            ConnectionSecurityOptions::default(),
-        )
-        .await
+        self.get_with_request_and_recording(request, context.security_options, None)
+            .await
     }
 
-    /// Execute a transaction-like block on a managed connection.
-    ///
-    /// This API keeps backward compatibility with `CmdJob` sender-based execution while
-    /// providing block-level commit/rollback semantics for configuration command groups.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_tx_block(
+    /// Execute a transaction-like block with structured connection/context options.
+    pub async fn execute_tx_block_with_context(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
         block: TxBlock,
-        sys: Option<String>,
+        context: ExecutionContext,
     ) -> Result<TxResult, ConnectError> {
-        // Ensure connection exists/reused in cache.
-        self.get(
-            user.clone(),
-            addr.clone(),
-            port,
-            password,
-            enable_password,
-            handler,
-        )
-        .await?;
+        let device_addr = request.device_addr();
+        let sys = context.sys.clone();
+        self.get_with_request_and_recording(request, context.security_options, None)
+            .await?;
 
-        let device_addr = format!("{user}@{addr}:{port}");
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             ConnectError::InternalServerError("connection cache miss".to_string())
         })?;
@@ -74,30 +42,18 @@ impl SshConnectionManager {
         client_guard.execute_tx_block(&block, sys.as_ref()).await
     }
 
-    /// Execute a multi-block workflow with global rollback semantics.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_tx_workflow(
+    /// Execute a workflow with structured connection/context options.
+    pub async fn execute_tx_workflow_with_context(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
         workflow: TxWorkflow,
-        sys: Option<String>,
+        context: ExecutionContext,
     ) -> Result<TxWorkflowResult, ConnectError> {
-        self.get(
-            user.clone(),
-            addr.clone(),
-            port,
-            password,
-            enable_password,
-            handler,
-        )
-        .await?;
+        let device_addr = request.device_addr();
+        let sys = context.sys.clone();
+        self.get_with_request_and_recording(request, context.security_options, None)
+            .await?;
 
-        let device_addr = format!("{user}@{addr}:{port}");
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             ConnectError::InternalServerError("connection cache miss".to_string())
         })?;
@@ -108,95 +64,51 @@ impl SshConnectionManager {
             .await
     }
 
-    /// Gets a cached SSH client and enables full session recording.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn get_with_recording(
+    /// Gets a cached SSH client with recording using a structured request/context pair.
+    ///
+    /// Use this when you want full recording output.
+    pub async fn get_with_recording_and_context(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
+        context: ExecutionContext,
     ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
-        self.get_with_recording_level(
-            user,
-            addr,
-            port,
-            password,
-            enable_password,
-            handler,
-            SessionRecordLevel::Full,
-        )
-        .await
+        self.get_with_recording_level_and_context(request, context, SessionRecordLevel::Full)
+            .await
     }
 
-    /// Gets a cached SSH client and enables session recording with custom level.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn get_with_recording_level(
+    /// Gets a cached SSH client with recording using a structured request/context pair.
+    pub async fn get_with_recording_level_and_context(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
+        context: ExecutionContext,
         level: SessionRecordLevel,
     ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
         let recorder = SessionRecorder::new(level);
         let sender = self
-            .get_with_security_and_recording(
-                user,
-                addr,
-                port,
-                password,
-                enable_password,
-                handler,
-                ConnectionSecurityOptions::default(),
+            .get_with_request_and_recording(
+                request,
+                context.security_options,
                 Some(recorder.clone()),
             )
             .await?;
         Ok((sender, recorder))
     }
 
-    /// Gets a cached SSH client or creates a new one with explicit security options.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn get_with_security(
+    async fn get_with_request_and_recording(
         &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
+        request: ConnectionRequest,
         security_options: ConnectionSecurityOptions,
+        recorder: Option<SessionRecorder>,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
-        self.get_with_security_and_recording(
+        let device_addr = request.device_addr();
+        let ConnectionRequest {
             user,
             addr,
             port,
             password,
             enable_password,
             handler,
-            security_options,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn get_with_security_and_recording(
-        &self,
-        user: String,
-        addr: String,
-        port: u16,
-        password: String,
-        enable_password: Option<String>,
-        handler: DeviceHandler,
-        security_options: ConnectionSecurityOptions,
-        recorder: Option<SessionRecorder>,
-    ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
-        let device_addr = format!("{user}@{addr}:{port}");
+        } = request;
 
         // Check if a healthy, usable connection exists in the cache
         if let Some((sender, client)) = self.cache.get(&device_addr).await {

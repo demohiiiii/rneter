@@ -30,7 +30,7 @@ rneter = "0.1"
 ## 快速开始
 
 ```rust
-use rneter::session::{MANAGER, Command, CmdJob};
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
 use rneter::templates;
 
 #[tokio::main]
@@ -39,14 +39,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handler = templates::cisco()?;
 
     // 从管理器获取一个连接
-    let sender = MANAGER.get(
-        "admin".to_string(),
-        "192.168.1.1".to_string(),
-        22,
-        "password".to_string(),
-        None,
-        handler,
-    ).await?;
+    let sender = MANAGER
+        .get_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                handler,
+            ),
+            ExecutionContext::default(),
+        )
+        .await?;
 
     // 执行命令
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -74,58 +79,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `rneter` 现在支持安全默认值，并可在连接时自定义 SSH 安全级别：
 
 ```rust
-use rneter::session::{ConnectionSecurityOptions, MANAGER};
+use rneter::session::{
+    ConnectionRequest, ConnectionSecurityOptions, ExecutionContext, MANAGER,
+};
 use rneter::templates;
 
-let handler = templates::cisco()?;
-
 // 默认安全模式（known_hosts 校验 + 严格算法）
-let _sender = MANAGER.get(
-    "admin".to_string(),
-    "192.168.1.1".to_string(),
-    22,
-    "password".to_string(),
-    None,
-    handler,
-).await?;
+let _sender = MANAGER
+    .get_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    )
+    .await?;
 
 // 显式指定安全配置
-let _sender = MANAGER.get_with_security(
-    "admin".to_string(),
-    "192.168.1.1".to_string(),
-    22,
-    "password".to_string(),
-    None,
-    templates::cisco()?,
-    ConnectionSecurityOptions::legacy_compatible(),
-).await?;
+let _sender = MANAGER
+    .get_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::new()
+            .with_security_options(ConnectionSecurityOptions::legacy_compatible()),
+    )
+    .await?;
 ```
 
 ### 会话录制与回放
 
 ```rust
-use rneter::session::{MANAGER, SessionRecordLevel, SessionReplayer};
+use rneter::session::{
+    ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
+};
 use rneter::templates;
 
-let (sender, recorder) = MANAGER.get_with_recording(
-    "admin".to_string(),
-    "192.168.1.1".to_string(),
-    22,
-    "password".to_string(),
-    None,
-    templates::cisco()?,
-).await?;
+let (sender, recorder) = MANAGER
+    .get_with_recording_level_and_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+        SessionRecordLevel::Full,
+    )
+    .await?;
 
 // 或者仅记录关键事件（不记录原始 shell 分块）
-let (_sender2, _recorder2) = MANAGER.get_with_recording_level(
-    "admin".to_string(),
-    "192.168.1.1".to_string(),
-    22,
-    "password".to_string(),
-    None,
-    templates::cisco()?,
-    SessionRecordLevel::KeyEventsOnly,
-).await?;
+let (_sender2, _recorder2) = MANAGER
+    .get_with_recording_level_and_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+        SessionRecordLevel::KeyEventsOnly,
+    )
+    .await?;
 
 // ...通过 `sender` 发送 CmdJob...
 
@@ -160,7 +188,10 @@ assert_eq!(outputs.len(), 2);
 对于配置命令，可以按“块”执行并实现失败补偿回滚：
 
 ```rust
-use rneter::session::{MANAGER, CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
+use rneter::session::{
+    ConnectionRequest, ExecutionContext, MANAGER, CommandBlockKind, RollbackPolicy, TxBlock,
+    TxStep,
+};
 use rneter::templates;
 
 let block = TxBlock {
@@ -170,6 +201,7 @@ let block = TxBlock {
         mode: "Config".to_string(),
         undo_command: "no object network WEB01".to_string(),
         timeout_secs: Some(30),
+        trigger_step_index: 0,
     },
     steps: vec![
         TxStep {
@@ -177,27 +209,31 @@ let block = TxBlock {
             command: "object network WEB01".to_string(),
             timeout_secs: Some(30),
             rollback_command: None,
+            rollback_on_failure: false,
         },
         TxStep {
             mode: "Config".to_string(),
             command: "host 10.0.0.10".to_string(),
             timeout_secs: Some(30),
             rollback_command: None,
+            rollback_on_failure: false,
         },
     ],
     fail_fast: true,
 };
 
 let result = MANAGER
-    .execute_tx_block(
-        "admin".to_string(),
-        "192.168.1.1".to_string(),
-        22,
-        "password".to_string(),
-        None,
-        templates::cisco()?,
+    .execute_tx_block_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
         block,
-        None,
+        ExecutionContext::default(),
     )
     .await?;
 println!(
@@ -218,15 +254,17 @@ let workflow = TxWorkflow {
 };
 
 let workflow_result: TxWorkflowResult = MANAGER
-    .execute_tx_workflow(
-        "admin".to_string(),
-        "192.168.1.1".to_string(),
-        22,
-        "password".to_string(),
-        None,
-        templates::cisco()?,
+    .execute_tx_workflow_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
         workflow,
-        None,
+        ExecutionContext::default(),
     )
     .await?;
 ```

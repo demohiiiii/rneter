@@ -17,7 +17,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use rneter::session::{MANAGER, Command, CmdJob};
+//! use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
 //! use rneter::templates;
 //!
 //! #[tokio::main]
@@ -26,14 +26,19 @@
 //!     let handler = templates::cisco()?;
 //!
 //!     // Get a connection from the manager
-//!     let sender = MANAGER.get(
-//!         "admin".to_string(),
-//!         "192.168.1.1".to_string(),
-//!         22,
-//!         "password".to_string(),
-//!         None,
-//!         handler,
-//!     ).await?;
+//!     let sender = MANAGER
+//!         .get_with_context(
+//!             ConnectionRequest::new(
+//!                 "admin".to_string(),
+//!                 "192.168.1.1".to_string(),
+//!                 22,
+//!                 "password".to_string(),
+//!                 None,
+//!                 handler,
+//!             ),
+//!             ExecutionContext::default(),
+//!         )
+//!         .await?;
 //!
 //!     // Execute a command
 //!     let (tx, rx) = tokio::sync::oneshot::channel();

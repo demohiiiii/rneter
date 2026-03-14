@@ -1,4 +1,4 @@
-use rneter::session::{MANAGER, TxWorkflow, TxWorkflowResult};
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, TxWorkflow, TxWorkflowResult};
 use rneter::templates;
 use std::error::Error;
 
@@ -67,8 +67,8 @@ fn print_workflow_plan(workflow: &TxWorkflow) {
         );
         for (step_idx, step) in block.steps.iter().enumerate() {
             println!(
-                "    step[{step_idx}] mode={} cmd={} rollback={:?}",
-                step.mode, step.command, step.rollback_command
+                "    step[{step_idx}] mode={} cmd={} rollback={:?} rollback_on_failure={}",
+                step.mode, step.command, step.rollback_command, step.rollback_on_failure
             );
         }
     }
@@ -138,15 +138,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let result = MANAGER
-        .execute_tx_workflow(
-            "admin".to_string(),
-            "192.168.1.1".to_string(),
-            22,
-            "password".to_string(),
-            None,
-            templates::cisco()?,
+        .execute_tx_workflow_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                templates::cisco()?,
+            ),
             workflow,
-            None,
+            ExecutionContext::default(),
         )
         .await?;
 
