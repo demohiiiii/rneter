@@ -139,6 +139,14 @@ let (sender, recorder) = MANAGER
     )
     .await?;
 
+// Subscribe to future recorder events in real time
+let mut rx = recorder.subscribe();
+tokio::spawn(async move {
+    while let Ok(entry) = rx.recv().await {
+        println!("live event: {:?}", entry.event);
+    }
+});
+
 // Or record key events only (no raw shell chunks)
 let (_sender2, _recorder2) = MANAGER
     .get_with_recording_level_and_context(

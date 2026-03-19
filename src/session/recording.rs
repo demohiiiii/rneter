@@ -1,6 +1,9 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
+
+const RECORDER_BROADCAST_CAPACITY: usize = 256;
 
 /// Session recording granularity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -149,14 +152,17 @@ pub enum SessionEvent {
 pub struct SessionRecorder {
     level: SessionRecordLevel,
     entries: Arc<Mutex<Vec<SessionRecordEntry>>>,
+    subscribers: broadcast::Sender<SessionRecordEntry>,
 }
 
 impl SessionRecorder {
     /// Create a recorder with the given level.
     pub fn new(level: SessionRecordLevel) -> Self {
+        let (subscribers, _) = broadcast::channel(RECORDER_BROADCAST_CAPACITY);
         Self {
             level,
             entries: Arc::new(Mutex::new(Vec::new())),
+            subscribers,
         }
     }
 
@@ -165,19 +171,32 @@ impl SessionRecorder {
         self.level
     }
 
+    /// Subscribe to future recorded events in real time.
+    ///
+    /// The returned receiver only yields events recorded after the subscription
+    /// is created. Historical entries remain available via [`Self::entries`].
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionRecordEntry> {
+        self.subscribers.subscribe()
+    }
+
     /// Record a key-level event.
     pub fn record_event(&self, event: SessionEvent) -> Result<(), ConnectError> {
         if self.level == SessionRecordLevel::Off {
             return Ok(());
         }
+        let entry = SessionRecordEntry {
+            ts_ms: now_ms(),
+            event,
+        };
         let mut guard = self
             .entries
             .lock()
             .map_err(|e| ConnectError::InternalServerError(format!("record lock error: {e}")))?;
-        guard.push(SessionRecordEntry {
-            ts_ms: now_ms(),
-            event,
-        });
+        guard.push(entry.clone());
+        drop(guard);
+
+        // Best-effort fan-out: if nobody is listening, keep snapshot recording only.
+        let _ = self.subscribers.send(entry);
         Ok(())
     }
 
@@ -274,10 +293,13 @@ impl SessionRecorder {
             })
             .collect::<Vec<_>>();
 
-        let normalized = SessionRecorder {
-            level: SessionRecordLevel::Full,
-            entries: Arc::new(Mutex::new(filtered)),
-        };
+        let normalized = SessionRecorder::new(SessionRecordLevel::Full);
+        let mut guard = normalized
+            .entries
+            .lock()
+            .map_err(|e| ConnectError::InternalServerError(format!("record lock error: {e}")))?;
+        *guard = filtered;
+        drop(guard);
         normalized.to_jsonl()
     }
 }
@@ -411,6 +433,8 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{Duration, timeout};
+
     const NOISY_FIXTURE: &str = r#"{"ts_ms":3,"event":{"kind":"raw_chunk","data":"chunk-2"}}
 {"ts_ms":1,"event":{"kind":"connection_established","device_addr":"admin@10.0.0.1:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
 {"ts_ms":2,"event":{"kind":"prompt_changed","prompt":"router#"}}
@@ -573,6 +597,53 @@ mod tests {
             entries[0].event,
             SessionEvent::PromptChanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_live_entries() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
+        let mut rx = recorder.subscribe();
+
+        recorder
+            .record_event(SessionEvent::TxWorkflowStarted {
+                workflow_name: "policy-deploy".to_string(),
+                total_blocks: 3,
+            })
+            .expect("record tx workflow start");
+
+        let entry = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("receive should complete")
+            .expect("receive entry");
+
+        assert!(matches!(
+            entry.event,
+            SessionEvent::TxWorkflowStarted {
+                workflow_name,
+                total_blocks: 3
+            } if workflow_name == "policy-deploy"
+        ));
+
+        let snapshot = recorder.entries().expect("entries");
+        assert_eq!(snapshot.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn off_level_subscription_stays_quiet() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Off);
+        let mut rx = recorder.subscribe();
+
+        recorder
+            .record_event(SessionEvent::StateChanged {
+                state: "enable".to_string(),
+            })
+            .expect("record state");
+
+        assert!(
+            timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

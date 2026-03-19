@@ -139,6 +139,14 @@ let (sender, recorder) = MANAGER
     )
     .await?;
 
+// 实时订阅后续录制事件
+let mut rx = recorder.subscribe();
+tokio::spawn(async move {
+    while let Ok(entry) = rx.recv().await {
+        println!("实时事件: {:?}", entry.event);
+    }
+});
+
 // 或者仅记录关键事件（不记录原始 shell 分块）
 let (_sender2, _recorder2) = MANAGER
     .get_with_recording_level_and_context(
