@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-03-19
+
+### New Features
+- Added real-time session event subscription via `SessionRecorder::subscribe() -> tokio::sync::broadcast::Receiver<SessionRecordEntry>`, so callers can consume transaction/workflow events while execution is still in progress.
+- Added recorder tests covering live event delivery and `SessionRecordLevel::Off` behavior for real-time subscribers.
+
+### Optimizations
+- Updated `SessionRecorder::record_event(...)` to fan out each recorded entry to subscribers while keeping the existing in-memory snapshot and JSONL export workflow intact.
+- Expanded README and Chinese README recording examples to show how to subscribe to live recorder events before starting command or workflow execution.
+
+### API Changes
+- `SessionRecorder` now exposes a new public method: `subscribe()`.
+- Real-time consumers now receive the existing `SessionRecordEntry` / `SessionEvent` model directly; no parallel event type was introduced, so upper layers can reuse current event conversion logic.
+
+### Risks
+- `subscribe()` uses a Tokio broadcast channel; slow consumers can observe `RecvError::Lagged(...)` if they fall behind a busy session and should handle that explicitly.
+- Real-time subscription only streams future events after subscription creation; historical events still need to be read from `entries()` / `to_jsonl()`.
+- The `rauto` integration sample pattern still needs to rebuild `ConnectionRequest` (or wrap it in a helper) between setup and execution calls because manager APIs consume requests by value.
+
+---
+
 ## [0.3.0] - 2026-03-14
 
 ### New Features
