@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Built-in template names supported by this crate.
-pub const BUILTIN_TEMPLATES: &[&str] = &["cisco", "huawei", "h3c", "hillstone", "juniper", "array"];
+pub const BUILTIN_TEMPLATES: &[&str] = &["cisco", "huawei", "h3c", "hillstone", "juniper", "array", "linux"];
 
 /// Capability tags used to describe template compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -105,6 +105,17 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::InteractiveInput,
             ],
         },
+        "linux" => TemplateMetadata {
+            name: "linux".to_string(),
+            vendor: "Generic".to_string(),
+            family: "Linux".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
         _ => return None,
     };
     Some(meta)
@@ -134,7 +145,19 @@ pub fn template_metadata(name: &str) -> Result<TemplateMetadata, ConnectError> {
 /// Current rule is intentionally simple: read-only commands are treated as `show`,
 /// everything else is treated as `config`.
 pub fn classify_command(template: &str, command: &str) -> Result<CommandBlockKind, ConnectError> {
-    let _ = template_metadata(template)?;
+    let template_key = template.to_ascii_lowercase();
+    let _ = template_metadata(&template_key)?;
+
+    // Linux template uses its own classification
+    if template_key == "linux" {
+        let cmd_type = classify_linux_command(command);
+        return Ok(match cmd_type {
+            LinuxCommandType::ReadOnly => CommandBlockKind::Show,
+            _ => CommandBlockKind::Config,
+        });
+    }
+
+    // Network device templates
     let cmd = command.trim().to_ascii_lowercase();
     let show_prefixes = ["show ", "display ", "ping ", "traceroute "];
     if show_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
@@ -156,6 +179,8 @@ fn infer_rollback_command(template_key: &str, command: &str) -> Option<String> {
 
     // Vendor-specific compensation patterns.
     match template_key {
+        // Linux uses its own rollback inference
+        "linux" => infer_linux_rollback(command),
         // JunOS is set/delete style.
         "juniper" => {
             if let Some(rest) = cmd.strip_prefix("set ") {
@@ -290,6 +315,7 @@ pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
         "hillstone" => hillstone(),
         "juniper" => juniper(),
         "array" => array(),
+        "linux" => linux(),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
 }
@@ -908,5 +934,484 @@ mod tests {
         let err = build_tx_block("huawei", "bad", "Config", &commands, None, None)
             .expect_err("should fail");
         assert!(matches!(err, ConnectError::InvalidTransaction(_)));
+    }
+}
+
+// ============================================================================
+// Linux Server Support
+// ============================================================================
+
+/// Configuration for Linux template.
+#[derive(Debug, Clone)]
+pub struct LinuxTemplateConfig {
+    pub sudo_mode: SudoMode,
+    pub sudo_password: Option<String>,
+    pub custom_prompts: Option<CustomPrompts>,
+}
+
+impl Default for LinuxTemplateConfig {
+    fn default() -> Self {
+        Self {
+            sudo_mode: SudoMode::SudoInteractive,
+            sudo_password: None,
+            custom_prompts: None,
+        }
+    }
+}
+
+/// Sudo privilege escalation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SudoMode {
+    /// Use `sudo -i` to get interactive root shell
+    SudoInteractive,
+    /// Use `sudo -s` to get shell as root
+    SudoShell,
+    /// Use `su -` to switch to root
+    Su,
+    /// Direct root login (no privilege escalation needed)
+    DirectRoot,
+}
+
+/// Custom prompt patterns for Linux servers.
+#[derive(Debug, Clone)]
+pub struct CustomPrompts {
+    pub user_prompts: Vec<&'static str>,
+    pub root_prompts: Vec<&'static str>,
+}
+
+/// Linux command type for classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxCommandType {
+    ReadOnly,
+    PackageOp,
+    FileOp,
+    ServiceOp,
+    Custom,
+}
+
+/// Classify a Linux command by its type.
+pub fn classify_linux_command(command: &str) -> LinuxCommandType {
+    let cmd = command.trim().to_ascii_lowercase();
+
+    // Read-only commands
+    let readonly_prefixes = [
+        "ls", "cat", "grep", "find", "ps", "top", "df", "du", "free", "uptime",
+        "systemctl status", "journalctl", "tail", "head", "less", "more",
+        "which", "whereis", "pwd", "whoami", "id", "uname", "hostname",
+    ];
+    if readonly_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
+        return LinuxCommandType::ReadOnly;
+    }
+
+    // Package management
+    let package_prefixes = [
+        "apt install", "apt-get install", "yum install", "dnf install",
+        "pip install", "npm install", "cargo install",
+    ];
+    if package_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
+        return LinuxCommandType::PackageOp;
+    }
+
+    // Service operations
+    let service_prefixes = [
+        "systemctl start", "systemctl stop", "systemctl enable",
+        "systemctl disable", "systemctl restart", "service",
+    ];
+    if service_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
+        return LinuxCommandType::ServiceOp;
+    }
+
+    // File operations
+    let file_prefixes = ["echo", "sed", "awk", "rm", "mv", "cp", "touch", "mkdir"];
+    if file_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
+        return LinuxCommandType::FileOp;
+    }
+
+    LinuxCommandType::Custom
+}
+
+/// Infer rollback command for Linux operations.
+pub fn infer_linux_rollback(command: &str) -> Option<String> {
+    let cmd_type = classify_linux_command(command);
+
+    match cmd_type {
+        LinuxCommandType::ReadOnly => None,
+        LinuxCommandType::PackageOp => {
+            let cmd = command.trim();
+            if cmd.contains("apt install") || cmd.contains("apt-get install") {
+                Some(cmd.replace("install", "remove"))
+            } else if cmd.contains("yum install") {
+                Some(cmd.replace("install", "remove"))
+            } else if cmd.contains("dnf install") {
+                Some(cmd.replace("install", "remove"))
+            } else if cmd.contains("pip install") {
+                Some(cmd.replace("install", "uninstall"))
+            } else if cmd.contains("npm install") {
+                Some(cmd.replace("install", "uninstall"))
+            } else {
+                None
+            }
+        }
+        LinuxCommandType::ServiceOp => {
+            let cmd = command.trim();
+            if cmd.contains("start") {
+                Some(cmd.replace("start", "stop"))
+            } else if cmd.contains("enable") {
+                Some(cmd.replace("enable", "disable"))
+            } else if cmd.contains("stop") {
+                Some(cmd.replace("stop", "start"))
+            } else if cmd.contains("disable") {
+                Some(cmd.replace("disable", "enable"))
+            } else {
+                None
+            }
+        }
+        LinuxCommandType::FileOp => {
+            // File operations need backup before execution
+            // Actual backup logic is handled in TxBlock execution
+            None
+        }
+        LinuxCommandType::Custom => None,
+    }
+}
+
+/// Returns a `DeviceHandler` configured for Linux servers with default settings.
+pub fn linux() -> Result<DeviceHandler, ConnectError> {
+    linux_with_config(LinuxTemplateConfig::default())
+}
+
+/// Returns a `DeviceHandler` configured for Linux servers with custom configuration.
+pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, ConnectError> {
+    let (user_prompts, root_prompts) = if let Some(custom) = config.custom_prompts {
+        (custom.user_prompts, custom.root_prompts)
+    } else {
+        // Default prompt patterns
+        (
+            vec![
+                r"^[^\s]+\$\s*$",        // user$
+                r"^[^\s]+@[^\s]+\$\s*$", // user@host$
+                r"^\[[^\]]+\]\$\s*$",    // [user@host]$
+                r"^\$\s*$",              // $
+            ],
+            vec![
+                r"^[^\s]+#\s*$",           // root#
+                r"^root@[^\s]+#\s*$",      // root@host#
+                r"^\[root@[^\]]+\]#\s*$",  // [root@host]#
+                r"^#\s*$",                 // #
+            ],
+        )
+    };
+
+    let sudo_command = match config.sudo_mode {
+        SudoMode::SudoInteractive => "sudo -i",
+        SudoMode::SudoShell => "sudo -s",
+        SudoMode::Su => "su -",
+        SudoMode::DirectRoot => "",
+    };
+
+    let edges = if config.sudo_mode != SudoMode::DirectRoot {
+        vec![
+            (
+                "User".to_string(),
+                sudo_command.to_string(),
+                "Root".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Root".to_string(),
+                "exit".to_string(),
+                "User".to_string(),
+                true,
+                false,
+            ),
+        ]
+    } else {
+        vec![] // Direct root login, no state transition needed
+    };
+
+    let mut dyn_param = HashMap::new();
+    if let Some(password) = config.sudo_password {
+        dyn_param.insert("SudoPassword".to_string(), password);
+    }
+
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Root".to_string(), root_prompts),
+            ("User".to_string(), user_prompts),
+        ],
+        // Prompt with sys (optional: capture hostname)
+        vec![],
+        // Write (interactive inputs)
+        vec![(
+            "SudoPassword".to_string(),
+            (true, "SudoPassword".to_string(), false), // Don't record password
+            vec![
+                r"\[sudo\] password for .+:\s*$",
+                r"Password:\s*$",
+                r"password:\s*$",
+            ],
+        )],
+        // More regex (pagination prompts)
+        vec![r"--More--", r"\(END\)", r"Press SPACE to continue"],
+        // Error regex
+        vec![
+            r"^bash: .+: command not found",
+            r"^-bash: .+: command not found",
+            r"^sudo: .+: command not found",
+            r"Permission denied",
+            r"Operation not permitted",
+            r"No such file or directory",
+            r"cannot access",
+            r"sudo: \d+ incorrect password attempt",
+            r"su: Authentication failure",
+            r"^E: .+",      // apt errors
+            r"^Error: .+",  // generic errors
+            r"^error: .+",  // lowercase errors
+            r"^ERROR: .+",  // uppercase errors
+            r"Failed to .+",
+            r"fatal: .+",
+        ],
+        // Edges
+        edges,
+        // Ignore errors (empty by default, user can customize)
+        vec![],
+        // Dyn param
+        dyn_param,
+    )
+}
+
+#[cfg(test)]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn linux_template_has_user_and_root_states() {
+        let handler = linux().expect("create linux template");
+        let diagnostics = handler.diagnose_state_machine();
+
+        // Linux template has User and Root states with transitions between them
+        // Note: state names are normalized to lowercase in diagnostics
+        assert!(diagnostics.total_states >= 2);
+        assert_eq!(diagnostics.graph_states.len(), 2);
+        assert!(diagnostics.graph_states.contains(&"user".to_string()));
+        assert!(diagnostics.graph_states.contains(&"root".to_string()));
+        assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn linux_template_is_in_builtin_templates() {
+        let names = available_templates();
+        assert!(names.contains(&"linux"));
+    }
+
+    #[test]
+    fn linux_template_metadata_is_correct() {
+        let meta = template_metadata("linux").expect("linux metadata");
+        assert_eq!(meta.name, "linux");
+        assert_eq!(meta.vendor, "Generic");
+        assert_eq!(meta.family, "Linux");
+        assert!(meta.capabilities.contains(&TemplateCapability::LoginMode));
+        assert!(meta.capabilities.contains(&TemplateCapability::EnableMode));
+        assert!(meta.capabilities.contains(&TemplateCapability::InteractiveInput));
+    }
+
+    #[test]
+    fn linux_template_by_name_works() {
+        let handler = by_name("linux").expect("linux template by name");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(diagnostics.total_states >= 2);
+    }
+
+    #[test]
+    fn linux_template_by_name_is_case_insensitive() {
+        let handler = by_name("LiNuX").expect("linux template case insensitive");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn classify_linux_command_identifies_readonly() {
+        assert_eq!(
+            classify_linux_command("ls -la"),
+            LinuxCommandType::ReadOnly
+        );
+        assert_eq!(
+            classify_linux_command("cat /etc/hosts"),
+            LinuxCommandType::ReadOnly
+        );
+        assert_eq!(
+            classify_linux_command("systemctl status nginx"),
+            LinuxCommandType::ReadOnly
+        );
+        assert_eq!(
+            classify_linux_command("ps aux"),
+            LinuxCommandType::ReadOnly
+        );
+    }
+
+    #[test]
+    fn classify_linux_command_identifies_package_ops() {
+        assert_eq!(
+            classify_linux_command("apt install nginx"),
+            LinuxCommandType::PackageOp
+        );
+        assert_eq!(
+            classify_linux_command("yum install httpd"),
+            LinuxCommandType::PackageOp
+        );
+        assert_eq!(
+            classify_linux_command("pip install requests"),
+            LinuxCommandType::PackageOp
+        );
+    }
+
+    #[test]
+    fn classify_linux_command_identifies_service_ops() {
+        assert_eq!(
+            classify_linux_command("systemctl start nginx"),
+            LinuxCommandType::ServiceOp
+        );
+        assert_eq!(
+            classify_linux_command("systemctl enable nginx"),
+            LinuxCommandType::ServiceOp
+        );
+    }
+
+    #[test]
+    fn classify_linux_command_identifies_file_ops() {
+        assert_eq!(
+            classify_linux_command("echo 'test' > /tmp/file"),
+            LinuxCommandType::FileOp
+        );
+        assert_eq!(
+            classify_linux_command("rm /tmp/file"),
+            LinuxCommandType::FileOp
+        );
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_apt_install() {
+        let rollback = infer_linux_rollback("apt install nginx");
+        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_yum_install() {
+        let rollback = infer_linux_rollback("yum install httpd");
+        assert_eq!(rollback, Some("yum remove httpd".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_systemctl_start() {
+        let rollback = infer_linux_rollback("systemctl start nginx");
+        assert_eq!(rollback, Some("systemctl stop nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_systemctl_enable() {
+        let rollback = infer_linux_rollback("systemctl enable nginx");
+        assert_eq!(rollback, Some("systemctl disable nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_readonly_returns_none() {
+        let rollback = infer_linux_rollback("ls -la");
+        assert_eq!(rollback, None);
+    }
+
+    #[test]
+    fn classify_command_supports_linux_template() {
+        let kind = classify_command("linux", "ls -la").expect("classify");
+        assert_eq!(kind, CommandBlockKind::Show);
+
+        let kind = classify_command("linux", "apt install nginx").expect("classify");
+        assert_eq!(kind, CommandBlockKind::Config);
+    }
+
+    #[test]
+    fn linux_with_config_sudo_interactive() {
+        let config = LinuxTemplateConfig {
+            sudo_mode: SudoMode::SudoInteractive,
+            sudo_password: Some("test123".to_string()),
+            custom_prompts: None,
+        };
+        let handler = linux_with_config(config).expect("create linux with config");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn linux_with_config_sudo_shell() {
+        let config = LinuxTemplateConfig {
+            sudo_mode: SudoMode::SudoShell,
+            sudo_password: None,
+            custom_prompts: None,
+        };
+        let handler = linux_with_config(config).expect("create linux with sudo -s");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn linux_with_config_direct_root() {
+        let config = LinuxTemplateConfig {
+            sudo_mode: SudoMode::DirectRoot,
+            sudo_password: None,
+            custom_prompts: None,
+        };
+        let handler = linux_with_config(config).expect("create linux with direct root");
+        let diagnostics = handler.diagnose_state_machine();
+        // Direct root has no state transitions
+        assert_eq!(diagnostics.graph_states.len(), 0);
+    }
+
+    #[test]
+    fn linux_with_custom_prompts() {
+        let config = LinuxTemplateConfig {
+            sudo_mode: SudoMode::SudoInteractive,
+            sudo_password: None,
+            custom_prompts: Some(CustomPrompts {
+                user_prompts: vec![r"^myuser@myhost\$\s*$"],
+                root_prompts: vec![r"^root@myhost#\s*$"],
+            }),
+        };
+        let handler = linux_with_config(config).expect("create linux with custom prompts");
+        let diagnostics = handler.diagnose_state_machine();
+        assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn build_tx_block_for_linux_readonly() {
+        let commands = vec!["ls -la".to_string(), "cat /etc/hosts".to_string()];
+        let tx = build_tx_block("linux", "show-block", "User", &commands, Some(30), None)
+            .expect("build show tx");
+        assert_eq!(tx.kind, CommandBlockKind::Show);
+        assert!(matches!(tx.rollback_policy, RollbackPolicy::None));
+    }
+
+    #[test]
+    fn build_tx_block_for_linux_package_install() {
+        let commands = vec!["apt install nginx".to_string()];
+        let tx = build_tx_block("linux", "install-nginx", "Root", &commands, Some(60), None)
+            .expect("build config tx");
+        assert_eq!(tx.kind, CommandBlockKind::Config);
+        assert!(matches!(tx.rollback_policy, RollbackPolicy::PerStep));
+        assert_eq!(
+            tx.steps[0].rollback_command.as_deref(),
+            Some("apt remove nginx")
+        );
+    }
+
+    #[test]
+    fn build_tx_block_for_linux_service_start() {
+        let commands = vec!["systemctl start nginx".to_string()];
+        let tx = build_tx_block("linux", "start-nginx", "Root", &commands, Some(30), None)
+            .expect("build config tx");
+        assert_eq!(
+            tx.steps[0].rollback_command.as_deref(),
+            Some("systemctl stop nginx")
+        );
     }
 }

@@ -74,6 +74,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Linux Server Management
+
+`rneter` supports Linux server management with flexible privilege escalation:
+
+```rust
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
+use rneter::templates::{linux_with_config, LinuxTemplateConfig, SudoMode};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure Linux template with sudo password
+    let mut handler = templates::linux()?;
+    handler.dyn_param.insert(
+        "SudoPassword".to_string(),
+        "your_sudo_password".to_string()
+    );
+
+    // Connect to Linux server
+    let sender = MANAGER
+        .get_with_context(
+            ConnectionRequest::new(
+                "user".to_string(),
+                "192.168.1.100".to_string(),
+                22,
+                "ssh_password".to_string(),
+                None,
+                handler,
+            ),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    // Execute command as regular user
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender.send(CmdJob {
+        data: Command {
+            mode: "User".to_string(),
+            command: "ls -la /home".to_string(),
+            timeout: Some(30),
+        },
+        sys: None,
+        responder: tx,
+    }).await?;
+    let output = rx.await??;
+    println!("Output: {}", output.content);
+
+    // Execute command with sudo (single command privilege escalation)
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender.send(CmdJob {
+        data: Command {
+            mode: "User".to_string(),
+            command: "sudo systemctl status nginx".to_string(),
+            timeout: Some(30),
+        },
+        sys: None,
+        responder: tx,
+    }).await?;
+    let output = rx.await??;
+    println!("Nginx status: {}", output.content);
+
+    // Switch to persistent root shell
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender.send(CmdJob {
+        data: Command {
+            mode: "Root".to_string(),  // Automatically executes sudo -i
+            command: "systemctl restart nginx".to_string(),
+            timeout: Some(30),
+        },
+        sys: None,
+        responder: tx,
+    }).await?;
+    let output = rx.await??;
+    println!("Restart result: {}", output.content);
+
+    Ok(())
+}
+```
+
+**Custom Configuration:**
+
+```rust
+use rneter::templates::{linux_with_config, LinuxTemplateConfig, SudoMode, CustomPrompts};
+
+// Use sudo -s instead of sudo -i
+let config = LinuxTemplateConfig {
+    sudo_mode: SudoMode::SudoShell,
+    sudo_password: Some("password".to_string()),
+    custom_prompts: None,
+};
+let handler = linux_with_config(config)?;
+
+// Custom prompt patterns
+let config = LinuxTemplateConfig {
+    sudo_mode: SudoMode::SudoInteractive,
+    sudo_password: Some("password".to_string()),
+    custom_prompts: Some(CustomPrompts {
+        user_prompts: vec![r"^myuser@myhost\$\s*$"],
+        root_prompts: vec![r"^root@myhost#\s*$"],
+    }),
+};
+let handler = linux_with_config(config)?;
+```
+
 ### Security Levels
 
 `rneter` now supports secure defaults and configurable SSH security levels when connecting:
@@ -437,13 +540,22 @@ Commands are executed through an async channel-based architecture:
 
 ## Supported Device Types
 
-The library is designed to work with any SSH-enabled network device. It's particularly well-suited for:
+The library is designed to work with any SSH-enabled network device and Linux servers. It's particularly well-suited for:
 
+**Network Devices:**
 - Cisco IOS/IOS-XE/IOS-XR devices
 - Juniper JunOS devices
 - Arista EOS devices
 - Huawei VRP devices
-- Generic Linux/Unix systems accessible via SSH
+- H3C Comware devices
+- Hillstone SG devices
+- Array Networks APV devices
+
+**Linux Servers:**
+- Generic Linux distributions (Ubuntu, Debian, CentOS, RHEL, etc.)
+- Supports multiple privilege escalation methods (sudo -i, sudo -s, su, direct root)
+- Intelligent prompt detection with customizable patterns
+- Transaction-based configuration management with rollback support
 
 ## Configuration
 
