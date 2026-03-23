@@ -275,58 +275,12 @@ pub fn classify_command(template: &str, command: &str) -> Result<CommandBlockKin
     Ok(CommandBlockKind::Config)
 }
 
-fn infer_rollback_command(template_key: &str, command: &str) -> Option<String> {
-    let cmd = command.trim();
-    let lower = cmd.to_ascii_lowercase();
-
-    if ["show ", "display ", "ping ", "traceroute "]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix))
-    {
-        return None;
-    }
-
-    // Vendor-specific compensation patterns.
-    match template_key {
-        // Linux uses its own rollback inference
-        "linux" => infer_linux_rollback(command),
-        // JunOS is set/delete style.
-        "juniper" => {
-            if let Some(rest) = cmd.strip_prefix("set ") {
-                Some(format!("delete {rest}"))
-            } else if let Some(rest) = cmd.strip_prefix("activate ") {
-                Some(format!("deactivate {rest}"))
-            } else {
-                cmd.strip_prefix("deactivate ")
-                    .map(|rest| format!("activate {rest}"))
-            }
-        }
-        // VRP/Comware prefer "undo <cmd>".
-        "huawei" | "h3c" => {
-            if lower.starts_with("undo ") {
-                None
-            } else {
-                Some(format!("undo {cmd}"))
-            }
-        }
-        // Cisco/Hillstone/Array style: "no <cmd>".
-        _ => {
-            if lower.starts_with("no ") {
-                None
-            } else {
-                Some(format!("no {cmd}"))
-            }
-        }
-    }
-}
-
 /// Build a transaction-like block from template + command list.
 ///
 /// Behavior:
 /// - If all commands are `show`-like, build a `show` block with no rollback.
-/// - Otherwise build a `config` block.
-///   - If `resource_rollback_command` is provided, use `whole_resource`.
-///   - Else infer per-step rollback commands from template rules.
+/// - Otherwise build a `config` block with `WholeResource` rollback policy.
+/// - Users must provide `resource_rollback_command` for config blocks.
 pub fn build_tx_block(
     template: &str,
     block_name: &str,
@@ -370,46 +324,33 @@ pub fn build_tx_block(
         });
     }
 
-    // Config blocks choose rollback policy based on caller intent:
-    // - explicit resource rollback command -> whole resource compensation
-    // - otherwise try per-step rollback inference
-    let rollback_policy = if let Some(undo) = resource_rollback_command {
-        RollbackPolicy::WholeResource {
-            mode: mode.to_string(),
-            undo_command: undo,
-            timeout_secs,
-            trigger_step_index: 0,
-        }
-    } else {
-        RollbackPolicy::PerStep
+    // Config blocks require explicit rollback command from user
+    let Some(undo) = resource_rollback_command else {
+        return Err(ConnectError::InvalidTransaction(
+            "config blocks require resource_rollback_command; automatic rollback inference has been removed".to_string(),
+        ));
     };
 
-    let mut steps = Vec::with_capacity(commands.len());
-    for (i, cmd) in commands.iter().enumerate() {
-        let rollback_command = if matches!(rollback_policy, RollbackPolicy::PerStep) {
-            infer_rollback_command(&template_key, cmd)
-        } else {
-            None
-        };
-        if matches!(rollback_policy, RollbackPolicy::PerStep) && rollback_command.is_none() {
-            return Err(ConnectError::InvalidTransaction(format!(
-                "cannot infer rollback command for step[{i}] '{}'; provide resource_rollback_command",
-                cmd
-            )));
-        }
-        steps.push(TxStep {
+    let steps: Vec<TxStep> = commands
+        .iter()
+        .map(|cmd| TxStep {
             mode: mode.to_string(),
             command: cmd.clone(),
             timeout_secs,
-            rollback_command,
+            rollback_command: None,
             rollback_on_failure: false,
-        });
-    }
+        })
+        .collect();
 
     Ok(TxBlock {
         name: block_name.to_string(),
         kind: CommandBlockKind::Config,
-        rollback_policy,
+        rollback_policy: RollbackPolicy::WholeResource {
+            mode: mode.to_string(),
+            undo_command: undo,
+            timeout_secs,
+            trigger_step_index: 0,
+        },
         steps,
         fail_fast: true,
     })
@@ -1438,34 +1379,6 @@ mod tests {
         assert!(tx.steps.iter().all(|s| s.rollback_command.is_none()));
     }
 
-    #[test]
-    fn build_tx_block_for_huawei_infers_undo_per_step() {
-        let commands = vec!["acl 3000".to_string(), "rule permit ip".to_string()];
-        let tx = build_tx_block("huawei", "cfg-block", "Config", &commands, Some(30), None)
-            .expect("build config tx");
-        assert_eq!(tx.kind, CommandBlockKind::Config);
-        assert!(matches!(tx.rollback_policy, RollbackPolicy::PerStep));
-        assert_eq!(
-            tx.steps[0].rollback_command.as_deref(),
-            Some("undo acl 3000")
-        );
-        assert_eq!(
-            tx.steps[1].rollback_command.as_deref(),
-            Some("undo rule permit ip")
-        );
-    }
-
-    #[test]
-    fn build_tx_block_for_juniper_infers_delete_from_set() {
-        let commands =
-            vec!["set security zones security-zone trust interfaces ge-0/0/0.0".to_string()];
-        let tx = build_tx_block("juniper", "cfg-block", "Config", &commands, None, None)
-            .expect("build config tx");
-        assert_eq!(
-            tx.steps[0].rollback_command.as_deref(),
-            Some("delete security zones security-zone trust interfaces ge-0/0/0.0")
-        );
-    }
 
     #[test]
     fn build_tx_block_supports_whole_resource_rollback() {
@@ -1490,11 +1403,12 @@ mod tests {
     }
 
     #[test]
-    fn build_tx_block_returns_error_when_rollback_cannot_be_inferred() {
+    fn build_tx_block_requires_explicit_rollback_for_config() {
         let commands = vec!["undo acl 3000".to_string()];
         let err = build_tx_block("huawei", "bad", "Config", &commands, None, None)
             .expect_err("should fail");
         assert!(matches!(err, ConnectError::InvalidTransaction(_)));
+        assert!(err.to_string().contains("require resource_rollback_command"));
     }
 }
 
@@ -1586,67 +1500,6 @@ pub fn classify_linux_command(command: &str) -> LinuxCommandType {
 /// Security: This function performs basic validation to prevent command injection.
 /// It only generates rollback commands for simple, single-command operations.
 /// Complex commands with pipes, redirects, or command chaining are rejected.
-pub fn infer_linux_rollback(command: &str) -> Option<String> {
-    let cmd = command.trim();
-
-    // Security check: reject commands with shell metacharacters that could enable injection
-    // This prevents attacks like: "apt install nginx && rm -rf /"
-    let dangerous_chars = ['&', '|', ';', '`', '$', '(', ')', '<', '>', '\n', '\r'];
-    if dangerous_chars.iter().any(|c| cmd.contains(*c)) {
-        return None;
-    }
-
-    let cmd_type = classify_linux_command(command);
-
-    match cmd_type {
-        LinuxCommandType::ReadOnly => None,
-        LinuxCommandType::ServiceOp => {
-            // Extract service name and validate it's a simple service command
-            if let Some(service) = extract_service_name(cmd) {
-                if cmd.starts_with("systemctl start ") {
-                    Some(format!("systemctl stop {}", service))
-                } else if cmd.starts_with("systemctl enable ") {
-                    Some(format!("systemctl disable {}", service))
-                } else if cmd.starts_with("systemctl stop ") {
-                    Some(format!("systemctl start {}", service))
-                } else if cmd.starts_with("systemctl disable ") {
-                    Some(format!("systemctl enable {}", service))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        LinuxCommandType::FileOp => {
-            // File operations need backup before execution
-            // Actual backup logic is handled in TxBlock execution
-            None
-        }
-        LinuxCommandType::Custom => None,
-    }
-}
-
-/// Extract service name from systemctl command.
-/// Returns None if the command is not a simple service operation.
-fn extract_service_name(cmd: &str) -> Option<String> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-
-    // Simple validation: command should be "systemctl action service"
-    if parts.len() != 3 {
-        return None;
-    }
-
-    let service = parts[2];
-
-    // Validate service name: alphanumeric, dash, underscore, dot, @ only
-    if service.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '@') {
-        Some(service.to_string())
-    } else {
-        None
-    }
-}
-
 /// Returns a `DeviceHandler` configured for Linux servers with default settings.
 pub fn linux() -> Result<DeviceHandler, ConnectError> {
     linux_with_config(LinuxTemplateConfig::default())
@@ -1847,37 +1700,6 @@ mod linux_tests {
         );
     }
 
-    #[test]
-    fn infer_linux_rollback_for_apt_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("apt install nginx");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_yum_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("yum install httpd");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_systemctl_start() {
-        let rollback = infer_linux_rollback("systemctl start nginx");
-        assert_eq!(rollback, Some("systemctl stop nginx".to_string()));
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_systemctl_enable() {
-        let rollback = infer_linux_rollback("systemctl enable nginx");
-        assert_eq!(rollback, Some("systemctl disable nginx".to_string()));
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_readonly_returns_none() {
-        let rollback = infer_linux_rollback("ls -la");
-        assert_eq!(rollback, None);
-    }
 
     #[test]
     fn classify_command_supports_linux_template() {
@@ -1950,24 +1772,12 @@ mod linux_tests {
     }
 
     #[test]
-    fn build_tx_block_for_linux_package_install() {
-        // Package operations cannot be safely rolled back automatically
-        // Must provide explicit resource_rollback_command
+    fn build_tx_block_for_linux_config_requires_explicit_rollback() {
+        // Config operations require explicit rollback command
         let commands = vec!["apt install nginx".to_string()];
         let result = build_tx_block("linux", "install-nginx", "Root", &commands, Some(60), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot infer rollback command"));
-    }
-
-    #[test]
-    fn build_tx_block_for_linux_service_start() {
-        let commands = vec!["systemctl start nginx".to_string()];
-        let tx = build_tx_block("linux", "start-nginx", "Root", &commands, Some(30), None)
-            .expect("build config tx");
-        assert_eq!(
-            tx.steps[0].rollback_command.as_deref(),
-            Some("systemctl stop nginx")
-        );
+        assert!(result.unwrap_err().to_string().contains("require resource_rollback_command"));
     }
 
     // ========================================================================
@@ -1975,117 +1785,14 @@ mod linux_tests {
     // ========================================================================
 
     #[test]
-    fn infer_linux_rollback_rejects_command_injection_with_ampersand() {
-        // Attempt to inject additional commands with &&
-        let rollback = infer_linux_rollback("apt install nginx && rm -rf /");
-        assert_eq!(rollback, None, "Should reject commands with &&");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_command_injection_with_pipe() {
-        // Attempt to inject commands with pipe
-        let rollback = infer_linux_rollback("apt install nginx | malicious");
-        assert_eq!(rollback, None, "Should reject commands with |");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_command_injection_with_semicolon() {
-        // Attempt to inject commands with semicolon
-        let rollback = infer_linux_rollback("apt install nginx; rm -rf /");
-        assert_eq!(rollback, None, "Should reject commands with ;");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_command_substitution() {
-        // Attempt command substitution
-        let rollback = infer_linux_rollback("apt install $(malicious)");
-        assert_eq!(rollback, None, "Should reject command substitution");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_backtick_substitution() {
-        // Attempt backtick command substitution
-        let rollback = infer_linux_rollback("apt install `malicious`");
-        assert_eq!(rollback, None, "Should reject backtick substitution");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_redirection() {
-        // Attempt output redirection
-        let rollback = infer_linux_rollback("apt install nginx > /tmp/log");
-        assert_eq!(rollback, None, "Should reject output redirection");
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_input_redirection() {
-        // Attempt input redirection
-        let rollback = infer_linux_rollback("apt install < /tmp/packages");
-        assert_eq!(rollback, None, "Should reject input redirection");
-    }
-
-    #[test]
-    fn infer_linux_rollback_accepts_simple_package_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("apt install nginx");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_accepts_package_install_with_flags() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("apt install -y nginx");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_invalid_package_name() {
-        // Package name with invalid characters
-        let rollback = infer_linux_rollback("apt install nginx@malicious");
-        assert_eq!(rollback, None, "Should reject invalid package names");
-    }
-
-    #[test]
-    fn infer_linux_rollback_accepts_simple_service_start() {
-        // Valid simple service start
-        let rollback = infer_linux_rollback("systemctl start nginx");
-        assert_eq!(rollback, Some("systemctl stop nginx".to_string()));
-    }
-
-    #[test]
-    fn infer_linux_rollback_rejects_service_with_extra_args() {
-        // Service command with extra arguments (potential injection)
-        let rollback = infer_linux_rollback("systemctl start nginx extra");
-        assert_eq!(rollback, None, "Should reject service commands with extra args");
-    }
-
-    #[test]
-    fn infer_linux_rollback_accepts_service_with_at_sign() {
-        // Valid service name with @ (systemd template)
-        let rollback = infer_linux_rollback("systemctl start nginx@8080");
-        assert_eq!(rollback, Some("systemctl stop nginx@8080".to_string()));
-    }
-
-    #[test]
-    fn extract_service_name_validates_format() {
-        // Valid service names
-        assert_eq!(extract_service_name("systemctl start nginx"), Some("nginx".to_string()));
-        assert_eq!(extract_service_name("systemctl start nginx.service"), Some("nginx.service".to_string()));
-        assert_eq!(extract_service_name("systemctl start nginx@8080"), Some("nginx@8080".to_string()));
-
-        // Invalid formats
-        assert_eq!(extract_service_name("systemctl start"), None);
-        assert_eq!(extract_service_name("systemctl start nginx extra"), None);
-        assert_eq!(extract_service_name("systemctl start nginx;malicious"), None);
-    }
-
-    #[test]
-    fn build_tx_block_rejects_dangerous_commands() {
-        // Attempt to build transaction with command injection
+    fn build_tx_block_requires_explicit_rollback_for_config_commands() {
+        // Config commands require explicit resource_rollback_command
         let commands = vec!["apt install nginx && rm -rf /".to_string()];
         let result = build_tx_block("linux", "malicious", "Root", &commands, Some(60), None);
 
-        // Should fail because rollback cannot be inferred for dangerous commands
-        assert!(result.is_err(), "Should reject dangerous commands");
+        // Should fail because no rollback command provided
+        assert!(result.is_err(), "Should require explicit rollback command");
+        assert!(result.unwrap_err().to_string().contains("require resource_rollback_command"));
     }
 
     #[test]
@@ -2106,49 +1813,5 @@ mod linux_tests {
         // Commands should be case-insensitive
         assert_eq!(classify_linux_command("LS -la"), LinuxCommandType::ReadOnly);
         assert_eq!(classify_linux_command("SYSTEMCTL START nginx"), LinuxCommandType::ServiceOp);
-    }
-
-    #[test]
-    fn infer_linux_rollback_handles_whitespace() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("  apt install nginx  ");
-        assert_eq!(rollback, None);
-
-        let rollback = infer_linux_rollback("systemctl  start  nginx");
-        // This should fail because extract_service_name expects exactly 3 parts
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_pip_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("pip install requests");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_npm_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("npm install express");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_dnf_install() {
-        // Package operations cannot be safely rolled back automatically
-        let rollback = infer_linux_rollback("dnf install httpd");
-        assert_eq!(rollback, None);
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_systemctl_disable() {
-        let rollback = infer_linux_rollback("systemctl disable nginx");
-        assert_eq!(rollback, Some("systemctl enable nginx".to_string()));
-    }
-
-    #[test]
-    fn infer_linux_rollback_for_systemctl_stop() {
-        let rollback = infer_linux_rollback("systemctl stop nginx");
-        assert_eq!(rollback, Some("systemctl start nginx".to_string()));
     }
 }
