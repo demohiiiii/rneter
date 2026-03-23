@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.2] - 2026-03-23
+
+### New Features
+- Added Linux server support through `templates::linux()` and `templates::linux_with_config(...)`, including `sudo -i`, `sudo -s`, `su -`, and direct-root privilege escalation modes plus Linux-specific command classification.
+- Added SSH security profiles via `SecurityLevel` and `ConnectionSecurityOptions`, so callers can choose secure, balanced, or legacy-compatible connection defaults through the structured session context.
+- Expanded the built-in template catalog with additional network vendor templates (`arista`, `chaitin`, `checkpoint`, `dptech`, `fortinet`, `maipu`, `paloalto`, `qianxin`, `topsec`, `venustech`) and Fortinet VDOM-aware template support.
+
+### Optimizations
+- Split the `templates` module into catalog, registry, transaction, Linux, and per-vendor network submodules, reducing the size and coupling of the previous monolithic template implementation.
+- Split the large session client and device state-machine implementations into focused internal submodules (`connection`, `command`, `tx`, `builder`, `runtime`, `diagnostics`, `transitions`) while keeping the public entrypoints stable.
+- Hardened Linux transaction helpers by rejecting shell metacharacter injection patterns and validating package/service identifiers before classifying or building rollback-capable operations.
+
+### API Changes
+- `templates::build_tx_block(...)` no longer infers rollback commands automatically; config-style blocks now require an explicit `resource_rollback_command`.
+- New public template exports are available for Linux and the expanded vendor set through `templates::*`, and `templates::by_name(...)` now recognizes the new built-in template names.
+- Session security configuration is now exposed as public structured types: `ConnectionSecurityOptions` and `SecurityLevel`.
+
+### Risks
+- This release includes a behavioral break for callers that relied on automatic rollback inference; those integrations must now construct explicit compensating commands before calling `build_tx_block(...)`.
+- Linux privilege escalation depends on prompt matching; hosts with unusual shell prompts may require `LinuxTemplateConfig.custom_prompts` to avoid mode-detection drift.
+- `ConnectionSecurityOptions::legacy_compatible()` disables host-key verification (`NoCheck`) to maximize compatibility with older devices, which is a deliberate security tradeoff that callers should choose explicitly.
+
 ## [0.3.1] - 2026-03-19
 
 ### New Features
