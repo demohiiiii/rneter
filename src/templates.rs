@@ -1544,7 +1544,6 @@ pub struct CustomPrompts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxCommandType {
     ReadOnly,
-    PackageOp,
     FileOp,
     ServiceOp,
     Custom,
@@ -1562,15 +1561,6 @@ pub fn classify_linux_command(command: &str) -> LinuxCommandType {
     ];
     if readonly_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
         return LinuxCommandType::ReadOnly;
-    }
-
-    // Package management
-    let package_prefixes = [
-        "apt install", "apt-get install", "yum install", "dnf install",
-        "pip install", "npm install", "cargo install",
-    ];
-    if package_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
-        return LinuxCommandType::PackageOp;
     }
 
     // Service operations
@@ -1610,26 +1600,6 @@ pub fn infer_linux_rollback(command: &str) -> Option<String> {
 
     match cmd_type {
         LinuxCommandType::ReadOnly => None,
-        LinuxCommandType::PackageOp => {
-            // Extract package name and validate it's a simple install command
-            if let Some(pkg) = extract_package_name(cmd) {
-                if cmd.starts_with("apt install ") || cmd.starts_with("apt-get install ") {
-                    Some(format!("apt remove {}", pkg))
-                } else if cmd.starts_with("yum install ") {
-                    Some(format!("yum remove {}", pkg))
-                } else if cmd.starts_with("dnf install ") {
-                    Some(format!("dnf remove {}", pkg))
-                } else if cmd.starts_with("pip install ") {
-                    Some(format!("pip uninstall -y {}", pkg))
-                } else if cmd.starts_with("npm install ") {
-                    Some(format!("npm uninstall {}", pkg))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
         LinuxCommandType::ServiceOp => {
             // Extract service name and validate it's a simple service command
             if let Some(service) = extract_service_name(cmd) {
@@ -1655,29 +1625,6 @@ pub fn infer_linux_rollback(command: &str) -> Option<String> {
         }
         LinuxCommandType::Custom => None,
     }
-}
-
-/// Extract package name from install command.
-/// Returns None if the command is not a simple package install.
-fn extract_package_name(cmd: &str) -> Option<String> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-
-    // Simple validation: command should be "manager install package" or "manager install -y package"
-    if parts.len() < 3 {
-        return None;
-    }
-
-    // Find the package name (skip flags like -y, --yes)
-    for part in parts.iter().skip(2) {
-        if !part.starts_with('-') {
-            // Validate package name: alphanumeric, dash, underscore, dot only
-            if part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
-                return Some(part.to_string());
-            }
-        }
-    }
-
-    None
 }
 
 /// Extract service name from systemctl command.
@@ -1877,22 +1824,6 @@ mod linux_tests {
     }
 
     #[test]
-    fn classify_linux_command_identifies_package_ops() {
-        assert_eq!(
-            classify_linux_command("apt install nginx"),
-            LinuxCommandType::PackageOp
-        );
-        assert_eq!(
-            classify_linux_command("yum install httpd"),
-            LinuxCommandType::PackageOp
-        );
-        assert_eq!(
-            classify_linux_command("pip install requests"),
-            LinuxCommandType::PackageOp
-        );
-    }
-
-    #[test]
     fn classify_linux_command_identifies_service_ops() {
         assert_eq!(
             classify_linux_command("systemctl start nginx"),
@@ -1918,14 +1849,16 @@ mod linux_tests {
 
     #[test]
     fn infer_linux_rollback_for_apt_install() {
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("apt install nginx");
-        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
     fn infer_linux_rollback_for_yum_install() {
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("yum install httpd");
-        assert_eq!(rollback, Some("yum remove httpd".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
@@ -2018,15 +1951,12 @@ mod linux_tests {
 
     #[test]
     fn build_tx_block_for_linux_package_install() {
+        // Package operations cannot be safely rolled back automatically
+        // Must provide explicit resource_rollback_command
         let commands = vec!["apt install nginx".to_string()];
-        let tx = build_tx_block("linux", "install-nginx", "Root", &commands, Some(60), None)
-            .expect("build config tx");
-        assert_eq!(tx.kind, CommandBlockKind::Config);
-        assert!(matches!(tx.rollback_policy, RollbackPolicy::PerStep));
-        assert_eq!(
-            tx.steps[0].rollback_command.as_deref(),
-            Some("apt remove nginx")
-        );
+        let result = build_tx_block("linux", "install-nginx", "Root", &commands, Some(60), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot infer rollback command"));
     }
 
     #[test]
@@ -2095,16 +2025,16 @@ mod linux_tests {
 
     #[test]
     fn infer_linux_rollback_accepts_simple_package_install() {
-        // Valid simple package install
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("apt install nginx");
-        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
     fn infer_linux_rollback_accepts_package_install_with_flags() {
-        // Valid package install with -y flag
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("apt install -y nginx");
-        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
@@ -2133,18 +2063,6 @@ mod linux_tests {
         // Valid service name with @ (systemd template)
         let rollback = infer_linux_rollback("systemctl start nginx@8080");
         assert_eq!(rollback, Some("systemctl stop nginx@8080".to_string()));
-    }
-
-    #[test]
-    fn extract_package_name_validates_alphanumeric() {
-        // Valid package names
-        assert_eq!(extract_package_name("apt install nginx"), Some("nginx".to_string()));
-        assert_eq!(extract_package_name("apt install nginx-full"), Some("nginx-full".to_string()));
-        assert_eq!(extract_package_name("apt install python3.9"), Some("python3.9".to_string()));
-
-        // Invalid package names
-        assert_eq!(extract_package_name("apt install nginx@bad"), None);
-        assert_eq!(extract_package_name("apt install nginx;malicious"), None);
     }
 
     #[test]
@@ -2187,15 +2105,14 @@ mod linux_tests {
     fn classify_linux_command_handles_case_insensitivity() {
         // Commands should be case-insensitive
         assert_eq!(classify_linux_command("LS -la"), LinuxCommandType::ReadOnly);
-        assert_eq!(classify_linux_command("APT INSTALL nginx"), LinuxCommandType::PackageOp);
         assert_eq!(classify_linux_command("SYSTEMCTL START nginx"), LinuxCommandType::ServiceOp);
     }
 
     #[test]
     fn infer_linux_rollback_handles_whitespace() {
-        // Commands with extra whitespace
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("  apt install nginx  ");
-        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+        assert_eq!(rollback, None);
 
         let rollback = infer_linux_rollback("systemctl  start  nginx");
         // This should fail because extract_service_name expects exactly 3 parts
@@ -2204,20 +2121,23 @@ mod linux_tests {
 
     #[test]
     fn infer_linux_rollback_for_pip_install() {
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("pip install requests");
-        assert_eq!(rollback, Some("pip uninstall -y requests".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
     fn infer_linux_rollback_for_npm_install() {
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("npm install express");
-        assert_eq!(rollback, Some("npm uninstall express".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
     fn infer_linux_rollback_for_dnf_install() {
+        // Package operations cannot be safely rolled back automatically
         let rollback = infer_linux_rollback("dnf install httpd");
-        assert_eq!(rollback, Some("dnf remove httpd".to_string()));
+        assert_eq!(rollback, None);
     }
 
     #[test]
