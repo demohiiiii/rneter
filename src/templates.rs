@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Built-in template names supported by this crate.
-pub const BUILTIN_TEMPLATES: &[&str] = &["cisco", "huawei", "h3c", "hillstone", "juniper", "array", "linux"];
+pub const BUILTIN_TEMPLATES: &[&str] = &[
+    "cisco", "huawei", "h3c", "hillstone", "juniper", "array", "linux",
+    "arista", "fortinet", "paloalto", "topsec", "venustech", "dptech",
+    "chaitin", "qianxin", "maipu", "checkpoint"
+];
 
 /// Capability tags used to describe template compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -114,6 +118,111 @@ fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::LoginMode,
                 TemplateCapability::EnableMode,
                 TemplateCapability::InteractiveInput,
+            ],
+        },
+        "arista" => TemplateMetadata {
+            name: "arista".to_string(),
+            vendor: "Arista".to_string(),
+            family: "EOS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "fortinet" => TemplateMetadata {
+            name: "fortinet".to_string(),
+            vendor: "Fortinet".to_string(),
+            family: "FortiGate".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+            ],
+        },
+        "paloalto" => TemplateMetadata {
+            name: "paloalto".to_string(),
+            vendor: "Palo Alto Networks".to_string(),
+            family: "PA".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+            ],
+        },
+        "topsec" => TemplateMetadata {
+            name: "topsec".to_string(),
+            vendor: "Topsec".to_string(),
+            family: "NGFW".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+            ],
+        },
+        "venustech" => TemplateMetadata {
+            name: "venustech".to_string(),
+            vendor: "Venustech".to_string(),
+            family: "USG".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "dptech" => TemplateMetadata {
+            name: "dptech".to_string(),
+            vendor: "DPTech".to_string(),
+            family: "FW".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+            ],
+        },
+        "chaitin" => TemplateMetadata {
+            name: "chaitin".to_string(),
+            vendor: "Chaitin".to_string(),
+            family: "SafeLine".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "qianxin" => TemplateMetadata {
+            name: "qianxin".to_string(),
+            vendor: "QiAnXin".to_string(),
+            family: "NSG".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+            ],
+        },
+        "maipu" => TemplateMetadata {
+            name: "maipu".to_string(),
+            vendor: "Maipu".to_string(),
+            family: "NSS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+        },
+        "checkpoint" => TemplateMetadata {
+            name: "checkpoint".to_string(),
+            vendor: "Check Point".to_string(),
+            family: "Security Gateway".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
             ],
         },
         _ => return None,
@@ -316,6 +425,16 @@ pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
         "juniper" => juniper(),
         "array" => array(),
         "linux" => linux(),
+        "arista" => arista(),
+        "fortinet" => fortinet(),
+        "paloalto" => paloalto(),
+        "topsec" => topsec(),
+        "venustech" => venustech(),
+        "dptech" => dptech(),
+        "chaitin" => chaitin(),
+        "qianxin" => qianxin(),
+        "maipu" => maipu(),
+        "checkpoint" => checkpoint(),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
 }
@@ -409,7 +528,7 @@ pub fn cisco() -> Result<DeviceHandler, ConnectError> {
             ),
         ],
         // Ignore errors
-        vec![r"ERROR: object \(.+\) does not exist."],
+        vec![],
         // Dyn param
         HashMap::new(),
     )
@@ -421,7 +540,7 @@ pub fn huawei() -> Result<DeviceHandler, ConnectError> {
         // Prompt
         vec![
             ("Config".to_string(), vec![r"^(HRP_M|HRP_S){0,1}\[.+]+\s*$"]),
-            ("Enable".to_string(), vec![r"^(RBM_P|RBM_S)?<.+>\s*$"]),
+            ("Enable".to_string(), vec![r"^(HRP_M|HRP_S){0,1}<.+>\s*$"]),
         ],
         // Prompt with sys
         vec![],
@@ -457,23 +576,7 @@ pub fn huawei() -> Result<DeviceHandler, ConnectError> {
             ),
         ],
         // Ignore errors
-        vec![
-            r"Error: Address item conflicts!",
-            r"Error: The address item does not exist!",
-            r"Error: The delete configuration does not exist.",
-            r"Error: The address or address set is not created!",
-            r"Error: Cannot add! Service item conflicts or illegal reference!",
-            r"Error: The service item does not exist!",
-            r"Error: Service item conflicts!",
-            r"Error: The service item does not exist!",
-            r"Error: The service set is not created(.+)!",
-            r"Error: No such a time-range.",
-            r"Error: The specified address-group does not exist.",
-            r"Error: The specified rule does not exist yet.",
-            r"This condition has already been configured",
-            r"[a-zA-Z]* (item conflicts|Service item exists\.)",
-            r"Error: Worng parameter found at.*",
-        ],
+        vec![],
         // Dyn param
         HashMap::new(),
     )
@@ -584,32 +687,7 @@ pub fn hillstone() -> Result<DeviceHandler, ConnectError> {
             ),
         ],
         // Ignore errors
-        vec![
-            r"Error: Schedule entity (.+) is not found",
-            r"错误：没有找到时间表(.+)",
-            r"Error: Failed to find this service",
-            r"错误: 无法找到服务",
-            r"Error: Rule (\d+) is not found$",
-            r"错误：规则(\d+)不存在",
-            r"Error: This service already exists",
-            r"错误：该服务已经添加",
-            r"Error: Rule is already configured with schedule (.+)",
-            r#"错误：此规则已经配置了时间表"(.+)""#,
-            r"Error: Rule is not configured with schedule (.+)",
-            r#"错误：此规则没有配置了时间表"(.+)""#,
-            r"Error: This entity is already added",
-            r"错误：该项已经添加",
-            r"Error: This entity already exists",
-            r"错误: 该成员已经存在",
-            r"Error: Cannot find this service entity",
-            r"错误：查找该服务条目失败!",
-            r"Error: Address entry (.+) has no member (.+)",
-            r"错误：地址条目(.+)没有成员(.+)",
-            r"Error: Address (.+) is not found",
-            r"错误：地址簿(.+)没有找到",
-            r"Error: Deleting a service not configured",
-            r"错误：尝试删除一个没有配置的服务",
-        ],
+        vec![],
         // Dyn param
         HashMap::new(),
     )
@@ -664,10 +742,7 @@ pub fn juniper() -> Result<DeviceHandler, ConnectError> {
             ),
         ],
         // Ignore errors
-        vec![
-            r"warning: statement not found",
-            r"warning: element \S+ not found",
-        ],
+        vec![],
         // Dyn param
         HashMap::new(),
     )
@@ -787,6 +862,486 @@ pub fn array() -> Result<DeviceHandler, ConnectError> {
                 false,
             ),
         ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for Arista EOS devices.
+pub fn arista() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
+            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![(
+            "EnablePassword".to_string(),
+            (true, "EnablePassword".to_string(), true),
+            vec![r"Password:"],
+        )],
+        // More regex
+        vec![r" --More-- "],
+        // Error regex
+        vec![
+            r"% Invalid input",
+            r"% Ambiguous command",
+            r"% Bad secret",
+            r"% Unrecognized command",
+            r"% Incomplete command",
+            r"% Invalid port range .+",
+            r"! Access VLAN does not exist. Creating vlan .+",
+            r"% Address \S+ is already assigned to interface .+",
+            r"% Removal of physical interfaces is not permitted",
+            r"^% .+",
+        ],
+        // Edges
+        vec![
+            (
+                "Login".to_string(),
+                "enable".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "configure terminal".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "exit".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "exit".to_string(),
+                "Login".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for Fortinet FortiGate devices.
+pub fn fortinet() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt - Fortinet only has Enable mode
+        vec![
+            ("Enable".to_string(), vec![r"^\r{0,1}\S+\s*#\s*$"]),
+        ],
+        // Prompt with sys (VSYS support)
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r"--More--"],
+        // Error regex
+        vec![
+            r"Unknown action.*",
+            r"Command fail.*",
+        ],
+        // Edges - Fortinet has no mode transitions
+        vec![],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for Palo Alto Networks devices.
+pub fn paloalto() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\S+@\S+#\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}\S+@\S+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r"(--more--)|(lines \d+-\d+ )"],
+        // Error regex
+        vec![
+            r"Unknown command:.*",
+            r"Invalid syntax.",
+            r"Server error:.*",
+            r"Validation Error:.*",
+            r"Commit failed",
+        ],
+        // Edges
+        vec![
+            (
+                "Enable".to_string(),
+                "configure".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "exit".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for TopSec NGFW devices.
+pub fn topsec() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt - TopSec only has Enable mode
+        vec![
+            ("Enable".to_string(), vec![r"^\r{0,1}\S+[#%]\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r"--More--"],
+        // Error regex
+        vec![r"^error"],
+        // Edges - No mode transitions
+        vec![],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for Venustech USG devices.
+pub fn venustech() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
+            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![(
+            "EnablePassword".to_string(),
+            (true, "EnablePassword".to_string(), true),
+            vec![r"(Enable )?Password:"],
+        )],
+        // More regex
+        vec![r"--More-- \(\d+% of \d+ bytes\)"],
+        // Error regex
+        vec![
+            r"^%.+",
+            r".+not exist!",
+        ],
+        // Edges
+        vec![
+            (
+                "Login".to_string(),
+                "enable".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "configure terminal".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "exit".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "exit".to_string(),
+                "Login".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for DPTech firewall devices.
+pub fn dptech() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\[.+\]\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}<.+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r" --More\(CTRL\+C break\)-- "],
+        // Error regex
+        vec![
+            r"% Unknown command.*",
+            r"Can't find the .+ object",
+            r".*not exist.*",
+            r".*item is longer.*",
+            r"Failed.*",
+            r"Undefined error.*",
+            r"% Command can not contain:.+",
+            r"Invalid parameter.*",
+            r"% Ambiguous command.",
+        ],
+        // Edges
+        vec![
+            (
+                "Enable".to_string(),
+                "conf-mode".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "end".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for ChaiTin SafeLine devices.
+pub fn chaitin() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
+            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![(
+            "EnablePassword".to_string(),
+            (true, "EnablePassword".to_string(), true),
+            vec![r"(Enable )?Password:"],
+        )],
+        // More regex
+        vec![],
+        // Error regex
+        vec![
+            r"% Command incomplete",
+            r"% Unknown command",
+            r"Error:.*",
+        ],
+        // Edges
+        vec![
+            (
+                "Login".to_string(),
+                "enable".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "configure terminal".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "exit".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "exit".to_string(),
+                "Login".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for QiAnXin NSG devices.
+pub fn qianxin() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\S+-config.*]\s*$"]),
+            ("Enable".to_string(), vec![r"^\S+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r"--More--"],
+        // Error regex
+        vec![
+            r"% Unknown command.",
+            r"% Command incomplete.",
+            r"%?\s+Invalid parameter.*",
+            r"\s+Valid name can.*",
+            r"\s+Repetitions with Object.*",
+            r".+ exist",
+            r"\s+Start larger than end",
+            r"\s+Name can not repeat",
+            r"Object .+ referenced by other module",
+            r"Object service has been referenced",
+            r"Object \[.+\] is quoted",
+        ],
+        // Edges
+        vec![
+            (
+                "Enable".to_string(),
+                "config terminal".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "end".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for MaiPu network devices.
+pub fn maipu() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt
+        vec![
+            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
+            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![(
+            "EnablePassword".to_string(),
+            (true, "EnablePassword".to_string(), true),
+            vec![r"password:"],
+        )],
+        // More regex
+        vec![],
+        // Error regex
+        vec![r"% Invalid input"],
+        // Edges
+        vec![
+            (
+                "Login".to_string(),
+                "enable".to_string(),
+                "Enable".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "configure terminal".to_string(),
+                "Config".to_string(),
+                false,
+                false,
+            ),
+            (
+                "Config".to_string(),
+                "exit".to_string(),
+                "Enable".to_string(),
+                true,
+                false,
+            ),
+            (
+                "Enable".to_string(),
+                "exit".to_string(),
+                "Login".to_string(),
+                true,
+                false,
+            ),
+        ],
+        // Ignore errors
+        vec![],
+        // Dyn param
+        HashMap::new(),
+    )
+}
+
+/// Returns a `DeviceHandler` configured for Check Point Security Gateway devices.
+pub fn checkpoint() -> Result<DeviceHandler, ConnectError> {
+    DeviceHandler::new(
+        // Prompt - Check Point only has Enable mode
+        vec![
+            ("Enable".to_string(), vec![r"^\r{0,1}\S+\s*>\s*$"]),
+        ],
+        // Prompt with sys
+        vec![],
+        // Write
+        vec![],
+        // More regex
+        vec![r"-- More --"],
+        // Error regex
+        vec![
+            r".+Incomplete command\.",
+            r".+Invalid command:.+",
+        ],
+        // Edges - No mode transitions
+        vec![],
         // Ignore errors
         vec![],
         // Dyn param

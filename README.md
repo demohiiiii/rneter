@@ -550,6 +550,15 @@ The library is designed to work with any SSH-enabled network device and Linux se
 - H3C Comware devices
 - Hillstone SG devices
 - Array Networks APV devices
+- Fortinet FortiGate firewalls
+- Palo Alto Networks PA firewalls
+- Check Point Security Gateway
+- Topsec NGFW firewalls
+- Venustech USG devices
+- DPTech firewall devices
+- Chaitin SafeLine gateways
+- QiAnXin NSG gateways
+- Maipu network devices
 
 **Linux Servers:**
 - Generic Linux distributions (Ubuntu, Debian, CentOS, RHEL, etc.)
