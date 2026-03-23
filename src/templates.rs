@@ -946,8 +946,14 @@ pub fn fortinet() -> Result<DeviceHandler, ConnectError> {
         vec![
             ("Enable".to_string(), vec![r"^\r{0,1}\S+\s*#\s*$"]),
         ],
-        // Prompt with sys (VSYS support)
-        vec![],
+        // Prompt with sys (VDOM support)
+        vec![
+            (
+                "VDOMEnable".to_string(),
+                "VDOM",
+                r"^\r{0,1}\S+\s*\((?<VDOM>\S+)\)\s*#\s*$".to_string(),
+            ),
+        ],
         // Write
         vec![],
         // More regex
