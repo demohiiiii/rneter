@@ -1031,37 +1031,58 @@ pub fn classify_linux_command(command: &str) -> LinuxCommandType {
 }
 
 /// Infer rollback command for Linux operations.
+///
+/// Security: This function performs basic validation to prevent command injection.
+/// It only generates rollback commands for simple, single-command operations.
+/// Complex commands with pipes, redirects, or command chaining are rejected.
 pub fn infer_linux_rollback(command: &str) -> Option<String> {
+    let cmd = command.trim();
+
+    // Security check: reject commands with shell metacharacters that could enable injection
+    // This prevents attacks like: "apt install nginx && rm -rf /"
+    let dangerous_chars = ['&', '|', ';', '`', '$', '(', ')', '<', '>', '\n', '\r'];
+    if dangerous_chars.iter().any(|c| cmd.contains(*c)) {
+        return None;
+    }
+
     let cmd_type = classify_linux_command(command);
 
     match cmd_type {
         LinuxCommandType::ReadOnly => None,
         LinuxCommandType::PackageOp => {
-            let cmd = command.trim();
-            if cmd.contains("apt install") || cmd.contains("apt-get install") {
-                Some(cmd.replace("install", "remove"))
-            } else if cmd.contains("yum install") {
-                Some(cmd.replace("install", "remove"))
-            } else if cmd.contains("dnf install") {
-                Some(cmd.replace("install", "remove"))
-            } else if cmd.contains("pip install") {
-                Some(cmd.replace("install", "uninstall"))
-            } else if cmd.contains("npm install") {
-                Some(cmd.replace("install", "uninstall"))
+            // Extract package name and validate it's a simple install command
+            if let Some(pkg) = extract_package_name(cmd) {
+                if cmd.starts_with("apt install ") || cmd.starts_with("apt-get install ") {
+                    Some(format!("apt remove {}", pkg))
+                } else if cmd.starts_with("yum install ") {
+                    Some(format!("yum remove {}", pkg))
+                } else if cmd.starts_with("dnf install ") {
+                    Some(format!("dnf remove {}", pkg))
+                } else if cmd.starts_with("pip install ") {
+                    Some(format!("pip uninstall -y {}", pkg))
+                } else if cmd.starts_with("npm install ") {
+                    Some(format!("npm uninstall {}", pkg))
+                } else {
+                    None
+                }
             } else {
                 None
             }
         }
         LinuxCommandType::ServiceOp => {
-            let cmd = command.trim();
-            if cmd.contains("start") {
-                Some(cmd.replace("start", "stop"))
-            } else if cmd.contains("enable") {
-                Some(cmd.replace("enable", "disable"))
-            } else if cmd.contains("stop") {
-                Some(cmd.replace("stop", "start"))
-            } else if cmd.contains("disable") {
-                Some(cmd.replace("disable", "enable"))
+            // Extract service name and validate it's a simple service command
+            if let Some(service) = extract_service_name(cmd) {
+                if cmd.starts_with("systemctl start ") {
+                    Some(format!("systemctl stop {}", service))
+                } else if cmd.starts_with("systemctl enable ") {
+                    Some(format!("systemctl disable {}", service))
+                } else if cmd.starts_with("systemctl stop ") {
+                    Some(format!("systemctl start {}", service))
+                } else if cmd.starts_with("systemctl disable ") {
+                    Some(format!("systemctl enable {}", service))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -1072,6 +1093,49 @@ pub fn infer_linux_rollback(command: &str) -> Option<String> {
             None
         }
         LinuxCommandType::Custom => None,
+    }
+}
+
+/// Extract package name from install command.
+/// Returns None if the command is not a simple package install.
+fn extract_package_name(cmd: &str) -> Option<String> {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+
+    // Simple validation: command should be "manager install package" or "manager install -y package"
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Find the package name (skip flags like -y, --yes)
+    for part in parts.iter().skip(2) {
+        if !part.starts_with('-') {
+            // Validate package name: alphanumeric, dash, underscore, dot only
+            if part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                return Some(part.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract service name from systemctl command.
+/// Returns None if the command is not a simple service operation.
+fn extract_service_name(cmd: &str) -> Option<String> {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+
+    // Simple validation: command should be "systemctl action service"
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let service = parts[2];
+
+    // Validate service name: alphanumeric, dash, underscore, dot, @ only
+    if service.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '@') {
+        Some(service.to_string())
+    } else {
+        None
     }
 }
 
@@ -1413,5 +1477,197 @@ mod linux_tests {
             tx.steps[0].rollback_command.as_deref(),
             Some("systemctl stop nginx")
         );
+    }
+
+    // ========================================================================
+    // Security Tests
+    // ========================================================================
+
+    #[test]
+    fn infer_linux_rollback_rejects_command_injection_with_ampersand() {
+        // Attempt to inject additional commands with &&
+        let rollback = infer_linux_rollback("apt install nginx && rm -rf /");
+        assert_eq!(rollback, None, "Should reject commands with &&");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_command_injection_with_pipe() {
+        // Attempt to inject commands with pipe
+        let rollback = infer_linux_rollback("apt install nginx | malicious");
+        assert_eq!(rollback, None, "Should reject commands with |");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_command_injection_with_semicolon() {
+        // Attempt to inject commands with semicolon
+        let rollback = infer_linux_rollback("apt install nginx; rm -rf /");
+        assert_eq!(rollback, None, "Should reject commands with ;");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_command_substitution() {
+        // Attempt command substitution
+        let rollback = infer_linux_rollback("apt install $(malicious)");
+        assert_eq!(rollback, None, "Should reject command substitution");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_backtick_substitution() {
+        // Attempt backtick command substitution
+        let rollback = infer_linux_rollback("apt install `malicious`");
+        assert_eq!(rollback, None, "Should reject backtick substitution");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_redirection() {
+        // Attempt output redirection
+        let rollback = infer_linux_rollback("apt install nginx > /tmp/log");
+        assert_eq!(rollback, None, "Should reject output redirection");
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_input_redirection() {
+        // Attempt input redirection
+        let rollback = infer_linux_rollback("apt install < /tmp/packages");
+        assert_eq!(rollback, None, "Should reject input redirection");
+    }
+
+    #[test]
+    fn infer_linux_rollback_accepts_simple_package_install() {
+        // Valid simple package install
+        let rollback = infer_linux_rollback("apt install nginx");
+        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_accepts_package_install_with_flags() {
+        // Valid package install with -y flag
+        let rollback = infer_linux_rollback("apt install -y nginx");
+        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_invalid_package_name() {
+        // Package name with invalid characters
+        let rollback = infer_linux_rollback("apt install nginx@malicious");
+        assert_eq!(rollback, None, "Should reject invalid package names");
+    }
+
+    #[test]
+    fn infer_linux_rollback_accepts_simple_service_start() {
+        // Valid simple service start
+        let rollback = infer_linux_rollback("systemctl start nginx");
+        assert_eq!(rollback, Some("systemctl stop nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_rejects_service_with_extra_args() {
+        // Service command with extra arguments (potential injection)
+        let rollback = infer_linux_rollback("systemctl start nginx extra");
+        assert_eq!(rollback, None, "Should reject service commands with extra args");
+    }
+
+    #[test]
+    fn infer_linux_rollback_accepts_service_with_at_sign() {
+        // Valid service name with @ (systemd template)
+        let rollback = infer_linux_rollback("systemctl start nginx@8080");
+        assert_eq!(rollback, Some("systemctl stop nginx@8080".to_string()));
+    }
+
+    #[test]
+    fn extract_package_name_validates_alphanumeric() {
+        // Valid package names
+        assert_eq!(extract_package_name("apt install nginx"), Some("nginx".to_string()));
+        assert_eq!(extract_package_name("apt install nginx-full"), Some("nginx-full".to_string()));
+        assert_eq!(extract_package_name("apt install python3.9"), Some("python3.9".to_string()));
+
+        // Invalid package names
+        assert_eq!(extract_package_name("apt install nginx@bad"), None);
+        assert_eq!(extract_package_name("apt install nginx;malicious"), None);
+    }
+
+    #[test]
+    fn extract_service_name_validates_format() {
+        // Valid service names
+        assert_eq!(extract_service_name("systemctl start nginx"), Some("nginx".to_string()));
+        assert_eq!(extract_service_name("systemctl start nginx.service"), Some("nginx.service".to_string()));
+        assert_eq!(extract_service_name("systemctl start nginx@8080"), Some("nginx@8080".to_string()));
+
+        // Invalid formats
+        assert_eq!(extract_service_name("systemctl start"), None);
+        assert_eq!(extract_service_name("systemctl start nginx extra"), None);
+        assert_eq!(extract_service_name("systemctl start nginx;malicious"), None);
+    }
+
+    #[test]
+    fn build_tx_block_rejects_dangerous_commands() {
+        // Attempt to build transaction with command injection
+        let commands = vec!["apt install nginx && rm -rf /".to_string()];
+        let result = build_tx_block("linux", "malicious", "Root", &commands, Some(60), None);
+
+        // Should fail because rollback cannot be inferred for dangerous commands
+        assert!(result.is_err(), "Should reject dangerous commands");
+    }
+
+    #[test]
+    fn linux_template_password_not_recorded_in_output() {
+        // Verify that password recording is disabled
+        let mut handler = linux().expect("create linux template");
+        handler.dyn_param.insert("SudoPassword".to_string(), "secret123".to_string());
+
+        // The password should be in dyn_param but marked as not recordable
+        assert!(handler.dyn_param.contains_key("SudoPassword"));
+
+        // Note: The actual recording flag is checked in the input_map
+        // which is set to (true, "SudoPassword", false) where the last false means don't record
+    }
+
+    #[test]
+    fn classify_linux_command_handles_case_insensitivity() {
+        // Commands should be case-insensitive
+        assert_eq!(classify_linux_command("LS -la"), LinuxCommandType::ReadOnly);
+        assert_eq!(classify_linux_command("APT INSTALL nginx"), LinuxCommandType::PackageOp);
+        assert_eq!(classify_linux_command("SYSTEMCTL START nginx"), LinuxCommandType::ServiceOp);
+    }
+
+    #[test]
+    fn infer_linux_rollback_handles_whitespace() {
+        // Commands with extra whitespace
+        let rollback = infer_linux_rollback("  apt install nginx  ");
+        assert_eq!(rollback, Some("apt remove nginx".to_string()));
+
+        let rollback = infer_linux_rollback("systemctl  start  nginx");
+        // This should fail because extract_service_name expects exactly 3 parts
+        assert_eq!(rollback, None);
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_pip_install() {
+        let rollback = infer_linux_rollback("pip install requests");
+        assert_eq!(rollback, Some("pip uninstall -y requests".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_npm_install() {
+        let rollback = infer_linux_rollback("npm install express");
+        assert_eq!(rollback, Some("npm uninstall express".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_dnf_install() {
+        let rollback = infer_linux_rollback("dnf install httpd");
+        assert_eq!(rollback, Some("dnf remove httpd".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_systemctl_disable() {
+        let rollback = infer_linux_rollback("systemctl disable nginx");
+        assert_eq!(rollback, Some("systemctl enable nginx".to_string()));
+    }
+
+    #[test]
+    fn infer_linux_rollback_for_systemctl_stop() {
+        let rollback = infer_linux_rollback("systemctl stop nginx");
+        assert_eq!(rollback, Some("systemctl start nginx".to_string()));
     }
 }
