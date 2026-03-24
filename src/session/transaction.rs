@@ -133,6 +133,15 @@ pub struct TxWorkflowResult {
     pub rollback_errors: Vec<String>,
 }
 
+impl TxStep {
+    fn rollback_command_text(&self) -> Option<&str> {
+        self.rollback_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
 /// Calculate reverse rollback order for committed blocks before a failure point.
 ///
 /// Example:
@@ -158,14 +167,17 @@ pub fn workflow_rollback_order(
 pub fn failed_block_rollback_summary(
     failed_block_result: Option<&TxResult>,
 ) -> (bool, bool, Vec<String>) {
-    if let Some(result) = failed_block_result
-        && result.rollback_attempted
-    {
-        return (
-            true,
-            result.rollback_succeeded,
-            result.rollback_errors.clone(),
-        );
+    if let Some(result) = failed_block_result {
+        if result.rollback_attempted {
+            return (
+                true,
+                result.rollback_succeeded,
+                result.rollback_errors.clone(),
+            );
+        }
+        if !result.rollback_errors.is_empty() {
+            return (false, false, result.rollback_errors.clone());
+        }
     }
     (false, true, Vec::new())
 }
@@ -266,11 +278,7 @@ impl TxBlock {
                         ))
                     })?;
                     if failed_step.rollback_on_failure
-                        && let Some(rollback_command) = failed_step
-                            .rollback_command
-                            .as_ref()
-                            .map(|v| v.trim())
-                            .filter(|v| !v.is_empty())
+                        && let Some(rollback_command) = failed_step.rollback_command_text()
                     {
                         commands.push(PlannedRollback {
                             mode: failed_step.mode.clone(),
@@ -286,12 +294,7 @@ impl TxBlock {
                             "executed step index out of range: {idx}"
                         ))
                     })?;
-                    if let Some(rollback_command) = step
-                        .rollback_command
-                        .as_ref()
-                        .map(|v| v.trim())
-                        .filter(|v| !v.is_empty())
-                    {
+                    if let Some(rollback_command) = step.rollback_command_text() {
                         commands.push(PlannedRollback {
                             mode: step.mode.clone(),
                             command: rollback_command.to_string(),
@@ -300,6 +303,60 @@ impl TxBlock {
                     }
                 }
                 Ok(commands)
+            }
+        }
+    }
+
+    pub fn explain_missing_rollback_plan(
+        &self,
+        executed_step_indices: &[usize],
+        failed_step_index: Option<usize>,
+    ) -> Vec<String> {
+        match &self.rollback_policy {
+            RollbackPolicy::None => {
+                vec!["rollback not configured for this block".to_string()]
+            }
+            RollbackPolicy::WholeResource {
+                trigger_step_index, ..
+            } => vec![format!(
+                "whole_resource rollback skipped: trigger_step_index={} was not executed successfully",
+                trigger_step_index
+            )],
+            RollbackPolicy::PerStep => {
+                let mut reasons = Vec::new();
+
+                if let Some(failed_idx) = failed_step_index
+                    && let Some(step) = self.steps.get(failed_idx)
+                {
+                    if !step.rollback_on_failure {
+                        reasons.push(format!(
+                            "step[{failed_idx}] rollback skipped: rollback_on_failure=false"
+                        ));
+                    } else if step.rollback_command_text().is_none() {
+                        reasons.push(format!(
+                            "step[{failed_idx}] rollback skipped: rollback_command is missing"
+                        ));
+                    }
+                }
+
+                for idx in executed_step_indices.iter().rev() {
+                    if let Some(step) = self.steps.get(*idx)
+                        && step.rollback_command_text().is_none()
+                    {
+                        reasons.push(format!(
+                            "step[{idx}] rollback skipped: rollback_command is missing"
+                        ));
+                    }
+                }
+
+                if reasons.is_empty() {
+                    reasons.push(
+                        "rollback not attempted: no per-step rollback commands were planned"
+                            .to_string(),
+                    );
+                }
+
+                reasons
             }
         }
     }
@@ -636,7 +693,42 @@ mod tests {
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
         assert!(!attempted);
-        assert!(succeeded);
-        assert!(errors.is_empty());
+        assert!(!succeeded);
+        assert_eq!(errors, vec!["ignored".to_string()]);
+    }
+
+    #[test]
+    fn missing_rollback_plan_reasons_explain_missing_commands() {
+        let block = TxBlock {
+            name: "addr-update".to_string(),
+            kind: CommandBlockKind::Config,
+            rollback_policy: RollbackPolicy::PerStep,
+            steps: vec![
+                TxStep {
+                    mode: "Config".to_string(),
+                    command: "set addr 1".to_string(),
+                    timeout_secs: None,
+                    rollback_command: None,
+                    rollback_on_failure: false,
+                },
+                TxStep {
+                    mode: "Config".to_string(),
+                    command: "set addr 2".to_string(),
+                    timeout_secs: None,
+                    rollback_command: None,
+                    rollback_on_failure: false,
+                },
+            ],
+            fail_fast: true,
+        };
+
+        let reasons = block.explain_missing_rollback_plan(&[0], Some(1));
+        assert_eq!(
+            reasons,
+            vec![
+                "step[1] rollback skipped: rollback_on_failure=false".to_string(),
+                "step[0] rollback skipped: rollback_command is missing".to_string()
+            ]
+        );
     }
 }

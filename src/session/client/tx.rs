@@ -209,13 +209,13 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
     let mut rollback_errors = Vec::new();
     let mut rollback_steps = 0;
     if !rollback_attempted {
-        let reason = format!(
-            "rollback not attempted: no rollback commands for executed steps; forward_failure={}",
+        rollback_errors.extend(block.explain_missing_rollback_plan(&executed_indices, failed_step));
+        rollback_errors.push(format!(
+            "forward_failure={}",
             failure_reason
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string())
-        );
-        rollback_errors.push(reason);
+        ));
     }
 
     for (plan_idx, rollback) in rollback_plan.into_iter().enumerate() {
@@ -590,7 +590,11 @@ mod tests {
         assert!(!result.rollback_attempted);
         assert!(!result.rollback_succeeded);
         assert_eq!(result.rollback_steps, 0);
-        assert_eq!(result.rollback_errors.len(), 1);
+        assert_eq!(result.rollback_errors.len(), 2);
+        assert!(
+            result.rollback_errors[0]
+                .contains("trigger_step_index=1 was not executed successfully")
+        );
         assert!(runner.scripted.is_empty());
     }
 }
