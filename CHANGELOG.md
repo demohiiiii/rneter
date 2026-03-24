@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.3] - 2026-03-24
+
+### New Features
+- Added Linux shell exit-status execution support so `templates::linux()` handlers can append an exit-code marker, parse `$?`, and return it through command results.
+- Added step-level transaction observability via `TxStepResult`, `TxStepExecutionState`, `TxStepRollbackState`, and `TxResult.step_results`, making per-step forward/rollback outcomes available to callers.
+- Extended session recording and replay so `SessionEvent::CommandOutput` can persist and restore optional `exit_code` values for offline Linux-oriented test flows.
+
+### Optimizations
+- Refined rollback planning and reporting so rollback commands stay associated with their originating steps and missing-rollback reasons are propagated more clearly.
+- Updated workflow compensation handling to write rollback outcomes back into previously committed block results, so final workflow reports reflect both forward execution and later compensation.
+- Expanded the firewall workflow example and README snippets to print step-level execution and rollback details directly from workflow results.
+
+### API Changes
+- `Output` now includes `exit_code: Option<i32>`, which gives callers a shell-level success signal in addition to prompt-based success.
+- `TxResult` now includes `step_results: Vec<TxStepResult>`, and `session` now re-exports `TxStepResult`, `TxStepExecutionState`, and `TxStepRollbackState`.
+- `SessionEvent::CommandOutput` now carries an optional `exit_code` field with `serde(default)`, so JSONL consumers should allow the additional field when decoding newer recordings.
+
+### Risks
+- Linux exit-status capture wraps shell commands with an appended `printf`; nonstandard shells or tooling that depends on exact echoed command text should be verified before broad rollout.
+- Transaction payloads are now larger because each block can return full `step_results`; downstream log pipelines, snapshot fixtures, or strict schema consumers may need adjustment.
+- Workflow rollback now mutates previously committed block results to annotate compensation outcomes, so consumers that assumed committed blocks never show rollback activity should update their assumptions.
+
 ## [0.3.2] - 2026-03-23
 
 ### New Features
