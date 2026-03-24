@@ -18,15 +18,18 @@ mod transitions;
 
 pub use config::{
     DeviceCommandExecutionConfig, DeviceHandlerConfig, DeviceInputRule, DevicePromptRule,
-    DevicePromptWithSysRule, DeviceTransitionRule, input_rule, prompt_rule, prompt_with_sys_rule,
-    transition_rule,
+    DevicePromptWithSysRule, DeviceShellFlavor, DeviceTransitionRule, input_rule, prompt_rule,
+    prompt_with_sys_rule, transition_rule,
 };
 pub use diagnostics::StateMachineDiagnostics;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandExecutionStrategy {
     PromptDriven,
-    ShellExitStatus { marker: String },
+    ShellExitStatus {
+        marker: String,
+        shell_flavor: DeviceShellFlavor,
+    },
 }
 
 pub struct DeviceHandler {

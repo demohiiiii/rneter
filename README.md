@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.1"
+rneter = "0.3"
 ```
 
 ## Quick Start
@@ -152,9 +152,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+`LinuxTemplateConfig.shell_flavor` defaults to `DeviceShellFlavor::Posix`. If the remote login shell is `fish`, set it explicitly to `DeviceShellFlavor::Fish`.
+
 **Custom Configuration:**
 
 ```rust
+use rneter::device::DeviceShellFlavor;
 use rneter::templates::{linux_with_config, LinuxTemplateConfig, SudoMode, CustomPrompts};
 
 // Use sudo -s instead of sudo -i
@@ -162,6 +165,7 @@ let config = LinuxTemplateConfig {
     sudo_mode: SudoMode::SudoShell,
     sudo_password: Some("password".to_string()),
     custom_prompts: None,
+    ..LinuxTemplateConfig::default()
 };
 let handler = linux_with_config(config)?;
 
@@ -173,6 +177,14 @@ let config = LinuxTemplateConfig {
         user_prompts: vec![r"^myuser@myhost\$\s*$"],
         root_prompts: vec![r"^root@myhost#\s*$"],
     }),
+    ..LinuxTemplateConfig::default()
+};
+let handler = linux_with_config(config)?;
+
+// Force fish-compatible exit-status capture
+let config = LinuxTemplateConfig {
+    shell_flavor: DeviceShellFlavor::Fish,
+    ..LinuxTemplateConfig::default()
 };
 let handler = linux_with_config(config)?;
 ```
@@ -436,6 +448,21 @@ println!("template count: {}", catalog.len());
 
 let all_json = templates::diagnose_all_templates_json()?;
 println!("all diagnostics json bytes: {}", all_json.len());
+```
+
+You can also export a built-in template configuration, extend it, and build your own handler:
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::templates;
+
+let mut config = templates::by_name_config("cisco")?;
+config
+    .prompt
+    .push(prompt_rule("CustomMode", &[r"^custom>\s*$"]));
+
+let handler = config.build()?;
+assert!(handler.states().iter().any(|state| state == "custommode"));
 ```
 
 New recording/replay capabilities:

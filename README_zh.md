@@ -24,7 +24,7 @@
 
 ```toml
 [dependencies]
-rneter = "0.1"
+rneter = "0.3"
 ```
 
 ## 快速开始
@@ -333,6 +333,33 @@ println!("模板数量: {}", catalog.len());
 
 let all_json = templates::diagnose_all_templates_json()?;
 println!("全部诊断 JSON 字节数: {}", all_json.len());
+```
+
+也可以先导出内置模板配置，再按需扩展后重新构建：
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::templates;
+
+let mut config = templates::by_name_config("cisco")?;
+config
+    .prompt
+    .push(prompt_rule("CustomMode", &[r"^custom>\s*$"]));
+
+let handler = config.build()?;
+assert!(handler.states().iter().any(|state| state == "custommode"));
+```
+
+如果目标 Linux 主机登录 shell 是 `fish`，可以显式指定 shell 类型：
+
+```rust
+use rneter::device::DeviceShellFlavor;
+use rneter::templates::{linux_with_config, LinuxTemplateConfig};
+
+let handler = linux_with_config(LinuxTemplateConfig {
+    shell_flavor: DeviceShellFlavor::Fish,
+    ..LinuxTemplateConfig::default()
+})?;
 ```
 
 新增的录制/回放能力：

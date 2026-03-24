@@ -1,4 +1,4 @@
-use super::{CommandExecutionStrategy, DeviceHandler};
+use super::{CommandExecutionStrategy, DeviceHandler, DeviceShellFlavor};
 
 const EXIT_STATUS_SUFFIX: &str = ":__";
 
@@ -12,9 +12,14 @@ pub(crate) struct ParsedCommandOutput {
 impl DeviceHandler {
     /// Enable shell exit-status based command success parsing for interactive shells.
     #[cfg(test)]
-    pub(crate) fn with_shell_exit_status_marker(mut self, marker: impl Into<String>) -> Self {
+    pub(crate) fn with_shell_exit_status_marker(
+        mut self,
+        marker: impl Into<String>,
+        shell_flavor: DeviceShellFlavor,
+    ) -> Self {
         self.command_execution = CommandExecutionStrategy::ShellExitStatus {
             marker: marker.into(),
+            shell_flavor,
         };
         self
     }
@@ -30,10 +35,17 @@ impl DeviceHandler {
 
         match &self.command_execution {
             CommandExecutionStrategy::PromptDriven => command.to_string(),
-            CommandExecutionStrategy::ShellExitStatus { marker } => {
+            CommandExecutionStrategy::ShellExitStatus {
+                marker,
+                shell_flavor,
+            } => {
+                let status_expr = match shell_flavor {
+                    DeviceShellFlavor::Posix => "\"$?\"",
+                    DeviceShellFlavor::Fish => "\"$status\"",
+                };
                 format!(
-                    r#"{command}; printf '\n{}%s{}\n' "$?""#,
-                    marker, EXIT_STATUS_SUFFIX
+                    r#"{command}; printf '\n{}%s{}\n' {}"#,
+                    marker, EXIT_STATUS_SUFFIX, status_expr
                 )
             }
         }
@@ -59,7 +71,7 @@ impl DeviceHandler {
                 exit_code: None,
                 output: output.to_string(),
             },
-            CommandExecutionStrategy::ShellExitStatus { marker } => {
+            CommandExecutionStrategy::ShellExitStatus { marker, .. } => {
                 if let Some((exit_code, sanitized)) = parse_shell_exit_status(output, marker) {
                     ParsedCommandOutput {
                         success: exit_code == 0,
@@ -123,10 +135,21 @@ mod tests {
 
     #[test]
     fn shell_exit_status_wrapper_appends_marker_printer() {
-        let handler = build_test_handler().with_shell_exit_status_marker("__MARK__:");
+        let handler = build_test_handler()
+            .with_shell_exit_status_marker("__MARK__:", DeviceShellFlavor::Posix);
         let wrapped = handler.prepare_command_for_execution("echo hi", true);
         assert!(wrapped.contains("echo hi; printf"));
         assert!(wrapped.contains("__MARK__:%s:__"));
+        assert!(wrapped.contains("\"$?\""));
+    }
+
+    #[test]
+    fn shell_exit_status_wrapper_uses_fish_status_variable_when_configured() {
+        let handler = build_test_handler()
+            .with_shell_exit_status_marker("__MARK__:", DeviceShellFlavor::Fish);
+        let wrapped = handler.prepare_command_for_execution("echo hi", true);
+
+        assert!(wrapped.contains("\"$status\""));
     }
 
     #[test]
@@ -140,7 +163,8 @@ mod tests {
 
     #[test]
     fn finalize_command_output_uses_exit_code_over_fallback_success() {
-        let handler = build_test_handler().with_shell_exit_status_marker("__MARK__:");
+        let handler = build_test_handler()
+            .with_shell_exit_status_marker("__MARK__:", DeviceShellFlavor::Posix);
         let parsed =
             handler.finalize_command_output("cmd\nboom\n__MARK__:0:__\nuser@host$", false, true);
 

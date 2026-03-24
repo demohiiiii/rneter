@@ -4,8 +4,8 @@
 //! support for privilege escalation via sudo or su.
 
 use crate::device::{
-    DeviceCommandExecutionConfig, DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule,
-    transition_rule,
+    DeviceCommandExecutionConfig, DeviceHandler, DeviceHandlerConfig, DeviceShellFlavor,
+    input_rule, prompt_rule, transition_rule,
 };
 use crate::error::ConnectError;
 use std::collections::HashMap;
@@ -18,6 +18,8 @@ pub struct LinuxTemplateConfig {
     pub sudo_mode: SudoMode,
     pub sudo_password: Option<String>,
     pub custom_prompts: Option<CustomPrompts>,
+    /// Shell flavor used for exit-status capture wrappers.
+    pub shell_flavor: DeviceShellFlavor,
 }
 
 impl Default for LinuxTemplateConfig {
@@ -26,6 +28,7 @@ impl Default for LinuxTemplateConfig {
             sudo_mode: SudoMode::SudoInteractive,
             sudo_password: None,
             custom_prompts: None,
+            shell_flavor: DeviceShellFlavor::Posix,
         }
     }
 }
@@ -216,6 +219,7 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
         dyn_param,
         command_execution: DeviceCommandExecutionConfig::ShellExitStatus {
             marker: LINUX_EXIT_CODE_MARKER.to_string(),
+            shell_flavor: config.shell_flavor,
         },
     }
 }
@@ -370,6 +374,7 @@ mod tests {
             sudo_mode: SudoMode::SudoInteractive,
             sudo_password: Some("test123".to_string()),
             custom_prompts: None,
+            ..LinuxTemplateConfig::default()
         };
         let handler = linux_with_config(config).expect("create linux with config");
         let diagnostics = handler.diagnose_state_machine();
@@ -382,6 +387,7 @@ mod tests {
             sudo_mode: SudoMode::SudoShell,
             sudo_password: None,
             custom_prompts: None,
+            ..LinuxTemplateConfig::default()
         };
         let handler = linux_with_config(config).expect("create linux with sudo -s");
         let diagnostics = handler.diagnose_state_machine();
@@ -394,6 +400,7 @@ mod tests {
             sudo_mode: SudoMode::DirectRoot,
             sudo_password: None,
             custom_prompts: None,
+            ..LinuxTemplateConfig::default()
         };
         let handler = linux_with_config(config).expect("create linux with direct root");
         let diagnostics = handler.diagnose_state_machine();
@@ -410,6 +417,7 @@ mod tests {
                 user_prompts: vec![r"^myuser@myhost\$\s*$"],
                 root_prompts: vec![r"^root@myhost#\s*$"],
             }),
+            ..LinuxTemplateConfig::default()
         };
         let handler = linux_with_config(config).expect("create linux with custom prompts");
         let diagnostics = handler.diagnose_state_machine();
@@ -477,5 +485,19 @@ mod tests {
 
         assert!(wrapped.starts_with("false; printf"));
         assert!(wrapped.contains(LINUX_EXIT_CODE_MARKER));
+        assert!(wrapped.contains("\"$?\""));
+    }
+
+    #[test]
+    fn linux_template_can_force_fish_exit_status_capture() {
+        let handler = linux_with_config(LinuxTemplateConfig {
+            shell_flavor: DeviceShellFlavor::Fish,
+            ..LinuxTemplateConfig::default()
+        })
+        .expect("create fish linux template");
+        let wrapped = handler.prepare_command_for_execution("date", true);
+
+        assert!(wrapped.contains(LINUX_EXIT_CODE_MARKER));
+        assert!(wrapped.contains("\"$status\""));
     }
 }

@@ -14,7 +14,22 @@ pub enum DeviceCommandExecutionConfig {
     #[default]
     PromptDriven,
     /// Append a shell marker and parse exit status from output.
-    ShellExitStatus { marker: String },
+    ShellExitStatus {
+        marker: String,
+        #[serde(default)]
+        shell_flavor: DeviceShellFlavor,
+    },
+}
+
+/// Shell flavor used when composing exit-status capture commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceShellFlavor {
+    /// POSIX-compatible shells such as sh/bash/zsh.
+    #[default]
+    Posix,
+    /// Fish shell, which uses `$status` instead of `$?`.
+    Fish,
 }
 
 /// Prompt-matching rule for one state.
@@ -172,6 +187,7 @@ mod tests {
             dyn_param: HashMap::new(),
             command_execution: DeviceCommandExecutionConfig::ShellExitStatus {
                 marker: "__MARK__".to_string(),
+                shell_flavor: DeviceShellFlavor::Posix,
             },
         };
 

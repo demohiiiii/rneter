@@ -213,9 +213,13 @@ impl DeviceHandler {
                 super::DeviceCommandExecutionConfig::PromptDriven => {
                     CommandExecutionStrategy::PromptDriven
                 }
-                super::DeviceCommandExecutionConfig::ShellExitStatus { marker } => {
-                    CommandExecutionStrategy::ShellExitStatus { marker }
-                }
+                super::DeviceCommandExecutionConfig::ShellExitStatus {
+                    marker,
+                    shell_flavor,
+                } => CommandExecutionStrategy::ShellExitStatus {
+                    marker,
+                    shell_flavor,
+                },
             },
         })
     }
