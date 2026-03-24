@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.4] - 2026-03-24
+
+### New Features
+- Added public handler configuration exports under `device`, including `DeviceHandlerConfig`, `DeviceCommandExecutionConfig`, prompt/input/transition rule structs, and helper constructors for building custom templates from declarative data.
+- Added built-in template config exporters such as `templates::cisco_config()`, `templates::huawei_config()`, `templates::fortinet_config()`, and `templates::linux_handler_config(...)`, so callers can start from a shipped template and extend it before building a handler.
+- Added `templates::by_name_config(...)` for case-insensitive lookup of built-in template configurations without immediately constructing a `DeviceHandler`.
+
+### Optimizations
+- Unified template construction so direct template builders, registry lookups, and exported configs now share the same config-based build path, reducing drift between `templates::*`, `templates::by_name(...)`, and their underlying FSM definitions.
+- Expanded network template coverage to verify direct builders, config rebuilds, and registry resolution all produce equivalent handlers across the built-in vendor set.
+- Hardened Linux prompt parsing during connection initialization by stripping ANSI/OSC/CSI/DCS terminal control sequences and recognizing common `fish`-style prompts, reducing false initialization timeouts on interactive shells.
+
+### API Changes
+- `DeviceHandler::new(...)` now accepts a single `DeviceHandlerConfig` instead of the previous multi-argument state-machine constructor. Callers that instantiated handlers directly must migrate to the config-based form.
+- `DeviceHandlerConfig::build()` and `DeviceHandler::from_config(...)` are now the supported construction helpers for declarative handler creation.
+- Built-in template modules now expose config-oriented entrypoints in addition to handler builders, and `templates::by_name(...)` is internally backed by `templates::by_name_config(...).build()`.
+
+### Risks
+- This release is a breaking API change for any downstream code that still called the old multi-argument `DeviceHandler::new(...)` signature directly.
+- Exported template configs make it easier for callers to mutate low-level regex and transition rules; invalid customizations will still fail at build time, but downstream wrappers should be prepared to surface `InvalidDeviceHandlerConfig`.
+- Linux prompt compatibility is broader than before, but hosts with heavily customized prompts may still need explicit `LinuxTemplateConfig.custom_prompts` overrides.
+
 ## [0.3.3] - 2026-03-24
 
 ### New Features
