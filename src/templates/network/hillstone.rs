@@ -1,24 +1,22 @@
 //! Hillstone SG device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
-/// Returns a `DeviceHandler` configured for Hillstone devices.
-pub fn hillstone() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt
-        vec![
-            ("Enable".to_string(), vec![r"^.+#\s\r{0,1}$"]),
-            ("Config".to_string(), vec![r"^.+\(config.*\)\s*#\s\r{0,1}$"]),
+/// Exports the underlying handler configuration for Hillstone devices.
+pub fn hillstone_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Enable", &[r"^.+#\s\r{0,1}$"]),
+            prompt_rule("Config", &[r"^.+\(config.*\)\s*#\s\r{0,1}$"]),
         ],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![(
-            "Save".to_string(),
-            (false, "y".to_string(), true),
-            vec![
+        write: vec![input_rule(
+            "Save",
+            false,
+            "y",
+            true,
+            &[
                 r"Save configuration, are you sure\? \[y\]\/n: ",
                 r"Save configuration for all VSYS, are you sure\? \[y\]\/n: ",
                 r"Backup start configuration file, are you sure\? y\/\[n\]: ",
@@ -29,36 +27,24 @@ pub fn hillstone() -> Result<DeviceHandler, ConnectError> {
                 r"备份所有启动配置文件，请确认 y\/\[n\]: ",
             ],
         )],
-        // More regex
-        vec![r"\s*--More--\s*"],
-        // Error regex
-        vec![
-            r".+\^.+",
-            r".+%.+",
-            r".+doesn't exist.+",
-            r".+does not exist.+",
-            r"Object group with given name exists with different type.",
+        more_regex: vec![r"\s*--More--\s*".to_string()],
+        error_regex: vec![
+            r".+\^.+".to_string(),
+            r".+%.+".to_string(),
+            r".+doesn't exist.+".to_string(),
+            r".+does not exist.+".to_string(),
+            r"Object group with given name exists with different type.".to_string(),
         ],
-        // Edges
-        vec![
-            (
-                "Enable".to_string(),
-                "config".to_string(),
-                "Config".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Config".to_string(),
-                "exit".to_string(),
-                "Enable".to_string(),
-                true,
-                false,
-            ),
+        edges: vec![
+            transition_rule("Enable", "config", "Config", false, false),
+            transition_rule("Config", "exit", "Enable", true, false),
         ],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
+/// Returns a `DeviceHandler` configured for Hillstone devices.
+pub fn hillstone() -> Result<DeviceHandler, ConnectError> {
+    hillstone_config().build()
 }

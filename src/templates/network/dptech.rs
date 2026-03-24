@@ -1,55 +1,38 @@
 //! DPTech Firewall device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, prompt_rule, transition_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for DPTech devices.
+pub fn dptech_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Config", &[r"^\r{0,1}\[.+\]\s*$"]),
+            prompt_rule("Enable", &[r"^\r{0,1}<.+>\s*$"]),
+        ],
+        more_regex: vec![r" --More\(CTRL\+C break\)-- ".to_string()],
+        error_regex: vec![
+            r"% Unknown command.*".to_string(),
+            r"Can't find the .+ object".to_string(),
+            r".*not exist.*".to_string(),
+            r".*item is longer.*".to_string(),
+            r"Failed.*".to_string(),
+            r"Undefined error.*".to_string(),
+            r"% Command can not contain:.+".to_string(),
+            r"Invalid parameter.*".to_string(),
+            r"% Ambiguous command.".to_string(),
+        ],
+        edges: vec![
+            transition_rule("Enable", "conf-mode", "Config", false, false),
+            transition_rule("Config", "end", "Enable", true, false),
+        ],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for DPTech devices.
 pub fn dptech() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt
-        vec![
-            ("Config".to_string(), vec![r"^\r{0,1}\[.+\]\s*$"]),
-            ("Enable".to_string(), vec![r"^\r{0,1}<.+>\s*$"]),
-        ],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![],
-        // More regex
-        vec![r" --More\(CTRL\+C break\)-- "],
-        // Error regex
-        vec![
-            r"% Unknown command.*",
-            r"Can't find the .+ object",
-            r".*not exist.*",
-            r".*item is longer.*",
-            r"Failed.*",
-            r"Undefined error.*",
-            r"% Command can not contain:.+",
-            r"Invalid parameter.*",
-            r"% Ambiguous command.",
-        ],
-        // Edges
-        vec![
-            (
-                "Enable".to_string(),
-                "conf-mode".to_string(),
-                "Config".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Config".to_string(),
-                "end".to_string(),
-                "Enable".to_string(),
-                true,
-                false,
-            ),
-        ],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    dptech_config().build()
 }

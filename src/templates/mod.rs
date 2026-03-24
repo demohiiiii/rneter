@@ -15,13 +15,16 @@ pub use catalog::{
 };
 pub use linux::{
     CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,
-    linux_with_config,
+    linux_handler_config, linux_with_config,
 };
 pub use network::{
-    arista, array, chaitin, checkpoint, cisco, dptech, fortinet, h3c, hillstone, huawei, juniper,
-    maipu, paloalto, qianxin, topsec, venustech,
+    arista, arista_config, array, array_config, chaitin, chaitin_config, checkpoint,
+    checkpoint_config, cisco, cisco_config, dptech, dptech_config, fortinet, fortinet_config, h3c,
+    h3c_config, hillstone, hillstone_config, huawei, huawei_config, juniper, juniper_config, maipu,
+    maipu_config, paloalto, paloalto_config, qianxin, qianxin_config, topsec, topsec_config,
+    venustech, venustech_config,
 };
 pub use registry::{
-    by_name, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
+    by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::{build_tx_block, classify_command};

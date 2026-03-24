@@ -183,10 +183,9 @@ impl DeviceHandler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::super::build_test_handler;
     use super::DeviceHandler;
+    use crate::device::{DeviceHandlerConfig, prompt_rule, transition_rule};
 
     #[test]
     fn state_machine_diagnostics_are_clean_for_valid_template() {
@@ -205,34 +204,19 @@ mod tests {
 
     #[test]
     fn state_machine_diagnostics_detect_invalid_edges_and_dead_ends() {
-        let handler = DeviceHandler::new(
-            vec![
-                ("Login".to_string(), vec![r"^dev>\s*$"]),
-                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+        let handler = DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![
+                prompt_rule("Login", &[r"^dev>\s*$"]),
+                prompt_rule("Enable", &[r"^dev#\s*$"]),
             ],
-            vec![],
-            vec![],
-            vec![r"^--More--$"],
-            vec![r"^ERROR: .+$"],
-            vec![
-                (
-                    "Login".to_string(),
-                    "enable".to_string(),
-                    "Enable".to_string(),
-                    false,
-                    false,
-                ),
-                (
-                    "Enable".to_string(),
-                    "to-ghost".to_string(),
-                    "Ghost".to_string(),
-                    false,
-                    false,
-                ),
+            more_regex: vec![r"^--More--$".to_string()],
+            error_regex: vec![r"^ERROR: .+$".to_string()],
+            edges: vec![
+                transition_rule("Login", "enable", "Enable", false, false),
+                transition_rule("Enable", "to-ghost", "Ghost", false, false),
             ],
-            vec![],
-            HashMap::new(),
-        )
+            ..Default::default()
+        })
         .expect("handler should build");
 
         let report = handler.diagnose_state_machine();
@@ -243,25 +227,16 @@ mod tests {
 
     #[test]
     fn state_machine_diagnostics_detect_duplicate_prompt_patterns() {
-        let handler = DeviceHandler::new(
-            vec![
-                ("Login".to_string(), vec![r"^dup>\s*$"]),
-                ("Enable".to_string(), vec![r"^dup>\s*$"]),
+        let handler = DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![
+                prompt_rule("Login", &[r"^dup>\s*$"]),
+                prompt_rule("Enable", &[r"^dup>\s*$"]),
             ],
-            vec![],
-            vec![],
-            vec![r"^--More--$"],
-            vec![r"^ERROR: .+$"],
-            vec![(
-                "Login".to_string(),
-                "noop".to_string(),
-                "Enable".to_string(),
-                false,
-                false,
-            )],
-            vec![],
-            HashMap::new(),
-        )
+            more_regex: vec![r"^--More--$".to_string()],
+            error_regex: vec![r"^ERROR: .+$".to_string()],
+            edges: vec![transition_rule("Login", "noop", "Enable", false, false)],
+            ..Default::default()
+        })
         .expect("handler should build");
 
         let report = handler.diagnose_state_machine();
@@ -281,25 +256,16 @@ mod tests {
 
     #[test]
     fn state_machine_diagnostics_detect_self_loop_only_states() {
-        let handler = DeviceHandler::new(
-            vec![
-                ("Login".to_string(), vec![r"^dev>\s*$"]),
-                ("Enable".to_string(), vec![r"^dev#\s*$"]),
+        let handler = DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![
+                prompt_rule("Login", &[r"^dev>\s*$"]),
+                prompt_rule("Enable", &[r"^dev#\s*$"]),
             ],
-            vec![],
-            vec![],
-            vec![r"^--More--$"],
-            vec![r"^ERROR: .+$"],
-            vec![(
-                "Enable".to_string(),
-                "noop".to_string(),
-                "Enable".to_string(),
-                false,
-                false,
-            )],
-            vec![],
-            HashMap::new(),
-        )
+            more_regex: vec![r"^--More--$".to_string()],
+            error_regex: vec![r"^ERROR: .+$".to_string()],
+            edges: vec![transition_rule("Enable", "noop", "Enable", false, false)],
+            ..Default::default()
+        })
         .expect("handler should build");
 
         let report = handler.diagnose_state_machine();

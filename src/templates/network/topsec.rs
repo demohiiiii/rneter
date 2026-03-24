@@ -1,27 +1,21 @@
 //! TopSec NGFW device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, prompt_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for TopSec NGFW devices.
+pub fn topsec_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Enable", &[r"^\r{0,1}\S+[#%]\s*$"])],
+        more_regex: vec![r"--More--".to_string()],
+        error_regex: vec![r"^error".to_string()],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for TopSec NGFW devices.
 pub fn topsec() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt - TopSec only has Enable mode
-        vec![("Enable".to_string(), vec![r"^\r{0,1}\S+[#%]\s*$"])],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![],
-        // More regex
-        vec![r"--More--"],
-        // Error regex
-        vec![r"^error"],
-        // Edges - No mode transitions
-        vec![],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    topsec_config().build()
 }

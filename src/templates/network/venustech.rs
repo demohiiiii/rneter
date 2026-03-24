@@ -1,64 +1,38 @@
 //! Venustech USG device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for Venustech USG devices.
+pub fn venustech_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
+            prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        write: vec![input_rule(
+            "EnablePassword",
+            true,
+            "EnablePassword",
+            true,
+            &[r"(Enable )?Password:"],
+        )],
+        more_regex: vec![r"--More-- \(\d+% of \d+ bytes\)".to_string()],
+        error_regex: vec![r"^%.+".to_string(), r".+not exist!".to_string()],
+        edges: vec![
+            transition_rule("Login", "enable", "Enable", false, false),
+            transition_rule("Enable", "configure terminal", "Config", false, false),
+            transition_rule("Config", "exit", "Enable", true, false),
+            transition_rule("Enable", "exit", "Login", true, false),
+        ],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for Venustech USG devices.
 pub fn venustech() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt
-        vec![
-            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
-            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
-            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
-        ],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![(
-            "EnablePassword".to_string(),
-            (true, "EnablePassword".to_string(), true),
-            vec![r"(Enable )?Password:"],
-        )],
-        // More regex
-        vec![r"--More-- \(\d+% of \d+ bytes\)"],
-        // Error regex
-        vec![r"^%.+", r".+not exist!"],
-        // Edges
-        vec![
-            (
-                "Login".to_string(),
-                "enable".to_string(),
-                "Enable".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "configure terminal".to_string(),
-                "Config".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Config".to_string(),
-                "exit".to_string(),
-                "Enable".to_string(),
-                true,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "exit".to_string(),
-                "Login".to_string(),
-                true,
-                false,
-            ),
-        ],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    venustech_config().build()
 }

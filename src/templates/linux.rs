@@ -3,7 +3,10 @@
 //! This module provides device handler configuration for Linux servers with
 //! support for privilege escalation via sudo or su.
 
-use crate::device::DeviceHandler;
+use crate::device::{
+    DeviceCommandExecutionConfig, DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule,
+    transition_rule,
+};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
@@ -123,8 +126,8 @@ pub fn linux() -> Result<DeviceHandler, ConnectError> {
     linux_with_config(LinuxTemplateConfig::default())
 }
 
-/// Returns a `DeviceHandler` configured for Linux servers with custom configuration.
-pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, ConnectError> {
+/// Exports the underlying handler configuration for the Linux template.
+pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig {
     let (user_prompts, root_prompts) = if let Some(custom) = config.custom_prompts {
         (custom.user_prompts, custom.root_prompts)
     } else {
@@ -157,23 +160,11 @@ pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, C
 
     let edges = if config.sudo_mode != SudoMode::DirectRoot {
         vec![
-            (
-                "User".to_string(),
-                sudo_command.to_string(),
-                "Root".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Root".to_string(),
-                "exit".to_string(),
-                "User".to_string(),
-                true,
-                false,
-            ),
+            transition_rule("User", sudo_command, "Root", false, false),
+            transition_rule("Root", "exit", "User", true, false),
         ]
     } else {
-        vec![] // Direct root login, no state transition needed
+        vec![]
     };
 
     let mut dyn_param = HashMap::new();
@@ -181,52 +172,57 @@ pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, C
         dyn_param.insert("SudoPassword".to_string(), password);
     }
 
-    DeviceHandler::new(
-        // Prompt
-        vec![
-            ("Root".to_string(), root_prompts),
-            ("User".to_string(), user_prompts),
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Root", &root_prompts),
+            prompt_rule("User", &user_prompts),
         ],
-        // Prompt with sys (optional: capture hostname)
-        vec![],
-        // Write (interactive inputs)
-        vec![(
-            "SudoPassword".to_string(),
-            (true, "SudoPassword".to_string(), false), // Don't record password
-            vec![
+        prompt_with_sys: Vec::new(),
+        write: vec![input_rule(
+            "SudoPassword",
+            true,
+            "SudoPassword",
+            false,
+            &[
                 r"\[sudo\] password for .+:\s*$",
                 r"Password:\s*$",
                 r"password:\s*$",
             ],
         )],
-        // More regex (pagination prompts)
-        vec![r"--More--", r"\(END\)", r"Press SPACE to continue"],
-        // Error regex
-        vec![
-            r"^bash: .+: command not found",
-            r"^-bash: .+: command not found",
-            r"^sudo: .+: command not found",
-            r"Permission denied",
-            r"Operation not permitted",
-            r"No such file or directory",
-            r"cannot access",
-            r"sudo: \d+ incorrect password attempt",
-            r"su: Authentication failure",
-            r"^E: .+",     // apt errors
-            r"^Error: .+", // generic errors
-            r"^error: .+", // lowercase errors
-            r"^ERROR: .+", // uppercase errors
-            r"Failed to .+",
-            r"fatal: .+",
+        more_regex: vec![
+            r"--More--".to_string(),
+            r"\(END\)".to_string(),
+            r"Press SPACE to continue".to_string(),
         ],
-        // Edges
+        error_regex: vec![
+            r"^bash: .+: command not found".to_string(),
+            r"^-bash: .+: command not found".to_string(),
+            r"^sudo: .+: command not found".to_string(),
+            r"Permission denied".to_string(),
+            r"Operation not permitted".to_string(),
+            r"No such file or directory".to_string(),
+            r"cannot access".to_string(),
+            r"sudo: \d+ incorrect password attempt".to_string(),
+            r"su: Authentication failure".to_string(),
+            r"^E: .+".to_string(),
+            r"^Error: .+".to_string(),
+            r"^error: .+".to_string(),
+            r"^ERROR: .+".to_string(),
+            r"Failed to .+".to_string(),
+            r"fatal: .+".to_string(),
+        ],
         edges,
-        // Ignore errors (empty by default, user can customize)
-        vec![],
-        // Dyn param
+        ignore_errors: Vec::new(),
         dyn_param,
-    )
-    .map(|handler| handler.with_shell_exit_status_marker(LINUX_EXIT_CODE_MARKER))
+        command_execution: DeviceCommandExecutionConfig::ShellExitStatus {
+            marker: LINUX_EXIT_CODE_MARKER.to_string(),
+        },
+    }
+}
+
+/// Returns a `DeviceHandler` configured for Linux servers with custom configuration.
+pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, ConnectError> {
+    linux_handler_config(config).build()
 }
 
 #[cfg(test)]
@@ -284,6 +280,32 @@ mod tests {
         let handler = crate::templates::by_name("LiNuX").expect("linux template case insensitive");
         let diagnostics = handler.diagnose_state_machine();
         assert!(!diagnostics.has_issues());
+    }
+
+    #[test]
+    fn linux_handler_config_rebuilds_equivalent_handler() {
+        let handler = linux().expect("linux template");
+        let rebuilt = linux_handler_config(LinuxTemplateConfig::default())
+            .build()
+            .expect("linux config");
+
+        assert!(handler.is_equivalent(&rebuilt));
+    }
+
+    #[test]
+    fn linux_handler_config_can_be_extended_by_callers() {
+        let mut config = linux_handler_config(LinuxTemplateConfig::default());
+        config
+            .prompt
+            .push(prompt_rule("Maintenance", &[r"^\[maint\]#\s*$"]));
+
+        let handler = config.build().expect("extended config");
+        assert!(
+            handler
+                .states()
+                .iter()
+                .any(|state| state.eq_ignore_ascii_case("Maintenance"))
+        );
     }
 
     #[test]

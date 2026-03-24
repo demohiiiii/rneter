@@ -1,31 +1,29 @@
 //! Fortinet FortiGate device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, prompt_rule, prompt_with_sys_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for Fortinet FortiGate devices.
+pub fn fortinet_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Enable", &[r"^\r{0,1}\S+\s*#\s*$"])],
+        prompt_with_sys: vec![prompt_with_sys_rule(
+            "VDOMEnable",
+            "VDOM",
+            r"^\r{0,1}\S+\s*\((?<VDOM>\S+)\)\s*#\s*$",
+        )],
+        more_regex: vec![r"--More--".to_string()],
+        error_regex: vec![
+            r"Unknown action.*".to_string(),
+            r"Command fail.*".to_string(),
+        ],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for Fortinet FortiGate devices.
 pub fn fortinet() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt - Fortinet only has Enable mode
-        vec![("Enable".to_string(), vec![r"^\r{0,1}\S+\s*#\s*$"])],
-        // Prompt with sys (VDOM support)
-        vec![(
-            "VDOMEnable".to_string(),
-            "VDOM",
-            r"^\r{0,1}\S+\s*\((?<VDOM>\S+)\)\s*#\s*$".to_string(),
-        )],
-        // Write
-        vec![],
-        // More regex
-        vec![r"--More--"],
-        // Error regex
-        vec![r"Unknown action.*", r"Command fail.*"],
-        // Edges - Fortinet has no mode transitions
-        vec![],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    fortinet_config().build()
 }

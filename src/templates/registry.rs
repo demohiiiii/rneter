@@ -1,33 +1,39 @@
-use crate::device::{DeviceHandler, StateMachineDiagnostics};
+use crate::device::{DeviceHandler, DeviceHandlerConfig, StateMachineDiagnostics};
 use crate::error::ConnectError;
 
 use super::catalog::BUILTIN_TEMPLATES;
-use super::linux::linux;
+use super::linux::{LinuxTemplateConfig, linux_handler_config};
 use super::network::{
-    arista, array, chaitin, checkpoint, cisco, dptech, fortinet, h3c, hillstone, huawei, juniper,
-    maipu, paloalto, qianxin, topsec, venustech,
+    arista_config, array_config, chaitin_config, checkpoint_config, cisco_config, dptech_config,
+    fortinet_config, h3c_config, hillstone_config, huawei_config, juniper_config, maipu_config,
+    paloalto_config, qianxin_config, topsec_config, venustech_config,
 };
 
 /// Creates a built-in template by name (case-insensitive).
 pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
+    by_name_config(name)?.build()
+}
+
+/// Exports the underlying handler configuration for a built-in template by name.
+pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
     match name.to_ascii_lowercase().as_str() {
-        "cisco" => cisco(),
-        "huawei" => huawei(),
-        "h3c" => h3c(),
-        "hillstone" => hillstone(),
-        "juniper" => juniper(),
-        "array" => array(),
-        "linux" => linux(),
-        "arista" => arista(),
-        "fortinet" => fortinet(),
-        "paloalto" => paloalto(),
-        "topsec" => topsec(),
-        "venustech" => venustech(),
-        "dptech" => dptech(),
-        "chaitin" => chaitin(),
-        "qianxin" => qianxin(),
-        "maipu" => maipu(),
-        "checkpoint" => checkpoint(),
+        "cisco" => Ok(cisco_config()),
+        "huawei" => Ok(huawei_config()),
+        "h3c" => Ok(h3c_config()),
+        "hillstone" => Ok(hillstone_config()),
+        "juniper" => Ok(juniper_config()),
+        "array" => Ok(array_config()),
+        "linux" => Ok(linux_handler_config(LinuxTemplateConfig::default())),
+        "arista" => Ok(arista_config()),
+        "fortinet" => Ok(fortinet_config()),
+        "paloalto" => Ok(paloalto_config()),
+        "topsec" => Ok(topsec_config()),
+        "venustech" => Ok(venustech_config()),
+        "dptech" => Ok(dptech_config()),
+        "chaitin" => Ok(chaitin_config()),
+        "qianxin" => Ok(qianxin_config()),
+        "maipu" => Ok(maipu_config()),
+        "checkpoint" => Ok(checkpoint_config()),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
 }
@@ -65,6 +71,15 @@ mod tests {
         let diagnostics = handler.diagnose_state_machine();
         assert!(diagnostics.missing_edge_sources.is_empty());
         assert!(diagnostics.missing_edge_targets.is_empty());
+    }
+
+    #[test]
+    fn by_name_config_builds_equivalent_handler() {
+        let config = by_name_config("CiScO").expect("cisco config should load");
+        let handler = by_name("cisco").expect("cisco handler should load");
+        let rebuilt = config.build().expect("config should build");
+
+        assert!(handler.is_equivalent(&rebuilt));
     }
 
     #[test]

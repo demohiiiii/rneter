@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use regex::{Regex, RegexSet};
 
-use super::{CommandExecutionStrategy, DeviceHandler, PRE_STATE};
+use super::{CommandExecutionStrategy, DeviceHandler, DeviceHandlerConfig, PRE_STATE};
 use crate::error::ConnectError;
 
 impl DeviceHandler {
@@ -53,33 +53,20 @@ impl DeviceHandler {
         true
     }
 
-    /// Creates a new `DeviceHandler` with the specified state machine configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `prompt` - List of (state_name, regex_patterns) for basic prompts
-    /// * `prompt_with_sys` - List of (state_name, regex_pattern, capture_group) for prompts with system names
-    /// * `write` - List of (state_name, input_config, regex_patterns) for states requiring input
-    /// * `more_regex` - Regex patterns that match pagination prompts (e.g., "--More--")
-    /// * `error_regex` - Regex patterns that match error messages
-    /// * `edges` - State transition graph: (from, command, to, is_exit, needs_format)
-    /// * `ignore_errors` - Regex patterns for errors that should be ignored
-    /// * `dyn_param` - Dynamic parameters for command/input substitution
-    #[allow(clippy::too_many_arguments)]
-    pub fn new<I, S>(
-        prompt: Vec<(String, I)>,
-        prompt_with_sys: Vec<(String, S, String)>,
-        write: Vec<(String, (bool, String, bool), I)>,
-        more_regex: I,
-        error_regex: I,
-        edges: Vec<(String, String, String, bool, bool)>,
-        ignore_errors: I,
-        dyn_param: HashMap<String, String>,
-    ) -> Result<DeviceHandler, ConnectError>
-    where
-        S: AsRef<str> + Clone,
-        I: IntoIterator<Item = S>,
-    {
+    /// Creates a new `DeviceHandler` from a declarative configuration snapshot.
+    pub fn new(config: DeviceHandlerConfig) -> Result<DeviceHandler, ConnectError> {
+        let DeviceHandlerConfig {
+            prompt,
+            prompt_with_sys,
+            write,
+            more_regex,
+            error_regex,
+            edges,
+            ignore_errors,
+            dyn_param,
+            command_execution,
+        } = config;
+
         let mut all_states: Vec<String> = PRE_STATE
             .iter()
             .map(|s| s.to_string().to_ascii_lowercase())
@@ -89,28 +76,30 @@ impl DeviceHandler {
         let mut regex_index_map = HashMap::new();
 
         let start_offset = regexs.len();
-        regexs.extend(more_regex.into_iter().map(|s| s.as_ref().to_string()));
+        regexs.extend(more_regex);
         for i in start_offset..regexs.len() {
             regex_index_map.insert(i, 1);
         }
 
         let start_offset = regexs.len();
-        regexs.extend(error_regex.into_iter().map(|s| s.as_ref().to_string()));
+        regexs.extend(error_regex);
         for i in start_offset..regexs.len() {
             regex_index_map.insert(i, 2);
         }
 
         let mut prompt_patterns: Vec<(String, String)> = Vec::new();
 
-        for (state, regex_iter) in prompt {
+        for rule in prompt {
+            let state = rule.state;
+            let patterns = rule.patterns;
             let normalized_state = state.to_ascii_lowercase();
             let state_index = all_states.len();
             all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
-            let modified_regexs = regex_iter
+            let modified_regexs = patterns
                 .into_iter()
-                .map(|s| format!(r"^\x00*\r{{0,1}}{}", s.as_ref().trim_start_matches('^')))
+                .map(|pattern| format!(r"^\x00*\r{{0,1}}{}", pattern.trim_start_matches('^')))
                 .collect::<Vec<_>>();
 
             for pattern in &modified_regexs {
@@ -126,14 +115,16 @@ impl DeviceHandler {
         let mut catch_map = HashMap::new();
         let sys_prompt_state_index = all_states.len();
 
-        for (state, regex, catch) in prompt_with_sys {
+        for rule in prompt_with_sys {
+            let state = rule.state;
+            let regex = rule.pattern;
+            let catch = rule.capture_group;
             let normalized_state = state.to_ascii_lowercase();
             let state_index = all_states.len();
             all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
-            let modified_regex =
-                format!(r"^\x00*\r{{0,1}}{}", regex.as_ref().trim_start_matches('^'));
+            let modified_regex = format!(r"^\x00*\r{{0,1}}{}", regex.trim_start_matches('^'));
 
             let regex = Regex::new(&modified_regex).map_err(|err| {
                 ConnectError::InvalidDeviceHandlerConfig(format!(
@@ -153,12 +144,14 @@ impl DeviceHandler {
         let prompt_index = (3, all_states.len() - 1);
 
         let mut input_map = HashMap::new();
-        for (state, cmd, regex_iter) in write {
+        for rule in write {
+            let state = rule.state;
+            let cmd = (rule.dynamic, rule.value, rule.record_input);
             let state_index = all_states.len();
             all_states.push(state.to_ascii_lowercase());
 
             let start_offset = regexs.len();
-            regexs.extend(regex_iter.into_iter().map(|s| s.as_ref().to_string()));
+            regexs.extend(rule.patterns);
 
             input_map.insert(state.to_ascii_lowercase(), cmd);
 
@@ -189,14 +182,14 @@ impl DeviceHandler {
         };
 
         let edges = edges
-            .iter()
-            .map(|(start, cmd, end, exit, format)| {
+            .into_iter()
+            .map(|rule| {
                 (
-                    start.to_ascii_lowercase(),
-                    cmd.clone(),
-                    end.to_ascii_lowercase(),
-                    *exit,
-                    *format,
+                    rule.from_state.to_ascii_lowercase(),
+                    rule.command,
+                    rule.to_state.to_ascii_lowercase(),
+                    rule.is_exit,
+                    rule.needs_format,
                 )
             })
             .collect();
@@ -216,30 +209,32 @@ impl DeviceHandler {
             sys: None,
             current_prompt: None,
             prompt_patterns,
-            command_execution: CommandExecutionStrategy::PromptDriven,
+            command_execution: match command_execution {
+                super::DeviceCommandExecutionConfig::PromptDriven => {
+                    CommandExecutionStrategy::PromptDriven
+                }
+                super::DeviceCommandExecutionConfig::ShellExitStatus { marker } => {
+                    CommandExecutionStrategy::ShellExitStatus { marker }
+                }
+            },
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use super::DeviceHandler;
+    use super::{DeviceHandler, DeviceHandlerConfig};
+    use crate::device::prompt_rule;
     use crate::error::ConnectError;
 
     #[test]
     fn invalid_handler_regex_returns_config_error() {
-        let err = match DeviceHandler::new(
-            vec![("Login".to_string(), vec![r"["])],
-            vec![],
-            vec![],
-            vec![r"^--More--$"],
-            vec![r"^ERROR: .+$"],
-            vec![],
-            vec![],
-            HashMap::new(),
-        ) {
+        let err = match DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![prompt_rule("Login", &[r"["])],
+            more_regex: vec![r"^--More--$".to_string()],
+            error_regex: vec![r"^ERROR: .+$".to_string()],
+            ..Default::default()
+        }) {
             Ok(_) => panic!("invalid regex should fail handler construction"),
             Err(err) => err,
         };

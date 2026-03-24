@@ -1,27 +1,24 @@
 //! Check Point Security Gateway device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, prompt_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for Check Point Security Gateway devices.
+pub fn checkpoint_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Enable", &[r"^\r{0,1}\S+\s*>\s*$"])],
+        more_regex: vec![r"-- More --".to_string()],
+        error_regex: vec![
+            r".+Incomplete command\.".to_string(),
+            r".+Invalid command:.+".to_string(),
+        ],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for Check Point Security Gateway devices.
 pub fn checkpoint() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt - Check Point only has Enable mode
-        vec![("Enable".to_string(), vec![r"^\r{0,1}\S+\s*>\s*$"])],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![],
-        // More regex
-        vec![r"-- More --"],
-        // Error regex
-        vec![r".+Incomplete command\.", r".+Invalid command:.+"],
-        // Edges - No mode transitions
-        vec![],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    checkpoint_config().build()
 }

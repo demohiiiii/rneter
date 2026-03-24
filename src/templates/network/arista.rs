@@ -1,75 +1,49 @@
 //! Arista EOS device template.
 
-use crate::device::DeviceHandler;
+use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+/// Exports the underlying handler configuration for Arista EOS devices.
+pub fn arista_config() -> DeviceHandlerConfig {
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
+            prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
+        ],
+        write: vec![input_rule(
+            "EnablePassword",
+            true,
+            "EnablePassword",
+            true,
+            &[r"Password:"],
+        )],
+        more_regex: vec![r" --More-- ".to_string()],
+        error_regex: vec![
+            r"% Invalid input".to_string(),
+            r"% Ambiguous command".to_string(),
+            r"% Bad secret".to_string(),
+            r"% Unrecognized command".to_string(),
+            r"% Incomplete command".to_string(),
+            r"% Invalid port range .+".to_string(),
+            r"! Access VLAN does not exist. Creating vlan .+".to_string(),
+            r"% Address \S+ is already assigned to interface .+".to_string(),
+            r"% Removal of physical interfaces is not permitted".to_string(),
+            r"^% .+".to_string(),
+        ],
+        edges: vec![
+            transition_rule("Login", "enable", "Enable", false, false),
+            transition_rule("Enable", "configure terminal", "Config", false, false),
+            transition_rule("Config", "exit", "Enable", true, false),
+            transition_rule("Enable", "exit", "Login", true, false),
+        ],
+        dyn_param: HashMap::new(),
+        ..Default::default()
+    }
+}
+
 /// Returns a `DeviceHandler` configured for Arista EOS devices.
 pub fn arista() -> Result<DeviceHandler, ConnectError> {
-    DeviceHandler::new(
-        // Prompt
-        vec![
-            ("Config".to_string(), vec![r"^\r{0,1}\S+\(\S+\)#\s*$"]),
-            ("Enable".to_string(), vec![r"^\r{0,1}[^\s#]+#\s*$"]),
-            ("Login".to_string(), vec![r"^\r{0,1}[^\s<]+>\s*$"]),
-        ],
-        // Prompt with sys
-        vec![],
-        // Write
-        vec![(
-            "EnablePassword".to_string(),
-            (true, "EnablePassword".to_string(), true),
-            vec![r"Password:"],
-        )],
-        // More regex
-        vec![r" --More-- "],
-        // Error regex
-        vec![
-            r"% Invalid input",
-            r"% Ambiguous command",
-            r"% Bad secret",
-            r"% Unrecognized command",
-            r"% Incomplete command",
-            r"% Invalid port range .+",
-            r"! Access VLAN does not exist. Creating vlan .+",
-            r"% Address \S+ is already assigned to interface .+",
-            r"% Removal of physical interfaces is not permitted",
-            r"^% .+",
-        ],
-        // Edges
-        vec![
-            (
-                "Login".to_string(),
-                "enable".to_string(),
-                "Enable".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "configure terminal".to_string(),
-                "Config".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Config".to_string(),
-                "exit".to_string(),
-                "Enable".to_string(),
-                true,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "exit".to_string(),
-                "Login".to_string(),
-                true,
-                false,
-            ),
-        ],
-        // Ignore errors
-        vec![],
-        // Dyn param
-        HashMap::new(),
-    )
+    arista_config().build()
 }

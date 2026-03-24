@@ -11,6 +11,7 @@ pub(crate) struct ParsedCommandOutput {
 
 impl DeviceHandler {
     /// Enable shell exit-status based command success parsing for interactive shells.
+    #[cfg(test)]
     pub(crate) fn with_shell_exit_status_marker(mut self, marker: impl Into<String>) -> Self {
         self.command_execution = CommandExecutionStrategy::ShellExitStatus {
             marker: marker.into(),

@@ -10,11 +10,17 @@ use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
 
 mod builder;
+mod config;
 mod diagnostics;
 mod execution;
 mod runtime;
 mod transitions;
 
+pub use config::{
+    DeviceCommandExecutionConfig, DeviceHandlerConfig, DeviceInputRule, DevicePromptRule,
+    DevicePromptWithSysRule, DeviceTransitionRule, input_rule, prompt_rule, prompt_with_sys_rule,
+    transition_rule,
+};
 pub use diagnostics::StateMachineDiagnostics;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,59 +134,33 @@ fn build_test_handler() -> DeviceHandler {
     let mut dyn_param = HashMap::new();
     dyn_param.insert("EnablePassword".to_string(), "secret\n".to_string());
 
-    DeviceHandler::new(
-        vec![
-            ("Login".to_string(), vec![r"^dev>\s*$"]),
-            ("Enable".to_string(), vec![r"^dev#\s*$"]),
-            ("Config".to_string(), vec![r"^dev\(cfg\)#\s*$"]),
+    DeviceHandler::new(DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Login", &[r"^dev>\s*$"]),
+            prompt_rule("Enable", &[r"^dev#\s*$"]),
+            prompt_rule("Config", &[r"^dev\(cfg\)#\s*$"]),
         ],
-        vec![],
-        vec![
-            (
-                "EnablePassword".to_string(),
-                (true, "EnablePassword".to_string(), true),
-                vec![r"^Password:\s*$"],
-            ),
-            (
-                "Confirm".to_string(),
-                (false, "y".to_string(), false),
-                vec![r"^\[y\/n\]\?\s*$"],
-            ),
-        ],
-        vec![r"^--More--$"],
-        vec![r"^ERROR: .+$"],
-        vec![
-            (
-                "Login".to_string(),
-                "enable".to_string(),
-                "Enable".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "configure terminal".to_string(),
-                "Config".to_string(),
-                false,
-                false,
-            ),
-            (
-                "Config".to_string(),
-                "exit".to_string(),
-                "Enable".to_string(),
+        write: vec![
+            input_rule(
+                "EnablePassword",
                 true,
-                false,
-            ),
-            (
-                "Enable".to_string(),
-                "exit".to_string(),
-                "Login".to_string(),
+                "EnablePassword",
                 true,
-                false,
+                &[r"^Password:\s*$"],
             ),
+            input_rule("Confirm", false, "y", false, &[r"^\[y\/n\]\?\s*$"]),
         ],
-        vec![r"^ERROR: benign$"],
+        more_regex: vec![r"^--More--$".to_string()],
+        error_regex: vec![r"^ERROR: .+$".to_string()],
+        edges: vec![
+            transition_rule("Login", "enable", "Enable", false, false),
+            transition_rule("Enable", "configure terminal", "Config", false, false),
+            transition_rule("Config", "exit", "Enable", true, false),
+            transition_rule("Enable", "exit", "Login", true, false),
+        ],
+        ignore_errors: vec![r"^ERROR: benign$".to_string()],
         dyn_param,
-    )
+        ..Default::default()
+    })
     .expect("test handler config should be valid")
 }
