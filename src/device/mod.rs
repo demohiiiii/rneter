@@ -97,6 +97,32 @@ pub static IGNORE_START_LINE: Lazy<Regex> =
         },
     );
 
+/// Regex pattern for stripping OSC escape sequences such as xterm title updates.
+pub static STRIP_OSC_ESCAPE: Lazy<Regex> =
+    Lazy::new(|| match Regex::new(r"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)") {
+        Ok(re) => re,
+        Err(err) => panic!("invalid STRIP_OSC_ESCAPE regex: {err}"),
+    });
+
+/// Regex pattern for stripping DCS escape sequences such as fish terminal probes.
+pub static STRIP_DCS_ESCAPE: Lazy<Regex> = Lazy::new(|| match Regex::new(r"\x1BP(?s:.*?)\x1B\\") {
+    Ok(re) => re,
+    Err(err) => panic!("invalid STRIP_DCS_ESCAPE regex: {err}"),
+});
+
+/// Regex pattern for stripping CSI escape sequences such as `\x1b[?1034h`.
+pub static STRIP_CSI_ESCAPE: Lazy<Regex> =
+    Lazy::new(|| match Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]") {
+        Ok(re) => re,
+        Err(err) => panic!("invalid STRIP_CSI_ESCAPE regex: {err}"),
+    });
+
+/// Regex pattern for stripping single-character escape sequences such as `\x1b=`.
+pub static STRIP_SIMPLE_ESCAPE: Lazy<Regex> = Lazy::new(|| match Regex::new(r"\x1B[@-Z\\-_]") {
+    Ok(re) => re,
+    Err(err) => panic!("invalid STRIP_SIMPLE_ESCAPE regex: {err}"),
+});
+
 #[cfg(test)]
 fn build_test_handler() -> DeviceHandler {
     let mut dyn_param = HashMap::new();

@@ -133,12 +133,15 @@ pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, C
             vec![
                 r"^[^\s]+\$\s*$",        // user$
                 r"^[^\s]+@[^\s]+\$\s*$", // user@host$
+                r"^[^\s@]+@.+\$\s*$",    // user@host path$
+                r"^[^\s@]+@.+>\s*$",     // fish: user@host path>
                 r"^\[[^\]]+\]\$\s*$",    // [user@host]$
                 r"^\$\s*$",              // $
             ],
             vec![
                 r"^[^\s]+#\s*$",          // root#
                 r"^root@[^\s]+#\s*$",     // root@host#
+                r"^[^\s@]+@.+#\s*$",      // root@host path#
                 r"^\[root@[^\]]+\]#\s*$", // [root@host]#
                 r"^#\s*$",                // #
             ],

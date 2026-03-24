@@ -74,15 +74,17 @@ impl SharedSshClient {
                     if !line_buffer.is_empty() {
                         if handler.read_prompt(&line_buffer) {
                             handler.read(&line_buffer);
+                            let matched_prompt =
+                                handler.current_prompt().unwrap_or(&line_buffer).to_string();
                             clean_output.push_str(&line_buffer);
                             if let Some(recorder) = self.recorder.as_ref()
-                                && *prompt != line_buffer
+                                && *prompt != matched_prompt
                             {
                                 let _ = recorder.record_event(SessionEvent::PromptChanged {
-                                    prompt: line_buffer.clone(),
+                                    prompt: matched_prompt.clone(),
                                 });
                             }
-                            *prompt = line_buffer;
+                            *prompt = matched_prompt;
                             if is_error {
                                 return Ok(false);
                             }

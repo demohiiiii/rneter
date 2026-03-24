@@ -177,8 +177,9 @@ impl SharedSshClient {
 
                     if !buffer.is_empty() {
                         if handler.read_prompt(&buffer) {
-                            prompt.push_str(&buffer);
                             handler.read(&buffer);
+                            prompt.clear();
+                            prompt.push_str(handler.current_prompt().unwrap_or(&buffer));
                             return Ok(());
                         }
                         if let Some((c, _)) = handler.read_need_write(&buffer) {
