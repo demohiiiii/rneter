@@ -7,6 +7,8 @@ use crate::device::DeviceHandler;
 use crate::error::ConnectError;
 use std::collections::HashMap;
 
+const LINUX_EXIT_CODE_MARKER: &str = "__RNETER_EXIT_CODE__:";
+
 /// Configuration for Linux template.
 #[derive(Debug, Clone)]
 pub struct LinuxTemplateConfig {
@@ -221,6 +223,7 @@ pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, C
         // Dyn param
         dyn_param,
     )
+    .map(|handler| handler.with_shell_exit_status_marker(LINUX_EXIT_CODE_MARKER))
 }
 
 #[cfg(test)]
@@ -440,5 +443,14 @@ mod tests {
 
         // Note: The actual recording flag is checked in the input_map
         // which is set to (true, "SudoPassword", false) where the last false means don't record
+    }
+
+    #[test]
+    fn linux_template_wraps_commands_for_exit_code_capture() {
+        let handler = linux().expect("create linux template");
+        let wrapped = handler.prepare_command_for_execution("false", true);
+
+        assert!(wrapped.starts_with("false; printf"));
+        assert!(wrapped.contains(LINUX_EXIT_CODE_MARKER));
     }
 }

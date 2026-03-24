@@ -167,6 +167,8 @@ pub struct CmdJob {
 /// The output result of a command execution.
 pub struct Output {
     pub success: bool,
+    /// Exit code captured from shell execution when supported by the active handler.
+    pub exit_code: Option<i32>,
     pub content: String,
     pub all: String,
     /// Prompt captured by the internal state machine after command execution.

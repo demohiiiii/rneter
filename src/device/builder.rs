@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use regex::{Regex, RegexSet};
 
-use super::{DeviceHandler, PRE_STATE};
+use super::{CommandExecutionStrategy, DeviceHandler, PRE_STATE};
 use crate::error::ConnectError;
 
 impl DeviceHandler {
@@ -43,6 +43,10 @@ impl DeviceHandler {
         }
 
         if self.regex_index_map != other.regex_index_map {
+            return false;
+        }
+
+        if self.command_execution != other.command_execution {
             return false;
         }
 
@@ -212,6 +216,7 @@ impl DeviceHandler {
             sys: None,
             current_prompt: None,
             prompt_patterns,
+            command_execution: CommandExecutionStrategy::PromptDriven,
         })
     }
 }

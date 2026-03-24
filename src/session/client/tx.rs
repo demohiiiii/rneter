@@ -433,6 +433,7 @@ mod tests {
     fn ok_output(content: &str) -> Output {
         Output {
             success: true,
+            exit_code: None,
             content: content.to_string(),
             all: content.to_string(),
             prompt: None,
@@ -442,6 +443,7 @@ mod tests {
     fn failed_output(content: &str) -> Output {
         Output {
             success: false,
+            exit_code: None,
             content: content.to_string(),
             all: content.to_string(),
             prompt: None,

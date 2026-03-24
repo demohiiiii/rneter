@@ -19,6 +19,16 @@ impl SharedSshClient {
         command: &str,
         timeout: Duration,
     ) -> Result<Output, ConnectError> {
+        self.write_with_timeout_internal(command, timeout, true)
+            .await
+    }
+
+    async fn write_with_timeout_internal(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        capture_exit_status: bool,
+    ) -> Result<Output, ConnectError> {
         let handler = &mut self.handler;
 
         let recv = &mut self.recv;
@@ -29,7 +39,8 @@ impl SharedSshClient {
 
         while recv.try_recv().is_ok() {}
 
-        let full_command = format!("{}\n", command);
+        let sent_command = handler.prepare_command_for_execution(command, capture_exit_status);
+        let full_command = format!("{}\n", sent_command);
         self.sender.send(full_command).await?;
 
         let mut clean_output = String::new();
@@ -104,6 +115,7 @@ impl SharedSshClient {
                         fsm_prompt_before: Some(fsm_prompt_before.clone()),
                         fsm_prompt_after: Some(self.handler.current_state().to_string()),
                         success: false,
+                        exit_code: None,
                         content: clean_output.clone(),
                         all: clean_output.clone(),
                     });
@@ -120,6 +132,7 @@ impl SharedSshClient {
                         fsm_prompt_before: Some(fsm_prompt_before.clone()),
                         fsm_prompt_after: Some(self.handler.current_state().to_string()),
                         success: false,
+                        exit_code: None,
                         content: clean_output.clone(),
                         all: clean_output.clone(),
                     });
@@ -129,12 +142,17 @@ impl SharedSshClient {
             Ok(Ok(success)) => success,
         };
 
-        let all = clean_output;
+        let parsed =
+            self.handler
+                .finalize_command_output(&clean_output, success, capture_exit_status);
+        let success = parsed.success;
+        let exit_code = parsed.exit_code;
+        let all = parsed.output;
 
         let mut content = all.as_str();
-        if !command.is_empty() && content.starts_with(command) {
+        if !sent_command.is_empty() && content.starts_with(&sent_command) {
             content = content
-                .strip_prefix(command)
+                .strip_prefix(&sent_command)
                 .unwrap_or(content)
                 .trim_start_matches(['\n', '\r']);
         }
@@ -147,6 +165,7 @@ impl SharedSshClient {
 
         let output = Output {
             success,
+            exit_code,
             content: content.to_string(),
             all,
             prompt: self.handler.current_prompt().map(|v| v.to_string()),
@@ -161,6 +180,7 @@ impl SharedSshClient {
                 fsm_prompt_before: Some(fsm_prompt_before),
                 fsm_prompt_after: Some(self.handler.current_state().to_string()),
                 success: output.success,
+                exit_code: output.exit_code,
                 content: output.content.clone(),
                 all: output.all.clone(),
             });
@@ -201,7 +221,9 @@ impl SharedSshClient {
 
         for (t_cmd, target_state) in trans_cmds {
             debug!("Trans state command: {}", t_cmd);
-            let mut mode_output = self.write_with_timeout(&t_cmd, timeout).await?;
+            let mut mode_output = self
+                .write_with_timeout_internal(&t_cmd, timeout, false)
+                .await?;
             all.push_str(mode_output.all.as_str());
             if !mode_output.success {
                 mode_output.all = all;
@@ -225,7 +247,9 @@ impl SharedSshClient {
             last_state = current_state;
         }
 
-        let mut cmd_output = self.write_with_timeout(command, timeout).await?;
+        let mut cmd_output = self
+            .write_with_timeout_internal(command, timeout, true)
+            .await?;
         all.push_str(cmd_output.all.as_str());
 
         cmd_output.all = all;

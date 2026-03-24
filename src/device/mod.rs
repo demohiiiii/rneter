@@ -11,10 +11,17 @@ use regex::{Regex, RegexSet};
 
 mod builder;
 mod diagnostics;
+mod execution;
 mod runtime;
 mod transitions;
 
 pub use diagnostics::StateMachineDiagnostics;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandExecutionStrategy {
+    PromptDriven,
+    ShellExitStatus { marker: String },
+}
 
 pub struct DeviceHandler {
     /// Index of the current state in the `all_states` vector
@@ -62,6 +69,9 @@ pub struct DeviceHandler {
 
     /// Prompt regex patterns grouped by state (for diagnostics).
     prompt_patterns: Vec<(String, String)>,
+
+    /// Strategy used to determine command success for this handler.
+    command_execution: CommandExecutionStrategy,
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;

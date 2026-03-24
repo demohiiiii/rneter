@@ -75,6 +75,8 @@ pub enum SessionEvent {
         #[serde(default)]
         fsm_prompt_after: Option<String>,
         success: bool,
+        #[serde(default)]
+        exit_code: Option<i32>,
         content: String,
         all: String,
     },
@@ -393,6 +395,7 @@ impl SessionReplayer {
                 mode: recorded_mode,
                 prompt_after,
                 success,
+                exit_code,
                 content,
                 all,
                 ..
@@ -407,6 +410,7 @@ impl SessionReplayer {
                 }
                 return Ok(Output {
                     success: *success,
+                    exit_code: *exit_code,
                     content: content.clone(),
                     all: all.clone(),
                     prompt: prompt_after.clone(),
@@ -474,6 +478,7 @@ mod tests {
                 fsm_prompt_before: Some("enable".to_string()),
                 fsm_prompt_after: Some("enable".to_string()),
                 success: true,
+                exit_code: None,
                 content: "ok".to_string(),
                 all: "show version\nok\nrouter#".to_string(),
             })
@@ -517,6 +522,7 @@ mod tests {
                 fsm_prompt_before: Some("enable".to_string()),
                 fsm_prompt_after: Some("enable".to_string()),
                 success: true,
+                exit_code: None,
                 content: "".to_string(),
                 all: "terminal length 0\nrouter#".to_string(),
             })
@@ -530,6 +536,7 @@ mod tests {
                 fsm_prompt_before: Some("enable".to_string()),
                 fsm_prompt_after: Some("enable".to_string()),
                 success: true,
+                exit_code: None,
                 content: "Version 1.0".to_string(),
                 all: "show version\nVersion 1.0\nrouter#".to_string(),
             })
@@ -565,6 +572,7 @@ mod tests {
                 fsm_prompt_before: Some("enable".to_string()),
                 fsm_prompt_after: Some("config".to_string()),
                 success: true,
+                exit_code: None,
                 content: "ok".to_string(),
                 all: "show version\nok\nrouter#".to_string(),
             })
@@ -675,6 +683,7 @@ mod tests {
                 fsm_prompt_before: Some("enable".to_string()),
                 fsm_prompt_after: Some("enable".to_string()),
                 success: true,
+                exit_code: None,
                 content: "12:00:00".to_string(),
                 all: "show clock\n12:00:00\nrouter#".to_string(),
             })
@@ -793,5 +802,33 @@ mod tests {
             entries[1].event,
             SessionEvent::TxBlockFinished { .. }
         ));
+    }
+
+    #[test]
+    fn replay_preserves_recorded_exit_code() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Full);
+        recorder
+            .record_event(SessionEvent::CommandOutput {
+                command: "ls /missing".to_string(),
+                mode: "user".to_string(),
+                prompt_before: Some("user@host$".to_string()),
+                prompt_after: Some("user@host$".to_string()),
+                fsm_prompt_before: Some("user".to_string()),
+                fsm_prompt_after: Some("user".to_string()),
+                success: false,
+                exit_code: Some(2),
+                content: "ls: cannot access '/missing': No such file or directory".to_string(),
+                all: "ls /missing\nls: cannot access '/missing': No such file or directory\nuser@host$"
+                    .to_string(),
+            })
+            .expect("record command output");
+
+        let mut replayer = SessionReplayer::from_recorder(&recorder);
+        let output = replayer
+            .replay_next_in_mode("ls /missing", "user")
+            .expect("replay");
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, Some(2));
     }
 }
