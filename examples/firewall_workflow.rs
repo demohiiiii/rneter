@@ -43,6 +43,21 @@ fn print_workflow_report(result: &TxWorkflowResult) {
         if !block.rollback_errors.is_empty() {
             println!("    rollback_errors={:?}", block.rollback_errors);
         }
+        for step in &block.step_results {
+            println!(
+                "    step[{}] mode={} execution_state={:?} rollback_state={:?}",
+                step.step_index, step.mode, step.execution_state, step.rollback_state
+            );
+            if let Some(reason) = &step.failure_reason {
+                println!("      failure_reason={reason}");
+            }
+            if let Some(command) = &step.rollback_command {
+                println!("      rollback_command={command}");
+            }
+            if let Some(reason) = &step.rollback_reason {
+                println!("      rollback_reason={reason}");
+            }
+        }
     }
 
     if !result.rollback_errors.is_empty() {

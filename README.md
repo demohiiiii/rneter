@@ -378,6 +378,15 @@ let workflow_result: TxWorkflowResult = MANAGER
         ExecutionContext::default(),
     )
     .await?;
+
+for block in &workflow_result.block_results {
+    for step in &block.step_results {
+        println!(
+            "step[{}] execution={:?} rollback={:?}",
+            step.step_index, step.execution_state, step.rollback_state
+        );
+    }
+}
 ```
 
 You can also build blocks from template strategies:

@@ -72,12 +72,71 @@ pub struct TxBlock {
 /// Planned rollback command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedRollback {
+    /// Step index associated with this rollback command.
+    ///
+    /// `None` means the rollback is block-level (`WholeResource`).
+    pub step_index: Option<usize>,
     /// Mode used for rollback command execution.
     pub mode: String,
     /// Rollback command text.
     pub command: String,
     /// Optional timeout for this rollback command.
     pub timeout_secs: Option<u64>,
+}
+
+/// Final forward execution state of one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TxStepExecutionState {
+    /// Step was not attempted because execution stopped earlier.
+    #[default]
+    NotRun,
+    /// Forward command completed successfully.
+    Succeeded,
+    /// Forward command was attempted and failed.
+    Failed,
+}
+
+/// Final rollback state associated with one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TxStepRollbackState {
+    /// No rollback was needed for this step.
+    #[default]
+    NotNeeded,
+    /// Step-level rollback command succeeded.
+    Succeeded,
+    /// Step-level rollback command failed.
+    Failed,
+    /// Step-level rollback was skipped.
+    Skipped,
+    /// Block-level rollback succeeded and covered this step.
+    BlockSucceeded,
+    /// Block-level rollback failed and affected this step.
+    BlockFailed,
+    /// Block-level rollback was skipped and affected this step.
+    BlockSkipped,
+}
+
+/// Detailed execution report for one block step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TxStepResult {
+    /// Original step index inside the block.
+    pub step_index: usize,
+    /// Mode used for forward execution.
+    pub mode: String,
+    /// Forward command text.
+    pub command: String,
+    /// Final forward execution state.
+    pub execution_state: TxStepExecutionState,
+    /// Forward failure summary when the step failed.
+    pub failure_reason: Option<String>,
+    /// Final rollback state related to this step.
+    pub rollback_state: TxStepRollbackState,
+    /// Rollback command associated with this step, if any.
+    pub rollback_command: Option<String>,
+    /// Rollback failure or skip reason, if any.
+    pub rollback_reason: Option<String>,
 }
 
 /// Execution result of a transaction-like block.
@@ -101,6 +160,9 @@ pub struct TxResult {
     pub failure_reason: Option<String>,
     /// Rollback phase errors (can contain multiple entries).
     pub rollback_errors: Vec<String>,
+    /// Per-step execution and rollback details in block order.
+    #[serde(default)]
+    pub step_results: Vec<TxStepResult>,
 }
 
 /// Multi-block workflow transaction.
@@ -134,11 +196,26 @@ pub struct TxWorkflowResult {
 }
 
 impl TxStep {
-    fn rollback_command_text(&self) -> Option<&str> {
+    pub(crate) fn rollback_command_text(&self) -> Option<&str> {
         self.rollback_command
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+}
+
+impl TxStepResult {
+    pub fn from_step(step_index: usize, step: &TxStep) -> Self {
+        Self {
+            step_index,
+            mode: step.mode.clone(),
+            command: step.command.clone(),
+            execution_state: TxStepExecutionState::NotRun,
+            failure_reason: None,
+            rollback_state: TxStepRollbackState::NotNeeded,
+            rollback_command: None,
+            rollback_reason: None,
+        }
     }
 }
 
@@ -261,6 +338,7 @@ impl TxBlock {
             } => {
                 if executed_step_indices.contains(trigger_step_index) {
                     Ok(vec![PlannedRollback {
+                        step_index: None,
                         mode: mode.clone(),
                         command: undo_command.clone(),
                         timeout_secs: *timeout_secs,
@@ -281,6 +359,7 @@ impl TxBlock {
                         && let Some(rollback_command) = failed_step.rollback_command_text()
                     {
                         commands.push(PlannedRollback {
+                            step_index: Some(failed_idx),
                             mode: failed_step.mode.clone(),
                             command: rollback_command.to_string(),
                             timeout_secs: failed_step.timeout_secs,
@@ -296,6 +375,7 @@ impl TxBlock {
                     })?;
                     if let Some(rollback_command) = step.rollback_command_text() {
                         commands.push(PlannedRollback {
+                            step_index: Some(*idx),
                             mode: step.mode.clone(),
                             command: rollback_command.to_string(),
                             timeout_secs: step.timeout_secs,
@@ -374,7 +454,13 @@ impl TxResult {
             rollback_steps: 0,
             failure_reason: None,
             rollback_errors: Vec::new(),
+            step_results: Vec::new(),
         }
+    }
+
+    pub fn with_step_results(mut self, step_results: Vec<TxStepResult>) -> Self {
+        self.step_results = step_results;
+        self
     }
 }
 
@@ -447,7 +533,9 @@ mod tests {
         let block = per_step_block();
         let plan = block.plan_rollback(&[0, 1], None).expect("plan rollback");
         assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].step_index, Some(1));
         assert_eq!(plan[0].command, "unset addr 2");
+        assert_eq!(plan[1].step_index, Some(0));
         assert_eq!(plan[1].command, "unset addr 1");
     }
 
@@ -473,6 +561,7 @@ mod tests {
         };
         let plan = block.plan_rollback(&[0], None).expect("plan rollback");
         assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].step_index, None);
         assert_eq!(plan[0].command, "no address-object A");
     }
 
@@ -671,6 +760,7 @@ mod tests {
             rollback_steps: 1,
             failure_reason: Some("step failed".to_string()),
             rollback_errors: vec!["undo command failed".to_string()],
+            step_results: Vec::new(),
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
         assert!(attempted);
@@ -690,6 +780,7 @@ mod tests {
             rollback_steps: 0,
             failure_reason: Some("step failed".to_string()),
             rollback_errors: vec!["ignored".to_string()],
+            step_results: Vec::new(),
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
         assert!(!attempted);
@@ -730,5 +821,26 @@ mod tests {
                 "step[0] rollback skipped: rollback_command is missing".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn tx_step_result_is_initialized_from_step() {
+        let step = TxStep {
+            mode: "Config".to_string(),
+            command: "set addr 1".to_string(),
+            timeout_secs: Some(30),
+            rollback_command: Some("unset addr 1".to_string()),
+            rollback_on_failure: false,
+        };
+
+        let result = TxStepResult::from_step(3, &step);
+        assert_eq!(result.step_index, 3);
+        assert_eq!(result.mode, "Config");
+        assert_eq!(result.command, "set addr 1");
+        assert_eq!(result.execution_state, TxStepExecutionState::NotRun);
+        assert_eq!(result.rollback_state, TxStepRollbackState::NotNeeded);
+        assert!(result.failure_reason.is_none());
+        assert!(result.rollback_command.is_none());
+        assert!(result.rollback_reason.is_none());
     }
 }
