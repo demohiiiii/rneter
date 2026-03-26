@@ -9,6 +9,7 @@
 //! - [`SshConnectionManager`] - Connection pool manager (singleton via `MANAGER`)
 //! - [`SharedSshClient`] - Individual SSH connection with state tracking
 //! - [`Command`] - Command configuration for device execution
+//! - [`DeviceFileTransferRequest`] - Device-side CLI transfer configuration
 //! - [`FileUploadRequest`] - SFTP upload configuration
 //! - [`Output`] - Command execution results
 
@@ -133,6 +134,100 @@ pub struct SharedSshClient {
     recorder: Option<SessionRecorder>,
 }
 
+/// Structured prompt-response overrides for a single command execution.
+///
+/// Values are sent to the remote device as-is, so include any required trailing
+/// newline when the prompt expects the response to be submitted immediately.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CommandDynamicParams {
+    #[serde(default, alias = "EnablePassword")]
+    pub enable_password: Option<String>,
+    #[serde(default, alias = "SudoPassword")]
+    pub sudo_password: Option<String>,
+    #[serde(default, alias = "TransferRemoteHost")]
+    pub transfer_remote_host: Option<String>,
+    #[serde(default, alias = "TransferSourceUsername")]
+    pub transfer_source_username: Option<String>,
+    #[serde(default, alias = "TransferDestinationUsername")]
+    pub transfer_destination_username: Option<String>,
+    #[serde(default, alias = "TransferSourcePath")]
+    pub transfer_source_path: Option<String>,
+    #[serde(default, alias = "TransferDestinationPath")]
+    pub transfer_destination_path: Option<String>,
+    #[serde(default, alias = "TransferPassword")]
+    pub transfer_password: Option<String>,
+    #[serde(default, alias = "TransferConfirm")]
+    pub transfer_confirm: Option<String>,
+    #[serde(default, alias = "TransferOverwrite")]
+    pub transfer_overwrite: Option<String>,
+    /// Extra prompt-response pairs for template-specific interactive flows.
+    #[serde(default, flatten)]
+    pub extra: HashMap<String, String>,
+}
+
+impl CommandDynamicParams {
+    /// Returns true when no structured or extra prompt responses are set.
+    pub fn is_empty(&self) -> bool {
+        self.enable_password.is_none()
+            && self.sudo_password.is_none()
+            && self.transfer_remote_host.is_none()
+            && self.transfer_source_username.is_none()
+            && self.transfer_destination_username.is_none()
+            && self.transfer_source_path.is_none()
+            && self.transfer_destination_path.is_none()
+            && self.transfer_password.is_none()
+            && self.transfer_confirm.is_none()
+            && self.transfer_overwrite.is_none()
+            && self.extra.is_empty()
+    }
+
+    /// Insert a template-specific prompt-response pair.
+    pub fn insert_extra(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Option<String> {
+        self.extra.insert(key.into(), value.into())
+    }
+
+    pub(crate) fn runtime_values(&self) -> HashMap<String, String> {
+        let mut values = self.extra.clone();
+
+        if let Some(value) = self.enable_password.as_ref() {
+            values.insert("EnablePassword".to_string(), value.clone());
+        }
+        if let Some(value) = self.sudo_password.as_ref() {
+            values.insert("SudoPassword".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_remote_host.as_ref() {
+            values.insert("TransferRemoteHost".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_source_username.as_ref() {
+            values.insert("TransferSourceUsername".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_destination_username.as_ref() {
+            values.insert("TransferDestinationUsername".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_source_path.as_ref() {
+            values.insert("TransferSourcePath".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_destination_path.as_ref() {
+            values.insert("TransferDestinationPath".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_password.as_ref() {
+            values.insert("TransferPassword".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_confirm.as_ref() {
+            values.insert("TransferConfirm".to_string(), value.clone());
+        }
+        if let Some(value) = self.transfer_overwrite.as_ref() {
+            values.insert("TransferOverwrite".to_string(), value.clone());
+        }
+
+        values
+    }
+}
+
 /// Configuration for a command to execute on a device.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Command {
@@ -156,6 +251,13 @@ pub struct Command {
     /// If None, defaults to 60 seconds
     /// If command execution exceeds this value, it will be forcibly terminated
     pub timeout: Option<u64>,
+
+    /// Extra dynamic prompt responses applied only to this command execution.
+    ///
+    /// Values should include any required trailing newline if the remote device
+    /// expects the response to be submitted immediately.
+    #[serde(default)]
+    pub dyn_params: CommandDynamicParams,
 }
 
 /// Configuration for uploading a local file to a remote host over SFTP.
@@ -204,6 +306,97 @@ impl FileUploadRequest {
     /// Control whether progress logs should be emitted during upload.
     pub fn with_progress_reporting(mut self, show_progress: bool) -> Self {
         self.show_progress = show_progress;
+        self
+    }
+}
+
+fn default_transfer_mode() -> String {
+    "Enable".to_string()
+}
+
+/// File transfer protocol executed by the device CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceFileTransferProtocol {
+    Scp,
+    Tftp,
+}
+
+/// Direction of the transfer from the device's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceFileTransferDirection {
+    /// Pull a file from the external server onto the device.
+    ToDevice,
+    /// Push a file from the device to the external server.
+    FromDevice,
+}
+
+/// High-level request for CLI-driven device file transfer workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeviceFileTransferRequest {
+    /// Transfer protocol used by the device.
+    pub protocol: DeviceFileTransferProtocol,
+    /// Whether the device is importing or exporting the file.
+    pub direction: DeviceFileTransferDirection,
+    /// Address or DNS name of the external SCP/TFTP server reachable from the device.
+    pub server_addr: String,
+    /// Path on the external SCP/TFTP server.
+    pub remote_path: String,
+    /// Path on the device filesystem, e.g. `flash:/image.bin`.
+    pub device_path: String,
+    /// Optional SCP username.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Optional SCP password.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Device mode used to run the transfer command. Defaults to `Enable`.
+    #[serde(default = "default_transfer_mode")]
+    pub mode: String,
+    /// Optional transfer timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+impl DeviceFileTransferRequest {
+    /// Build a new CLI transfer request with an `Enable`-mode default.
+    pub fn new(
+        protocol: DeviceFileTransferProtocol,
+        direction: DeviceFileTransferDirection,
+        server_addr: String,
+        remote_path: String,
+        device_path: String,
+    ) -> Self {
+        Self {
+            protocol,
+            direction,
+            server_addr,
+            remote_path,
+            device_path,
+            username: None,
+            password: None,
+            mode: default_transfer_mode(),
+            timeout_secs: None,
+        }
+    }
+
+    /// Attach SCP credentials for the transfer.
+    pub fn with_credentials(mut self, username: String, password: String) -> Self {
+        self.username = Some(username);
+        self.password = Some(password);
+        self
+    }
+
+    /// Override the device mode used to run the transfer command.
+    pub fn with_mode(mut self, mode: String) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Override the transfer timeout in seconds.
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = Some(timeout_secs);
         self
     }
 }
@@ -287,5 +480,69 @@ mod tests {
         assert_eq!(upload.timeout_secs, Some(30));
         assert_eq!(upload.buffer_size, Some(8192));
         assert!(upload.show_progress);
+    }
+
+    #[test]
+    fn command_default_has_empty_dyn_params() {
+        let cmd = Command::default();
+        assert_eq!(cmd.timeout, None);
+        assert!(cmd.mode.is_empty());
+        assert!(cmd.command.is_empty());
+        assert!(cmd.dyn_params.is_empty());
+    }
+
+    #[test]
+    fn command_dynamic_params_accept_legacy_runtime_keys() {
+        let cmd: Command = serde_json::from_value(serde_json::json!({
+            "mode": "Enable",
+            "command": "copy scp: flash:/image.bin",
+            "dyn_params": {
+                "TransferRemoteHost": "198.51.100.20\n",
+                "TransferPassword": "secret\n",
+                "CustomPrompt": "yes\n"
+            }
+        }))
+        .expect("deserialize command");
+
+        assert_eq!(
+            cmd.dyn_params.transfer_remote_host.as_deref(),
+            Some("198.51.100.20\n")
+        );
+        assert_eq!(
+            cmd.dyn_params.transfer_password.as_deref(),
+            Some("secret\n")
+        );
+        assert_eq!(
+            cmd.dyn_params.extra.get("CustomPrompt"),
+            Some(&"yes\n".to_string())
+        );
+        assert_eq!(
+            cmd.dyn_params.runtime_values().get("TransferRemoteHost"),
+            Some(&"198.51.100.20\n".to_string())
+        );
+    }
+
+    #[test]
+    fn device_file_transfer_request_builder_overrides_defaults() {
+        let transfer = DeviceFileTransferRequest::new(
+            DeviceFileTransferProtocol::Scp,
+            DeviceFileTransferDirection::ToDevice,
+            "192.0.2.10".to_string(),
+            "/images/new.bin".to_string(),
+            "flash:/new.bin".to_string(),
+        )
+        .with_credentials("backup".to_string(), "secret".to_string())
+        .with_mode("Config".to_string())
+        .with_timeout_secs(300);
+
+        assert_eq!(transfer.protocol, DeviceFileTransferProtocol::Scp);
+        assert_eq!(transfer.direction, DeviceFileTransferDirection::ToDevice);
+        assert_eq!(transfer.server_addr, "192.0.2.10");
+        assert_eq!(transfer.remote_path, "/images/new.bin");
+        assert_eq!(transfer.device_path, "flash:/new.bin");
+        assert_eq!(transfer.username.as_deref(), Some("backup"));
+        assert_eq!(transfer.password.as_deref(), Some("secret"));
+        assert_eq!(transfer.mode, "Config");
+        assert_eq!(transfer.timeout_secs, Some(300));
     }
 }

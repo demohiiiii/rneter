@@ -41,6 +41,14 @@ pub enum ConnectError {
     #[error("invalid device handler config: {0}")]
     InvalidDeviceHandlerConfig(String),
 
+    /// File transfer request is invalid.
+    #[error("invalid transfer request: {0}")]
+    InvalidTransferRequest(String),
+
+    /// Built-in transfer workflow is not supported for the requested template.
+    #[error("transfer not supported: {0}")]
+    TransferNotSupported(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),

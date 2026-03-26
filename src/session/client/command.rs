@@ -5,6 +5,28 @@ use super::tx::{
 };
 
 impl SharedSshClient {
+    fn merge_command_dyn_params(
+        &mut self,
+        dyn_params: &CommandDynamicParams,
+    ) -> Vec<(String, Option<String>)> {
+        let runtime_values = dyn_params.runtime_values();
+        let mut previous = Vec::with_capacity(runtime_values.len());
+        for (key, value) in runtime_values {
+            previous.push((key.clone(), self.handler.dyn_param.insert(key, value)));
+        }
+        previous
+    }
+
+    fn restore_command_dyn_params(&mut self, previous: Vec<(String, Option<String>)>) {
+        for (key, old_value) in previous {
+            if let Some(old_value) = old_value {
+                self.handler.dyn_param.insert(key, old_value);
+            } else {
+                self.handler.dyn_param.remove(&key);
+            }
+        }
+    }
+
     /// Executes a command and waits for the full output by matching the prompt.
     ///
     /// Uses the default timeout of 60 seconds.
@@ -206,6 +228,40 @@ impl SharedSshClient {
 
     /// Executes a command in a specific device mode with a custom timeout.
     pub async fn write_with_mode_and_timeout(
+        &mut self,
+        command: &str,
+        mode: &str,
+        sys: Option<&String>,
+        timeout: Duration,
+    ) -> Result<Output, ConnectError> {
+        self.write_with_mode_and_timeout_using_dyn_params(
+            command,
+            mode,
+            sys,
+            timeout,
+            &CommandDynamicParams::default(),
+        )
+        .await
+    }
+
+    /// Executes a command in a specific device mode with per-command dynamic prompt responses.
+    pub(crate) async fn write_with_mode_and_timeout_using_dyn_params(
+        &mut self,
+        command: &str,
+        mode: &str,
+        sys: Option<&String>,
+        timeout: Duration,
+        dyn_params: &CommandDynamicParams,
+    ) -> Result<Output, ConnectError> {
+        let previous = self.merge_command_dyn_params(dyn_params);
+        let result = self
+            .write_with_mode_and_timeout_without_dyn_params(command, mode, sys, timeout)
+            .await;
+        self.restore_command_dyn_params(previous);
+        result
+    }
+
+    async fn write_with_mode_and_timeout_without_dyn_params(
         &mut self,
         command: &str,
         mode: &str,

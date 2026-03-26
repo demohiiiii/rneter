@@ -2,23 +2,27 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::templates::transfer::cisco_like_device_transfer_input_rules;
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for Cisco IOS/IOS-XE devices.
 pub fn cisco_config() -> DeviceHandlerConfig {
+    let mut write = vec![input_rule(
+        "EnablePassword",
+        true,
+        "EnablePassword",
+        true,
+        &[r"^\x00*\r(Enable )?Password:"],
+    )];
+    write.extend(cisco_like_device_transfer_input_rules());
+
     DeviceHandlerConfig {
         prompt: vec![
             prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
             prompt_rule("Enable", &[r"^[^\s#]+#\s*$"]),
             prompt_rule("Login", &[r"^[^\s<]+>\s*$"]),
         ],
-        write: vec![input_rule(
-            "EnablePassword",
-            true,
-            "EnablePassword",
-            true,
-            &[r"^\x00*\r(Enable )?Password:"],
-        )],
+        write,
         more_regex: vec![r"\s*<--- More --->\s*".to_string()],
         error_regex: vec![
             r"% Invalid command at '\^' marker\.".to_string(),

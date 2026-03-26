@@ -156,7 +156,7 @@ impl SharedSshClient {
         let mut prompt = String::new();
         let mut initial_output = String::new();
 
-        let mut params = HashMap::new();
+        let mut params = handler.dyn_param.clone();
         if let Some(enable) = enable_password.as_ref() {
             params.insert("EnablePassword".to_string(), format!("{}\n", enable));
         }

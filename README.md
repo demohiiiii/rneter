@@ -15,6 +15,7 @@
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
 - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
+- **CLI SCP/TFTP Transfers**: Drive supported network devices through interactive `copy scp:` / `copy tftp:` workflows
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
 - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 - **Error Handling**: Comprehensive error types with detailed context
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "Enable".to_string(), // Cisco template uses "Enable" mode
             command: "show version".to_string(),
             timeout: Some(60),
+            ..Command::default()
         },
         sys: None,
         responder: tx,
@@ -114,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "User".to_string(),
             command: "ls -la /home".to_string(),
             timeout: Some(30),
+            ..Command::default()
         },
         sys: None,
         responder: tx,
@@ -128,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "User".to_string(),
             command: "sudo systemctl status nginx".to_string(),
             timeout: Some(30),
+            ..Command::default()
         },
         sys: None,
         responder: tx,
@@ -142,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "Root".to_string(),  // Automatically executes sudo -i
             command: "systemctl restart nginx".to_string(),
             timeout: Some(30),
+            ..Command::default()
         },
         sys: None,
         responder: tx,
@@ -230,6 +235,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 This path requires SFTP support on the remote host. For devices that only expose CLI-driven
 transfer commands such as `copy scp:` or `copy tftp:`, continue using the existing command API.
+
+### Network Device SCP/TFTP Transfers
+
+For supported Cisco-like templates, `rneter` can also drive device-side `copy scp:` and
+`copy tftp:` workflows by auto-answering the interactive prompts:
+
+```rust
+use rneter::session::{
+    ConnectionRequest, DeviceFileTransferDirection, DeviceFileTransferProtocol,
+    DeviceFileTransferRequest, ExecutionContext, MANAGER,
+};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let output = MANAGER
+        .transfer_file_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                templates::cisco()?,
+            ),
+            "cisco",
+            DeviceFileTransferRequest::new(
+                DeviceFileTransferProtocol::Scp,
+                DeviceFileTransferDirection::ToDevice,
+                "198.51.100.20".to_string(),
+                "/pub/image.bin".to_string(),
+                "flash:/image.bin".to_string(),
+            )
+            .with_credentials("deploy".to_string(), "secret".to_string())
+            .with_timeout_secs(600),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    println!("Transfer output: {}", output.content);
+    Ok(())
+}
+```
+
+Built-in CLI transfer workflows currently target `cisco`, `arista`, `chaitin`, `maipu`, and
+`venustech`. Other templates can still support transfers by building custom commands and prompt
+rules on top of the same command execution API.
 
 ### Security Levels
 
@@ -337,11 +389,13 @@ let script = vec![
         mode: "Enable".to_string(),
         command: "terminal length 0".to_string(),
         timeout: None,
+        ..rneter::session::Command::default()
     },
     rneter::session::Command {
         mode: "Enable".to_string(),
         command: "show version".to_string(),
         timeout: None,
+        ..rneter::session::Command::default()
     },
 ];
 let outputs = replayer.replay_script(&script)?;

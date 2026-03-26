@@ -44,11 +44,13 @@ fn fixture_replays_script_without_ssh() {
             mode: "Enable".to_string(),
             command: "terminal length 0".to_string(),
             timeout: None,
+            ..Command::default()
         },
         Command {
             mode: "Enable".to_string(),
             command: "show version".to_string(),
             timeout: None,
+            ..Command::default()
         },
     ];
 
@@ -107,11 +109,13 @@ fn replay_script_returns_error_when_middle_command_missing() {
             mode: "Enable".to_string(),
             command: "show ip int br".to_string(),
             timeout: None,
+            ..Command::default()
         },
         Command {
             mode: "Enable".to_string(),
             command: "show version".to_string(),
             timeout: None,
+            ..Command::default()
         },
     ];
 
@@ -130,11 +134,13 @@ fn replay_script_snapshot_matches_expected_output_sequence() {
             mode: "Enable".to_string(),
             command: "terminal length 0".to_string(),
             timeout: None,
+            ..Command::default()
         },
         Command {
             mode: "Enable".to_string(),
             command: "show version".to_string(),
             timeout: None,
+            ..Command::default()
         },
     ];
 

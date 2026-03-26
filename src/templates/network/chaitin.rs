@@ -2,23 +2,27 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::templates::transfer::cisco_like_device_transfer_input_rules;
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for ChaiTin SafeLine devices.
 pub fn chaitin_config() -> DeviceHandlerConfig {
+    let mut write = vec![input_rule(
+        "EnablePassword",
+        true,
+        "EnablePassword",
+        true,
+        &[r"(Enable )?Password:"],
+    )];
+    write.extend(cisco_like_device_transfer_input_rules());
+
     DeviceHandlerConfig {
         prompt: vec![
             prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
             prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
             prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
         ],
-        write: vec![input_rule(
-            "EnablePassword",
-            true,
-            "EnablePassword",
-            true,
-            &[r"(Enable )?Password:"],
-        )],
+        write,
         error_regex: vec![
             r"% Command incomplete".to_string(),
             r"% Unknown command".to_string(),

@@ -2,23 +2,27 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::templates::transfer::cisco_like_device_transfer_input_rules;
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for Maipu devices.
 pub fn maipu_config() -> DeviceHandlerConfig {
+    let mut write = vec![input_rule(
+        "EnablePassword",
+        true,
+        "EnablePassword",
+        true,
+        &[r"password:"],
+    )];
+    write.extend(cisco_like_device_transfer_input_rules());
+
     DeviceHandlerConfig {
         prompt: vec![
             prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
             prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
             prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
         ],
-        write: vec![input_rule(
-            "EnablePassword",
-            true,
-            "EnablePassword",
-            true,
-            &[r"password:"],
-        )],
+        write,
         error_regex: vec![r"% Invalid input".to_string()],
         edges: vec![
             transition_rule("Login", "enable", "Enable", false, false),

@@ -2,23 +2,27 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::templates::transfer::cisco_like_device_transfer_input_rules;
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for Arista EOS devices.
 pub fn arista_config() -> DeviceHandlerConfig {
+    let mut write = vec![input_rule(
+        "EnablePassword",
+        true,
+        "EnablePassword",
+        true,
+        &[r"Password:"],
+    )];
+    write.extend(cisco_like_device_transfer_input_rules());
+
     DeviceHandlerConfig {
         prompt: vec![
             prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
             prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
             prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
         ],
-        write: vec![input_rule(
-            "EnablePassword",
-            true,
-            "EnablePassword",
-            true,
-            &[r"Password:"],
-        )],
+        write,
         more_regex: vec![r" --More-- ".to_string()],
         error_regex: vec![
             r"% Invalid input".to_string(),

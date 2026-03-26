@@ -15,6 +15,7 @@
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
 - **SFTP 文件上传**：可向开启 SSH `sftp` 子系统的远端主机上传本地文件
+- **CLI SCP/TFTP 传输**：可驱动已支持的网络设备完成交互式 `copy scp:` / `copy tftp:` 流程
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
 - **异步/等待**：基于 Tokio 构建，提供高性能异步操作
 - **错误处理**：全面的错误类型with详细上下文信息
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode: "Enable".to_string(), // Cisco 模板使用 "Enable" 模式
             command: "show version".to_string(),
             timeout: Some(60),
+            ..Command::default()
         },
         sys: None,
         responder: tx,
@@ -156,6 +158,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的网络设备，仍然更适合继续使用现有的命令执行 API。
 
+### 网络设备 SCP/TFTP 传输
+
+对于已支持的 Cisco-like 模板，`rneter` 也可以驱动设备侧的 `copy scp:` / `copy tftp:` 流程，并自动回答交互提示：
+
+```rust
+use rneter::session::{
+    ConnectionRequest, DeviceFileTransferDirection, DeviceFileTransferProtocol,
+    DeviceFileTransferRequest, ExecutionContext, MANAGER,
+};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let output = MANAGER
+        .transfer_file_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                templates::cisco()?,
+            ),
+            "cisco",
+            DeviceFileTransferRequest::new(
+                DeviceFileTransferProtocol::Scp,
+                DeviceFileTransferDirection::ToDevice,
+                "198.51.100.20".to_string(),
+                "/pub/image.bin".to_string(),
+                "flash:/image.bin".to_string(),
+            )
+            .with_credentials("deploy".to_string(), "secret".to_string())
+            .with_timeout_secs(600),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    println!("传输输出: {}", output.content);
+    Ok(())
+}
+```
+
+当前内置 CLI 传输 workflow 已覆盖 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech`。其它模板仍然可以基于同一套命令执行 API，自行扩展对应的命令和交互提示规则。
+
 ### 会话录制与回放
 
 ```rust
@@ -220,11 +266,13 @@ let script = vec![
         mode: "Enable".to_string(),
         command: "terminal length 0".to_string(),
         timeout: None,
+        ..rneter::session::Command::default()
     },
     rneter::session::Command {
         mode: "Enable".to_string(),
         command: "show version".to_string(),
         timeout: None,
+        ..rneter::session::Command::default()
     },
 ];
 let outputs = replayer.replay_script(&script)?;

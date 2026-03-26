@@ -8,6 +8,7 @@ mod linux;
 mod network;
 mod registry;
 mod transaction;
+mod transfer;
 
 pub use catalog::{
     BUILTIN_TEMPLATES, TemplateCapability, TemplateMetadata, available_templates, template_catalog,
@@ -28,3 +29,4 @@ pub use registry::{
     by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::{build_tx_block, classify_command};
+pub use transfer::build_file_transfer_command;

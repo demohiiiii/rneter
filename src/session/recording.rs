@@ -559,11 +559,13 @@ mod tests {
                 mode: "enable".to_string(),
                 command: "terminal length 0".to_string(),
                 timeout: None,
+                ..Command::default()
             },
             Command {
                 mode: "enable".to_string(),
                 command: "show version".to_string(),
                 timeout: None,
+                ..Command::default()
             },
         ];
         let outputs = replayer.replay_script(&script).expect("replay script");
@@ -776,6 +778,7 @@ mod tests {
         assert_eq!(cmd.timeout, None);
         assert!(cmd.mode.is_empty());
         assert!(cmd.command.is_empty());
+        assert!(cmd.dyn_params.is_empty());
     }
 
     #[test]
