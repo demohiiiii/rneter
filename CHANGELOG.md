@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.5] - 2026-03-26
+
+### New Features
+- Added SFTP upload support through `FileUploadRequest` and `SshConnectionManager::upload_file_with_context(...)`, plus `FileUploadStarted` and `FileUploadFinished` session recording events.
+- Added device-driven CLI transfer support through `DeviceFileTransferRequest`, `templates::build_file_transfer_command(...)`, and `SshConnectionManager::transfer_file_with_context(...)` for the built-in `cisco`, `arista`, `chaitin`, `maipu`, and `venustech` templates.
+- Added `SshConnectionManager::execute_command_with_context(...)` so callers can run a structured `Command` directly without building a `CmdJob`, which the CLI transfer workflow now reuses internally.
+
+### Optimizations
+- Changed per-command interactive prompt overrides to merge and restore around one command execution, so transfer credentials and confirmations do not leak into cached connection state.
+- Preserved template-defined dynamic prompt parameters during connection initialization by merging `EnablePassword` into the existing handler configuration instead of overwriting the template map.
+- Made Linux shell exit-status wrappers configurable per shell flavor, so POSIX shells keep using `$?` while `fish` sessions use `$status`.
+
+### API Changes
+- `Command.dyn_params` is now the structured `CommandDynamicParams` type instead of a raw `HashMap<String, String>`, with named transfer fields plus an `extra` map for template-specific prompts.
+- Added public transfer-facing types and helpers: `FileUploadRequest`, `DeviceFileTransferRequest`, `DeviceFileTransferProtocol`, `DeviceFileTransferDirection`, `templates::build_file_transfer_command(...)`, `ConnectError::InvalidTransferRequest`, and `ConnectError::TransferNotSupported`.
+- Added `DeviceShellFlavor` plus `shell_flavor` on Linux shell exit-status configuration so callers can explicitly target `posix` or `fish`.
+
+### Risks
+- `upload_file_with_context(...)` requires the remote SSH server to expose the `sftp` subsystem; many network devices still do not.
+- Built-in CLI transfer workflows currently cover only the listed Cisco-like templates, and real device prompt wording may still require template regex tuning.
+- Device-side `copy scp:` and `copy tftp:` flows depend on the device being able to reach the target SCP/TFTP server directly; `rneter` only drives the CLI exchange and does not proxy the file transfer itself.
+
 ## [0.3.4] - 2026-03-24
 
 ### New Features
