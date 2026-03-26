@@ -14,6 +14,7 @@
 - **State Machine Management**: Intelligent device state tracking and automatic transitions
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
+- **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
 - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 - **Error Handling**: Comprehensive error types with detailed context
@@ -188,6 +189,47 @@ let config = LinuxTemplateConfig {
 };
 let handler = linux_with_config(config)?;
 ```
+
+### File Uploads
+
+If the remote host enables the SSH `sftp` subsystem, `rneter` can upload local files over the
+same authenticated SSH connection:
+
+```rust
+use rneter::session::{ConnectionRequest, ExecutionContext, FileUploadRequest, MANAGER};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let handler = templates::linux()?;
+
+    MANAGER
+        .upload_file_with_context(
+            ConnectionRequest::new(
+                "user".to_string(),
+                "192.168.1.100".to_string(),
+                22,
+                "ssh_password".to_string(),
+                None,
+                handler,
+            ),
+            FileUploadRequest::new(
+                "./artifacts/config.backup".to_string(),
+                "/tmp/config.backup".to_string(),
+            )
+            .with_timeout_secs(30)
+            .with_buffer_size(16 * 1024)
+            .with_progress_reporting(true),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+This path requires SFTP support on the remote host. For devices that only expose CLI-driven
+transfer commands such as `copy scp:` or `copy tftp:`, continue using the existing command API.
 
 ### Security Levels
 

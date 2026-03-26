@@ -64,6 +64,25 @@ impl SshConnectionManager {
             .await
     }
 
+    /// Upload a local file to the remote host over SFTP using a structured request/context pair.
+    pub async fn upload_file_with_context(
+        &self,
+        request: ConnectionRequest,
+        upload: FileUploadRequest,
+        context: ExecutionContext,
+    ) -> Result<(), ConnectError> {
+        let device_addr = request.device_addr();
+        self.get_with_request_and_recording(request, context.security_options, None)
+            .await?;
+
+        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
+            ConnectError::InternalServerError("connection cache miss".to_string())
+        })?;
+
+        let mut client_guard = client.write().await;
+        client_guard.upload_file(&upload).await
+    }
+
     /// Gets a cached SSH client with recording using a structured request/context pair.
     ///
     /// Use this when you want full recording output.

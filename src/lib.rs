@@ -11,6 +11,7 @@
 //! - **State Machine Management**: Intelligent device state tracking and transitions
 //! - **Prompt Detection**: Automatic prompt recognition and handling
 //! - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
+//! - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
 //! - **Maximum Compatibility**: Supports a wide range of SSH algorithms for compatibility with legacy devices
 //! - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 //!

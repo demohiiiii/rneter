@@ -14,6 +14,7 @@
 - **状态机管理**：智能设备状态跟踪和自动状态转换
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
+- **SFTP 文件上传**：可向开启 SSH `sftp` 子系统的远端主机上传本地文件
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
 - **异步/等待**：基于 Tokio 构建，提供高性能异步操作
 - **错误处理**：全面的错误类型with详细上下文信息
@@ -115,6 +116,45 @@ let _sender = MANAGER
     )
     .await?;
 ```
+
+### 文件上传
+
+如果远端主机启用了 SSH `sftp` 子系统，`rneter` 可以在同一条认证过的 SSH 连接上上传本地文件：
+
+```rust
+use rneter::session::{ConnectionRequest, ExecutionContext, FileUploadRequest, MANAGER};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let handler = templates::linux()?;
+
+    MANAGER
+        .upload_file_with_context(
+            ConnectionRequest::new(
+                "user".to_string(),
+                "192.168.1.100".to_string(),
+                22,
+                "ssh_password".to_string(),
+                None,
+                handler,
+            ),
+            FileUploadRequest::new(
+                "./artifacts/config.backup".to_string(),
+                "/tmp/config.backup".to_string(),
+            )
+            .with_timeout_secs(30)
+            .with_buffer_size(16 * 1024)
+            .with_progress_reporting(true),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的网络设备，仍然更适合继续使用现有的命令执行 API。
 
 ### 会话录制与回放
 

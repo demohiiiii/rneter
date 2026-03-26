@@ -86,6 +86,17 @@ pub enum SessionEvent {
     StateChanged {
         state: String,
     },
+    FileUploadStarted {
+        local_path: String,
+        remote_path: String,
+    },
+    FileUploadFinished {
+        local_path: String,
+        remote_path: String,
+        success: bool,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// Transaction block execution started.
     TxBlockStarted {
         block_name: String,
@@ -604,6 +615,39 @@ mod tests {
         assert!(matches!(
             entries[0].event,
             SessionEvent::PromptChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn recorder_roundtrips_file_upload_events() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
+        recorder
+            .record_event(SessionEvent::FileUploadStarted {
+                local_path: "./backup.cfg".to_string(),
+                remote_path: "/tmp/backup.cfg".to_string(),
+            })
+            .expect("record upload start");
+        recorder
+            .record_event(SessionEvent::FileUploadFinished {
+                local_path: "./backup.cfg".to_string(),
+                remote_path: "/tmp/backup.cfg".to_string(),
+                success: true,
+                error: None,
+            })
+            .expect("record upload finish");
+
+        let jsonl = recorder.to_jsonl().expect("encode");
+        let restored = SessionRecorder::from_jsonl(&jsonl).expect("decode");
+        let entries = restored.entries().expect("entries");
+
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            entries[0].event,
+            SessionEvent::FileUploadStarted { .. }
+        ));
+        assert!(matches!(
+            entries[1].event,
+            SessionEvent::FileUploadFinished { .. }
         ));
     }
 

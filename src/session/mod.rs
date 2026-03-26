@@ -9,6 +9,7 @@
 //! - [`SshConnectionManager`] - Connection pool manager (singleton via `MANAGER`)
 //! - [`SharedSshClient`] - Individual SSH connection with state tracking
 //! - [`Command`] - Command configuration for device execution
+//! - [`FileUploadRequest`] - SFTP upload configuration
 //! - [`Output`] - Command execution results
 
 use async_ssh2_tokio::client::{AuthMethod, Client};
@@ -157,6 +158,56 @@ pub struct Command {
     pub timeout: Option<u64>,
 }
 
+/// Configuration for uploading a local file to a remote host over SFTP.
+///
+/// The remote SSH server must expose the `sftp` subsystem. Many Linux hosts do;
+/// some network devices do not, in which case command-driven transfer workflows
+/// such as `copy scp:` or `copy tftp:` may still be required instead.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileUploadRequest {
+    /// Local file path on the machine running rneter.
+    pub local_path: String,
+    /// Destination file path on the remote host.
+    pub remote_path: String,
+    /// Optional SFTP operation timeout in seconds.
+    pub timeout_secs: Option<u64>,
+    /// Optional upload buffer size in bytes. Defaults to the upstream helper value.
+    pub buffer_size: Option<usize>,
+    /// Emit progress logs during upload when set.
+    pub show_progress: bool,
+}
+
+impl FileUploadRequest {
+    /// Build a new upload request with conservative defaults.
+    pub fn new(local_path: String, remote_path: String) -> Self {
+        Self {
+            local_path,
+            remote_path,
+            timeout_secs: None,
+            buffer_size: None,
+            show_progress: false,
+        }
+    }
+
+    /// Override the SFTP timeout in seconds.
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    /// Override the transfer buffer size in bytes.
+    pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
+        self.buffer_size = Some(buffer_size);
+        self
+    }
+
+    /// Control whether progress logs should be emitted during upload.
+    pub fn with_progress_reporting(mut self, show_progress: bool) -> Self {
+        self.show_progress = show_progress;
+        self
+    }
+}
+
 /// A job representing a command execution request.
 pub struct CmdJob {
     pub data: Command,
@@ -219,5 +270,22 @@ mod tests {
             ConnectionSecurityOptions::legacy_compatible()
         );
         assert_eq!(context.sys.as_deref(), Some("vsys1"));
+    }
+
+    #[test]
+    fn file_upload_request_builder_overrides_defaults() {
+        let upload = FileUploadRequest::new(
+            "./fixtures/config.txt".to_string(),
+            "/tmp/config.txt".to_string(),
+        )
+        .with_timeout_secs(30)
+        .with_buffer_size(8192)
+        .with_progress_reporting(true);
+
+        assert_eq!(upload.local_path, "./fixtures/config.txt");
+        assert_eq!(upload.remote_path, "/tmp/config.txt");
+        assert_eq!(upload.timeout_secs, Some(30));
+        assert_eq!(upload.buffer_size, Some(8192));
+        assert!(upload.show_progress);
     }
 }
