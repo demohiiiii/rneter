@@ -15,7 +15,7 @@
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
 - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
-- **CLI SCP/TFTP Transfers**: Drive supported network devices through interactive `copy scp:` / `copy tftp:` workflows
+- **Built-in Copy Flow Templates**: Reuse structured templates for Cisco-like interactive `copy` workflows
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
 - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 - **Error Handling**: Comprehensive error types with detailed context
@@ -239,26 +239,28 @@ and execute it through the generic command-flow API.
 
 ### Network Device SCP/TFTP Transfers
 
-For supported Cisco-like templates, `rneter` can also drive device-side `copy scp:` and
-`copy tftp:` workflows by auto-answering the interactive prompts:
+For Cisco-like CLIs, `rneter` ships a built-in reusable copy template. Render it with runtime
+variables, then execute the resulting `CommandFlow` through the generic command-flow API:
 
 ```rust
 use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
-use rneter::templates::{self, FileTransferDirection, FileTransferProtocol, FileTransferRequest};
+use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let flow = templates::build_file_transfer_flow(
-        "cisco",
-        &FileTransferRequest::new(
-            FileTransferProtocol::Scp,
-            FileTransferDirection::ToDevice,
-            "198.51.100.20".to_string(),
-            "/pub/image.bin".to_string(),
-            "flash:/image.bin".to_string(),
-        )
-        .with_credentials("deploy".to_string(), "secret".to_string())
-        .with_timeout_secs(600),
+    let flow = cisco_like_copy_template().to_command_flow(
+        &CommandFlowTemplateRuntime::new()
+            .with_default_mode("Enable")
+            .with_vars(json!({
+                "protocol": "scp",
+                "direction": "to_device",
+                "server_addr": "198.51.100.20",
+                "remote_path": "/pub/image.bin",
+                "device_path": "flash:/image.bin",
+                "transfer_username": "deploy",
+                "transfer_password": "secret",
+            })),
     )?;
 
     let result = MANAGER
@@ -283,9 +285,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Built-in CLI transfer workflows currently target `cisco`, `arista`, `chaitin`, `maipu`, and
-`venustech`. Other templates can still support transfers by building custom commands and prompt
-rules on top of the same command execution API.
+This built-in template matches the prompt style used by `cisco`, `arista`, `chaitin`, `maipu`,
+and `venustech`. If a vendor wizard differs, build another `CommandFlowTemplate` on top of the
+same abstraction.
+
+### Structured Command-Flow Templates
+
+If you want a less hard-coded workflow, build a reusable `CommandFlowTemplate` in Rust.
+It keeps the same declarative shape as the earlier TOML design: `vars`, `steps`,
+`prompts`, `default_mode`, and conditional branches.
+
+```rust
+use rneter::templates::{
+    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
+    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
+};
+use serde_json::json;
+
+let template = CommandFlowTemplate::new(
+    "cisco_like_copy",
+    vec![CommandFlowTemplateStep::new(CommandFlowTemplateText::concat(vec![
+        CommandFlowTemplateText::literal("copy "),
+        CommandFlowTemplateText::var("protocol"),
+        CommandFlowTemplateText::literal(": "),
+        CommandFlowTemplateText::var("device_path"),
+    ]))
+    .with_prompts(vec![CommandFlowTemplatePrompt::new(
+        vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+        CommandFlowTemplateText::var("server_addr"),
+    )
+    .with_append_newline(true)
+    .with_record_input(true)])],
+)
+.with_default_mode("Enable")
+.with_vars(vec![
+    CommandFlowTemplateVar::new("protocol").with_required(true),
+    CommandFlowTemplateVar::new("server_addr").with_required(true),
+    CommandFlowTemplateVar::new("device_path").with_required(true),
+]);
+
+let flow = template.to_command_flow(
+    &CommandFlowTemplateRuntime::new()
+        .with_default_mode("Enable")
+        .with_vars(json!({
+            "protocol": "scp",
+            "direction": "to_device",
+            "server_addr": "198.51.100.20",
+            "remote_path": "/pub/image.bin",
+            "device_path": "flash:/image.bin",
+            "transfer_username": "deploy",
+            "transfer_password": "secret",
+        })),
+)?;
+```
+
+The built-in `cisco_like_copy_template()` is implemented with the same abstraction, so future
+`http`, `ftp`, or vendor-specific copy wizards can stay in one structured template layer instead
+of adding more one-off Rust structs.
 
 ### Custom Interactive Command Flows
 

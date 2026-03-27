@@ -41,17 +41,13 @@ pub enum ConnectError {
     #[error("invalid device handler config: {0}")]
     InvalidDeviceHandlerConfig(String),
 
-    /// File transfer request is invalid.
-    #[error("invalid transfer request: {0}")]
-    InvalidTransferRequest(String),
-
     /// Interactive command prompt-response rules are invalid.
     #[error("invalid command interaction: {0}")]
     InvalidCommandInteraction(String),
 
-    /// Built-in transfer workflow is not supported for the requested template.
-    #[error("transfer not supported: {0}")]
-    TransferNotSupported(String),
+    /// Command flow template definition or rendering is invalid.
+    #[error("invalid command flow template: {0}")]
+    InvalidCommandFlowTemplate(String),
 
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]

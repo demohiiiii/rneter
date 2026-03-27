@@ -4,6 +4,7 @@
 //! the public exports stable while the implementation is split by concern.
 
 mod catalog;
+mod command_flow_template;
 mod linux;
 mod network;
 mod registry;
@@ -13,6 +14,11 @@ mod transfer;
 pub use catalog::{
     BUILTIN_TEMPLATES, TemplateCapability, TemplateMetadata, available_templates, template_catalog,
     template_metadata,
+};
+pub use command_flow_template::{
+    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
+    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
+    CommandFlowTemplateVarKind,
 };
 pub use linux::{
     CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,
@@ -29,7 +35,4 @@ pub use registry::{
     by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::{build_tx_block, classify_command};
-pub use transfer::{
-    FileTransferDirection, FileTransferProtocol, FileTransferRequest, build_file_transfer_command,
-    build_file_transfer_flow,
-};
+pub use transfer::cisco_like_copy_template;

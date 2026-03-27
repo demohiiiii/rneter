@@ -15,7 +15,7 @@
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
 - **SFTP 文件上传**：可向开启 SSH `sftp` 子系统的远端主机上传本地文件
-- **CLI SCP/TFTP 传输**：可驱动已支持的网络设备完成交互式 `copy scp:` / `copy tftp:` 流程
+- **内置 Copy Flow 模板**：可复用结构化模板来驱动 Cisco-like 设备上的交互式 `copy` 流程
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
 - **异步/等待**：基于 Tokio 构建，提供高性能异步操作
 - **错误处理**：全面的错误类型with详细上下文信息
@@ -160,25 +160,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 网络设备 SCP/TFTP 传输
 
-对于已支持的 Cisco-like 模板，`rneter` 也可以驱动设备侧的 `copy scp:` / `copy tftp:` 流程，并自动回答交互提示：
+对于 Cisco-like CLI，`rneter` 现在提供了一个内置的 copy flow 模板。你只需要填运行时变量，把它渲染成 `CommandFlow`，再交给通用执行入口即可：
 
 ```rust
 use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
-use rneter::templates::{self, FileTransferDirection, FileTransferProtocol, FileTransferRequest};
+use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let flow = templates::build_file_transfer_flow(
-        "cisco",
-        &FileTransferRequest::new(
-            FileTransferProtocol::Scp,
-            FileTransferDirection::ToDevice,
-            "198.51.100.20".to_string(),
-            "/pub/image.bin".to_string(),
-            "flash:/image.bin".to_string(),
-        )
-        .with_credentials("deploy".to_string(), "secret".to_string())
-        .with_timeout_secs(600),
+    let flow = cisco_like_copy_template().to_command_flow(
+        &CommandFlowTemplateRuntime::new()
+            .with_default_mode("Enable")
+            .with_vars(json!({
+                "protocol": "scp",
+                "direction": "to_device",
+                "server_addr": "198.51.100.20",
+                "remote_path": "/pub/image.bin",
+                "device_path": "flash:/image.bin",
+                "transfer_username": "deploy",
+                "transfer_password": "secret",
+            })),
     )?;
 
     let result = MANAGER
@@ -203,7 +205,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-当前内置 CLI 传输 workflow 已覆盖 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech`。其它模板仍然可以基于同一套命令执行 API，自行扩展对应的命令和交互提示规则。
+这个内置模板适配 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
+
+### 结构化命令流模板
+
+如果你希望交互流程不要写死在 Rust 里，可以直接构建一个可复用的
+`CommandFlowTemplate`。它保留了之前 TOML 设计里的核心结构：`vars`、`steps`、
+`prompts`、`default_mode`，以及条件分支。
+
+```rust
+use rneter::templates::{
+    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
+    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
+};
+use serde_json::json;
+
+let template = CommandFlowTemplate::new(
+    "cisco_like_copy",
+    vec![CommandFlowTemplateStep::new(CommandFlowTemplateText::concat(vec![
+        CommandFlowTemplateText::literal("copy "),
+        CommandFlowTemplateText::var("protocol"),
+        CommandFlowTemplateText::literal(": "),
+        CommandFlowTemplateText::var("device_path"),
+    ]))
+    .with_prompts(vec![CommandFlowTemplatePrompt::new(
+        vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+        CommandFlowTemplateText::var("server_addr"),
+    )
+    .with_append_newline(true)
+    .with_record_input(true)])],
+)
+.with_default_mode("Enable")
+.with_vars(vec![
+    CommandFlowTemplateVar::new("protocol").with_required(true),
+    CommandFlowTemplateVar::new("server_addr").with_required(true),
+    CommandFlowTemplateVar::new("device_path").with_required(true),
+]);
+
+let flow = template.to_command_flow(
+    &CommandFlowTemplateRuntime::new()
+        .with_default_mode("Enable")
+        .with_vars(json!({
+            "protocol": "scp",
+            "direction": "to_device",
+            "server_addr": "198.51.100.20",
+            "remote_path": "/pub/image.bin",
+            "device_path": "flash:/image.bin",
+            "transfer_username": "deploy",
+            "transfer_password": "secret",
+        })),
+)?;
+```
+
+现在内置的 `cisco_like_copy_template()` 也是走这套结构化模板抽象，所以后面无论是
+`http`、`ftp`，还是厂商自定义 copy 向导，都可以优先沉淀成同一套模板层，而不是继续往底层结构里塞特例字段。
 
 ### 自定义交互命令流程
 

@@ -12,7 +12,7 @@
 //! - **Prompt Detection**: Automatic prompt recognition and handling
 //! - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
 //! - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
-//! - **CLI SCP/TFTP Transfers**: Drive supported network devices through interactive `copy` workflows
+//! - **Built-in Copy Flow Templates**: Reuse structured templates for Cisco-like interactive `copy` workflows
 //! - **Maximum Compatibility**: Supports a wide range of SSH algorithms for compatibility with legacy devices
 //! - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 //!
