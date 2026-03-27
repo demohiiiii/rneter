@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-03-27
+
+### New Features
+- Added generic session execution abstractions through `SessionOperation`, `SessionOperationSummary`, `SessionOperationOutput`, `SessionOperationStepOutput`, and `SessionOperationExecutionError`, so commands, flows, and template-rendered operations now share one execution and result model.
+- Added nested transaction and workflow child-step reporting through `TxOperationStepResult`, `TxStepResult.forward_operation_steps`, `TxStepResult.rollback_operation_steps`, and `TxResult.block_rollback_steps`, exposing concrete forward and rollback sub-step outputs to callers.
+- Added richer transaction recording details by extending `SessionEvent::TxStepSucceeded`, `SessionEvent::TxStepFailed`, `SessionEvent::TxRollbackStepSucceeded`, and `SessionEvent::TxRollbackStepFailed` with `operation_steps`.
+
+### Optimizations
+- Unified command, flow, and template execution on one operation executor path, so manager-level command and flow entrypoints now reuse the same operation-level execution pipeline.
+- Preserved partial child-step outputs when multi-step operations fail due to timeouts, disconnects, or other execution errors, improving observability for both transaction rollback handling and direct operation execution.
+- Corrected rollback recording to use the original transaction step index instead of the rollback-plan index, keeping recorder output aligned with transaction step reports.
+
+### API Changes
+- Transaction and workflow steps are now modeled around `SessionOperation`, including `TxStep.run`, `TxStep.rollback`, and `RollbackPolicy::WholeResource { rollback, .. }`, so callers can pass single commands, command flows, or template-backed operations.
+- Added `SshConnectionManager::execute_operation_with_context(...) -> Result<SessionOperationOutput, SessionOperationExecutionError>` as the operation-level execution entrypoint with partial-output-aware failure reporting.
+- Transaction result and recording schemas now expose operation-oriented fields such as `operation_summary`, `forward_operation_steps`, `rollback_operation_steps`, `block_rollback_steps`, and recorder `operation_steps`; downstream JSON/log consumers must migrate from the older command-only transaction shape.
+
+### Risks
+- This is a breaking release for integrations that deserialize or persist pre-`0.4.0` transaction/workflow results or transaction recording events, because the operation-oriented schema replaces the older command-only shape.
+- `SessionRecordLevel::KeyEventsOnly` transaction events can now carry nested `operation_steps`, which may increase JSONL size and include more command output detail than earlier releases.
+- Integrations adopting the new operation-level API need to handle `SessionOperationExecutionError` if they want to preserve and surface `partial_output()` instead of treating all failures as bare `ConnectError`.
+
 ## [0.3.7] - 2026-03-27
 
 ### New Features
