@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "rneter"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-ssh2-tokio",

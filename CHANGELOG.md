@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.7] - 2026-03-27
+
+### New Features
+- Added structured reusable command-flow template types through `CommandFlowTemplate`, `CommandFlowTemplateText`, `CommandFlowTemplateVar`, `CommandFlowTemplateStep`, `CommandFlowTemplatePrompt`, and `CommandFlowTemplateRuntime`, so interactive device workflows can now be modeled in Rust without protocol-specific request wrappers.
+- Added built-in `templates::cisco_like_copy_template()` as a reusable Cisco-like copy wizard template for `copy scp:` / `copy tftp:` flows rendered through the generic command-flow pipeline.
+- Updated the crate-level docs plus English and Chinese README examples to demonstrate rendering built-in copy workflows from template runtime vars before executing them with `execute_command_flow_with_context(...)`.
+
+### Optimizations
+- Consolidated CLI copy workflows onto the same structured template abstraction used by other interactive command flows, reducing one-off logic in the transfer template module.
+- Removed legacy transfer-specific request validation and template-selection plumbing from the public surface, leaving built-in copy behavior defined in one reusable template.
+- Simplified error handling by dropping transfer-only error variants now that copy workflows are rendered through generic command-flow templates instead of dedicated helper APIs.
+
+### API Changes
+- Removed `FileTransferRequest`, `FileTransferProtocol`, `FileTransferDirection`, `templates::build_file_transfer_flow(...)`, and `templates::build_file_transfer_command(...)`; callers should now render `templates::cisco_like_copy_template()` or another `CommandFlowTemplate` with `CommandFlowTemplateRuntime`.
+- Removed `ConnectError::InvalidTransferRequest` and `ConnectError::TransferNotSupported`, so downstream code matching those variants must migrate to template-level validation and generic command-flow errors.
+- `templates` now publicly exports `cisco_like_copy_template()` plus the structured command-flow template types as the supported way to package reusable interactive copy workflows.
+
+### Risks
+- This release is a breaking API change for any integration still compiling against the removed CLI transfer helper types, builder functions, or transfer-specific error variants.
+- The built-in `cisco_like_copy_template()` still assumes Cisco-like prompt wording and a single-step `copy` wizard; vendors with different prompt text still need their own template definitions.
+- Protocol-specific requirements such as SCP credentials are no longer enforced by a dedicated builder API, so missing runtime vars will render empty prompt responses unless callers validate them beforehand.
+
 ## [0.3.6] - 2026-03-27
 
 ### New Features
