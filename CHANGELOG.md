@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.6] - 2026-03-27
+
+### New Features
+- Added multi-step interactive command execution through `CommandFlow`, `CommandInteraction`, `PromptResponseRule`, `CommandFlowOutput`, and `SshConnectionManager::execute_command_flow_with_context(...)`, allowing one cached session to drive wizard-like CLI workflows.
+- Added template-layer file transfer builders through `FileTransferRequest`, `FileTransferProtocol`, `FileTransferDirection`, and `templates::build_file_transfer_flow(...)`, so CLI `scp`/`tftp` flows are now provided as reusable template helpers instead of session-specific APIs.
+- Added runtime interaction validation via `ConnectError::InvalidCommandInteraction`, surfacing empty or invalid prompt regex definitions before command execution enters the SSH read loop.
+
+### Optimizations
+- Prioritized per-command runtime prompt-response rules ahead of template static input rules, allowing protocol-specific interactions to be injected on demand without mutating device handler definitions.
+- Moved Cisco-like CLI transfer prompt handling out of the built-in device handlers and into template-side flow builders, simplifying the network templates back to prompt/state-machine concerns only.
+- Reduced session-layer coupling by collapsing transfer-specific request modeling into the `templates` module while keeping the core SSH executor focused on generic command and flow execution.
+
+### API Changes
+- Removed the session-layer CLI transfer request and manager APIs (`DeviceFileTransferRequest`, `DeviceFileTransferProtocol`, `DeviceFileTransferDirection`, `SshConnectionManager::transfer_file_with_context(...)`, and `SshConnectionManager::transfer_file_flow_with_context(...)`); callers should now build flows through `templates::build_file_transfer_flow(...)` and execute them with `execute_command_flow_with_context(...)`.
+- `CommandDynamicParams` is now back to generic runtime overrides (`EnablePassword`, `SudoPassword`, and `extra`) and no longer exposes transfer-specific fields; interactive protocol wizards should use `Command.interaction`.
+- The public CLI transfer helper types now live under `templates` (`FileTransferRequest`, `FileTransferProtocol`, `FileTransferDirection`) instead of `session`.
+
+### Risks
+- This release is a breaking API change for integrations that still depend on the removed session-layer SCP/TFTP request or manager entrypoints.
+- Built-in CLI transfer flow builders still cover only the Cisco-like template set (`cisco`, `arista`, `chaitin`, `maipu`, `venustech`); additional vendors still need their own builder implementations.
+- Runtime prompt matching is now driven by flow-level regexes, so vendor prompt wording drift may require builder-level prompt updates even when the underlying device template remains unchanged.
+
 ## [0.3.5] - 2026-03-26
 
 ### New Features
