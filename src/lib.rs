@@ -68,6 +68,7 @@
 //! - [`session::SshConnectionManager`] - Manages SSH connection pool and lifecycle
 //! - [`device::DeviceHandler`] - Handles device state machine and transitions
 //! - [`error::ConnectError`] - Error types for connection and state operations
+//! - [`session::SessionOperationExecutionError`] - Operation-level execution error with partial outputs
 //! - [`config`] - SSH configuration constants
 //! - [`templates`] - Predefined device configurations for common vendors for maximum compatibility
 

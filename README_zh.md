@@ -537,6 +537,27 @@ for block in &workflow_result.block_results {
             step.execution_state,
             step.rollback_state
         );
+        for child in &step.forward_operation_steps {
+            println!(
+                "  forward_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
+        for child in &step.rollback_operation_steps {
+            println!(
+                "  rollback_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
+    }
+    if let Some(block_rollback) = &block.block_rollback_operation_summary {
+        println!("block_rollback={block_rollback}");
+        for child in &block.block_rollback_steps {
+            println!(
+                "  block_rollback_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
     }
 }
 ```
@@ -757,6 +778,9 @@ flowchart TD
 - `ChannelDisconnectError`：SSH 通道意外断开
 - `ExecTimeout`：命令执行超时
 - 等等...
+
+对于 `execute_operation_with_context(...)` 这类 operation 级 API，失败时现在会返回
+`SessionOperationExecutionError`，可通过 `partial_output()` 读取失败前已完成的子步骤结果。
 
 ## 文档
 

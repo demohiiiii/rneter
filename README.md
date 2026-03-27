@@ -664,6 +664,27 @@ for block in &workflow_result.block_results {
             step.execution_state,
             step.rollback_state
         );
+        for child in &step.forward_operation_steps {
+            println!(
+                "  forward_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
+        for child in &step.rollback_operation_steps {
+            println!(
+                "  rollback_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
+    }
+    if let Some(block_rollback) = &block.block_rollback_operation_summary {
+        println!("block_rollback={block_rollback}");
+        for child in &block.block_rollback_steps {
+            println!(
+                "  block_rollback_step[{}] op={} success={}",
+                child.step_index, child.operation_summary, child.success
+            );
+        }
     }
 }
 ```
@@ -890,6 +911,10 @@ The library provides detailed error types through `ConnectError`:
 - `ChannelDisconnectError`: SSH channel disconnected unexpectedly
 - `ExecTimeout`: Command execution exceeded timeout
 - And more...
+
+For operation-level APIs such as `execute_operation_with_context(...)`, failures now
+return `SessionOperationExecutionError`, which preserves `partial_output()` for
+already completed child steps.
 
 ## Documentation
 

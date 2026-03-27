@@ -109,6 +109,8 @@ pub enum SessionEvent {
         step_index: usize,
         mode: String,
         operation_summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        operation_steps: Vec<SessionOperationStepOutput>,
     },
     /// One forward step inside transaction block failed.
     TxStepFailed {
@@ -116,6 +118,8 @@ pub enum SessionEvent {
         step_index: usize,
         mode: String,
         operation_summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        operation_steps: Vec<SessionOperationStepOutput>,
         reason: String,
     },
     /// Rollback phase started after forward failure.
@@ -128,6 +132,8 @@ pub enum SessionEvent {
         step_index: Option<usize>,
         mode: String,
         operation_summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        operation_steps: Vec<SessionOperationStepOutput>,
     },
     /// One rollback operation failed.
     TxRollbackStepFailed {
@@ -135,6 +141,8 @@ pub enum SessionEvent {
         step_index: Option<usize>,
         mode: String,
         operation_summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        operation_steps: Vec<SessionOperationStepOutput>,
         reason: String,
     },
     TxBlockFinished {

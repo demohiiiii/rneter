@@ -10,6 +10,7 @@
 //! - [`SharedSshClient`] - Individual SSH connection with state tracking
 //! - [`Command`] - Command configuration for device execution
 //! - [`CommandFlow`] - Multi-step interactive command flow
+//! - [`SessionOperationOutput`] - Generic execution result for any session operation
 //! - [`FileUploadRequest`] - SFTP upload configuration
 //! - [`Output`] - Command execution results
 
@@ -41,9 +42,9 @@ pub use recording::{
 };
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
 pub use transaction::{
-    CommandBlockKind, RollbackPolicy, TxBlock, TxResult, TxStep, TxStepExecutionState,
-    TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult, failed_block_rollback_summary,
-    workflow_rollback_order,
+    CommandBlockKind, RollbackPolicy, TxBlock, TxOperationStepResult, TxResult, TxStep,
+    TxStepExecutionState, TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult,
+    failed_block_rollback_summary, workflow_rollback_order,
 };
 
 /// Global singleton SSH connection manager.
@@ -448,7 +449,131 @@ pub struct Output {
     pub prompt: Option<String>,
 }
 
-/// Aggregated result for a multi-step command flow.
+/// Detailed execution result for one concrete child step inside a session operation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionOperationStepOutput {
+    /// Child step index inside the executed operation.
+    pub step_index: usize,
+    /// Mode used for this child step.
+    pub mode: String,
+    /// Human-readable child step summary.
+    pub operation_summary: String,
+    /// Whether this child step succeeded.
+    pub success: bool,
+    /// Optional exit code captured from shell execution.
+    pub exit_code: Option<i32>,
+    /// Primary captured content for this child step.
+    pub content: String,
+    /// Full captured transcript for this child step.
+    pub all: String,
+    /// Prompt observed after the child step finished.
+    pub prompt: Option<String>,
+}
+
+impl SessionOperationStepOutput {
+    /// Drop operation-specific metadata and keep only the legacy command output shape.
+    pub fn into_output(self) -> Output {
+        Output {
+            success: self.success,
+            exit_code: self.exit_code,
+            content: self.content,
+            all: self.all,
+            prompt: self.prompt,
+        }
+    }
+
+    fn to_output(&self) -> Output {
+        Output {
+            success: self.success,
+            exit_code: self.exit_code,
+            content: self.content.clone(),
+            all: self.all.clone(),
+            prompt: self.prompt.clone(),
+        }
+    }
+}
+
+/// Generic execution result for any session operation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionOperationOutput {
+    /// Whether the overall operation succeeded.
+    pub success: bool,
+    /// Concrete child step outputs produced by the operation.
+    #[serde(default)]
+    pub steps: Vec<SessionOperationStepOutput>,
+}
+
+impl SessionOperationOutput {
+    /// Convert this generic result into the legacy command-flow result shape.
+    pub fn into_command_flow_output(self) -> CommandFlowOutput {
+        CommandFlowOutput {
+            success: self.success,
+            outputs: self
+                .steps
+                .into_iter()
+                .map(SessionOperationStepOutput::into_output)
+                .collect(),
+        }
+    }
+
+    /// Borrow this generic result as the legacy command-flow result shape.
+    pub fn to_command_flow_output(&self) -> CommandFlowOutput {
+        CommandFlowOutput {
+            success: self.success,
+            outputs: self
+                .steps
+                .iter()
+                .map(SessionOperationStepOutput::to_output)
+                .collect(),
+        }
+    }
+}
+
+/// Public error returned by operation-level APIs when execution fails.
+///
+/// Unlike plain `ConnectError`, this error preserves already completed child
+/// step outputs so callers can inspect partial progress for multi-step
+/// operations outside transaction/workflow execution.
+#[derive(Debug)]
+pub struct SessionOperationExecutionError {
+    error: ConnectError,
+    partial_output: SessionOperationOutput,
+}
+
+impl SessionOperationExecutionError {
+    /// Build a new operation execution error from the root cause and partial output.
+    pub fn new(error: ConnectError, partial_output: SessionOperationOutput) -> Self {
+        Self {
+            error,
+            partial_output,
+        }
+    }
+
+    /// Borrow the underlying connection/session error.
+    pub fn error(&self) -> &ConnectError {
+        &self.error
+    }
+
+    /// Borrow partial child step outputs captured before the failure.
+    pub fn partial_output(&self) -> &SessionOperationOutput {
+        &self.partial_output
+    }
+
+    /// Consume the wrapper and return both the root cause and partial output.
+    pub fn into_parts(self) -> (ConnectError, SessionOperationOutput) {
+        (self.error, self.partial_output)
+    }
+}
+
+impl std::fmt::Display for SessionOperationExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for SessionOperationExecutionError {}
+
+/// Compatibility result for command-flow-specific APIs.
 #[derive(Debug, Clone)]
 pub struct CommandFlowOutput {
     pub success: bool,
@@ -515,6 +640,33 @@ mod tests {
         assert_eq!(upload.timeout_secs, Some(30));
         assert_eq!(upload.buffer_size, Some(8192));
         assert!(upload.show_progress);
+    }
+
+    #[test]
+    fn operation_execution_error_preserves_partial_output() {
+        let err = SessionOperationExecutionError::new(
+            ConnectError::ExecTimeout("show version".to_string()),
+            SessionOperationOutput {
+                success: false,
+                steps: vec![SessionOperationStepOutput {
+                    step_index: 0,
+                    mode: "Enable".to_string(),
+                    operation_summary: "terminal length 0".to_string(),
+                    success: true,
+                    exit_code: None,
+                    content: "ok".to_string(),
+                    all: "ok".to_string(),
+                    prompt: Some("router#".to_string()),
+                }],
+            },
+        );
+
+        assert!(matches!(err.error(), ConnectError::ExecTimeout(_)));
+        assert_eq!(err.partial_output().steps.len(), 1);
+        assert_eq!(
+            err.partial_output().steps[0].operation_summary,
+            "terminal length 0"
+        );
     }
 
     #[test]

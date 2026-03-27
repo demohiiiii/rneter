@@ -108,6 +108,57 @@ pub enum TxStepRollbackState {
 
 /// Detailed execution report for one block step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TxOperationStepResult {
+    /// Child step index inside one rendered operation.
+    pub step_index: usize,
+    /// Mode used for the child step.
+    pub mode: String,
+    /// Concrete child step summary, currently the rendered command text.
+    pub operation_summary: String,
+    /// Whether the child step succeeded.
+    pub success: bool,
+    /// Optional exit code captured from shell execution.
+    pub exit_code: Option<i32>,
+    /// Primary captured content for this child step.
+    pub content: String,
+    /// Full captured transcript for this child step.
+    pub all: String,
+    /// Prompt observed after the child step finished.
+    pub prompt: Option<String>,
+}
+
+impl From<SessionOperationStepOutput> for TxOperationStepResult {
+    fn from(value: SessionOperationStepOutput) -> Self {
+        Self {
+            step_index: value.step_index,
+            mode: value.mode,
+            operation_summary: value.operation_summary,
+            success: value.success,
+            exit_code: value.exit_code,
+            content: value.content,
+            all: value.all,
+            prompt: value.prompt,
+        }
+    }
+}
+
+impl From<TxOperationStepResult> for SessionOperationStepOutput {
+    fn from(value: TxOperationStepResult) -> Self {
+        Self {
+            step_index: value.step_index,
+            mode: value.mode,
+            operation_summary: value.operation_summary,
+            success: value.success,
+            exit_code: value.exit_code,
+            content: value.content,
+            all: value.all,
+            prompt: value.prompt,
+        }
+    }
+}
+
+/// Detailed execution report for one block step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TxStepResult {
     /// Original step index inside the block.
     pub step_index: usize,
@@ -119,12 +170,18 @@ pub struct TxStepResult {
     pub execution_state: TxStepExecutionState,
     /// Forward failure summary when the step failed.
     pub failure_reason: Option<String>,
+    /// Concrete child step results produced by the forward operation.
+    #[serde(default)]
+    pub forward_operation_steps: Vec<TxOperationStepResult>,
     /// Final rollback state related to this step.
     pub rollback_state: TxStepRollbackState,
     /// Rollback operation summary associated with this step, if any.
     pub rollback_operation_summary: Option<String>,
     /// Rollback failure or skip reason, if any.
     pub rollback_reason: Option<String>,
+    /// Concrete child step results produced by the rollback operation.
+    #[serde(default)]
+    pub rollback_operation_steps: Vec<TxOperationStepResult>,
 }
 
 /// Execution result of a transaction-like block.
@@ -148,6 +205,11 @@ pub struct TxResult {
     pub failure_reason: Option<String>,
     /// Rollback phase errors (can contain multiple entries).
     pub rollback_errors: Vec<String>,
+    /// Whole-resource rollback summary when a block-level rollback operation ran.
+    pub block_rollback_operation_summary: Option<String>,
+    /// Concrete child step results produced by a whole-resource rollback operation.
+    #[serde(default)]
+    pub block_rollback_steps: Vec<TxOperationStepResult>,
     /// Per-step execution and rollback details in block order.
     #[serde(default)]
     pub step_results: Vec<TxStepResult>,
@@ -225,9 +287,11 @@ impl TxStepResult {
             operation_summary: summary.description,
             execution_state: TxStepExecutionState::NotRun,
             failure_reason: None,
+            forward_operation_steps: Vec::new(),
             rollback_state: TxStepRollbackState::NotNeeded,
             rollback_operation_summary: None,
             rollback_reason: None,
+            rollback_operation_steps: Vec::new(),
         })
     }
 }
@@ -566,6 +630,8 @@ impl TxResult {
             rollback_steps: 0,
             failure_reason: None,
             rollback_errors: Vec::new(),
+            block_rollback_operation_summary: None,
+            block_rollback_steps: Vec::new(),
             step_results: Vec::new(),
         }
     }
@@ -858,6 +924,8 @@ mod tests {
             rollback_steps: 1,
             failure_reason: Some("step failed".to_string()),
             rollback_errors: vec!["undo operation failed".to_string()],
+            block_rollback_operation_summary: None,
+            block_rollback_steps: Vec::new(),
             step_results: Vec::new(),
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
@@ -878,6 +946,8 @@ mod tests {
             rollback_steps: 0,
             failure_reason: Some("step failed".to_string()),
             rollback_errors: vec!["ignored".to_string()],
+            block_rollback_operation_summary: None,
+            block_rollback_steps: Vec::new(),
             step_results: Vec::new(),
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));

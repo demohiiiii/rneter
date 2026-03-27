@@ -29,11 +29,17 @@ impl SshConnectionManager {
         command: Command,
         context: ExecutionContext,
     ) -> Result<Output, ConnectError> {
-        let mut result = self
+        let result = self
             .execute_operation_with_context(request, SessionOperation::from(command), context)
-            .await?;
-        match result.outputs.len() {
-            1 => Ok(result.outputs.remove(0)),
+            .await
+            .map_err(|err| err.into_parts().0)?;
+        match result.steps.len() {
+            1 => Ok(result
+                .steps
+                .into_iter()
+                .next()
+                .expect("single step output should exist")
+                .into_output()),
             count => Err(ConnectError::InternalServerError(format!(
                 "expected one output for command execution, got {count}"
             ))),
@@ -41,25 +47,47 @@ impl SshConnectionManager {
     }
 
     /// Execute any supported session operation using a structured connection/context pair.
+    ///
+    /// Returns the generic operation-level result model so future operation kinds
+    /// do not need to be flattened into the legacy command-flow shape.
     pub async fn execute_operation_with_context(
         &self,
         request: ConnectionRequest,
         operation: SessionOperation,
         context: ExecutionContext,
-    ) -> Result<CommandFlowOutput, ConnectError> {
+    ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
         let device_addr = request.device_addr();
         let sys = context.sys.clone();
         self.get_with_request_and_recording(request, context.security_options, None)
-            .await?;
+            .await
+            .map_err(|err| {
+                SessionOperationExecutionError::new(
+                    err,
+                    SessionOperationOutput {
+                        success: false,
+                        steps: Vec::new(),
+                    },
+                )
+            })?;
 
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            ConnectError::InternalServerError("connection cache miss".to_string())
+            SessionOperationExecutionError::new(
+                ConnectError::InternalServerError("connection cache miss".to_string()),
+                SessionOperationOutput {
+                    success: false,
+                    steps: Vec::new(),
+                },
+            )
         })?;
 
         let mut client_guard = client.write().await;
         client_guard
-            .execute_operation(&operation, sys.as_ref())
+            .execute_operation_detailed(&operation, sys.as_ref())
             .await
+            .map_err(|err| {
+                let (error, partial_output) = err.into_parts();
+                SessionOperationExecutionError::new(error, partial_output)
+            })
     }
 
     /// Execute a multi-step command flow on one live connection.
@@ -71,6 +99,8 @@ impl SshConnectionManager {
     ) -> Result<CommandFlowOutput, ConnectError> {
         self.execute_operation_with_context(request, SessionOperation::from(flow), context)
             .await
+            .map(|output| output.into_command_flow_output())
+            .map_err(|err| err.into_parts().0)
     }
 
     /// Execute a transaction-like block with structured connection/context options.

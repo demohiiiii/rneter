@@ -1,6 +1,6 @@
 use super::super::*;
 use super::tx::{
-    OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
+    OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
 use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
@@ -66,51 +66,102 @@ impl RuntimeCommandInteraction {
 }
 
 impl SharedSshClient {
-    pub(crate) async fn execute_command_flow(
+    async fn execute_command_step(
+        &mut self,
+        step_index: usize,
+        command: &Command,
+        sys: Option<&String>,
+    ) -> Result<SessionOperationStepOutput, ConnectError> {
+        let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
+        let output = self
+            .write_with_mode_and_timeout_using_command(
+                &command.command,
+                &command.mode,
+                sys,
+                timeout,
+                &command.dyn_params,
+                &command.interaction,
+            )
+            .await?;
+
+        Ok(SessionOperationStepOutput {
+            step_index,
+            mode: command.mode.clone(),
+            operation_summary: command.command.clone(),
+            success: output.success,
+            exit_code: output.exit_code,
+            content: output.content,
+            all: output.all,
+            prompt: output.prompt,
+        })
+    }
+
+    async fn execute_command_flow_detailed(
         &mut self,
         flow: &CommandFlow,
         sys: Option<&String>,
-    ) -> Result<CommandFlowOutput, ConnectError> {
+    ) -> Result<SessionOperationOutput, OperationRunError> {
         let CommandFlow {
             steps,
             stop_on_error,
         } = flow;
         let mut outputs = Vec::with_capacity(steps.len());
 
-        for command in steps {
-            let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
-            let output = self
-                .write_with_mode_and_timeout_using_command(
-                    &command.command,
-                    &command.mode,
-                    sys,
-                    timeout,
-                    &command.dyn_params,
-                    &command.interaction,
-                )
-                .await?;
+        for (step_index, command) in steps.iter().enumerate() {
+            let output = match self.execute_command_step(step_index, command, sys).await {
+                Ok(output) => output,
+                Err(error) => {
+                    return Err(OperationRunError::new(
+                        error,
+                        SessionOperationOutput {
+                            success: false,
+                            steps: outputs,
+                        },
+                    ));
+                }
+            };
 
             let step_success = output.success;
             outputs.push(output);
             if *stop_on_error && !step_success {
-                return Ok(CommandFlowOutput {
+                return Ok(SessionOperationOutput {
                     success: false,
-                    outputs,
+                    steps: outputs,
                 });
             }
         }
 
         let success = outputs.iter().all(|output| output.success);
-        Ok(CommandFlowOutput { success, outputs })
+        Ok(SessionOperationOutput {
+            success,
+            steps: outputs,
+        })
     }
 
-    pub(crate) async fn execute_operation(
+    pub(crate) async fn execute_operation_detailed(
         &mut self,
         operation: &SessionOperation,
         sys: Option<&String>,
-    ) -> Result<CommandFlowOutput, ConnectError> {
-        let flow = operation.to_command_flow()?;
-        self.execute_command_flow(&flow, sys).await
+    ) -> Result<SessionOperationOutput, OperationRunError> {
+        match operation {
+            SessionOperation::Command(command) => {
+                let step = self
+                    .execute_command_step(0, command, sys)
+                    .await
+                    .map_err(OperationRunError::from)?;
+                Ok(SessionOperationOutput {
+                    success: step.success,
+                    steps: vec![step],
+                })
+            }
+            SessionOperation::Flow(flow) => self.execute_command_flow_detailed(flow, sys).await,
+            SessionOperation::Template { template, runtime } => {
+                let flow = template
+                    .to_command_flow(runtime)
+                    .map_err(OperationRunError::from)?;
+                self.execute_command_flow_detailed(&flow, sys).await
+            }
+        }
     }
 
     fn merge_command_dyn_params(
@@ -468,7 +519,7 @@ impl TxCommandRunner for SharedSshClient {
         operation: &'a SessionOperation,
         sys: Option<&'a String>,
     ) -> OperationRunFuture<'a> {
-        Box::pin(async move { self.execute_operation(operation, sys).await })
+        Box::pin(async move { self.execute_operation_detailed(operation, sys).await })
     }
 }
 

@@ -45,16 +45,38 @@ fn print_workflow_report(result: &TxWorkflowResult) {
         if !block.rollback_errors.is_empty() {
             println!("    rollback_errors={:?}", block.rollback_errors);
         }
+        if let Some(operation_summary) = &block.block_rollback_operation_summary {
+            println!("    block_rollback_operation_summary={operation_summary}");
+        }
+        for child in &block.block_rollback_steps {
+            println!(
+                "      block_rollback_step[{}] mode={} op={} success={}",
+                child.step_index, child.mode, child.operation_summary, child.success
+            );
+        }
         for step in &block.step_results {
             println!(
                 "    step[{}] mode={} execution_state={:?} rollback_state={:?}",
                 step.step_index, step.mode, step.execution_state, step.rollback_state
             );
+            println!("      operation_summary={}", step.operation_summary);
+            for child in &step.forward_operation_steps {
+                println!(
+                    "      forward_step[{}] mode={} op={} success={}",
+                    child.step_index, child.mode, child.operation_summary, child.success
+                );
+            }
             if let Some(reason) = &step.failure_reason {
                 println!("      failure_reason={reason}");
             }
             if let Some(operation_summary) = &step.rollback_operation_summary {
                 println!("      rollback_operation_summary={operation_summary}");
+            }
+            for child in &step.rollback_operation_steps {
+                println!(
+                    "      rollback_step[{}] mode={} op={} success={}",
+                    child.step_index, child.mode, child.operation_summary, child.success
+                );
             }
             if let Some(reason) = &step.rollback_reason {
                 println!("      rollback_reason={reason}");
