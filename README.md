@@ -319,9 +319,19 @@ let template = CommandFlowTemplate::new(
 )
 .with_default_mode("Enable")
 .with_vars(vec![
-    CommandFlowTemplateVar::new("protocol").with_required(true),
-    CommandFlowTemplateVar::new("server_addr").with_required(true),
-    CommandFlowTemplateVar::new("device_path").with_required(true),
+    CommandFlowTemplateVar::new("protocol")
+        .with_label("Transfer Protocol")
+        .with_description("Transfer protocol used by the device-side copy workflow.")
+        .with_required(true)
+        .with_options(["scp", "tftp"]),
+    CommandFlowTemplateVar::new("server_addr")
+        .with_label("Server Address")
+        .with_description("SCP/TFTP server reachable from the target device.")
+        .with_required(true),
+    CommandFlowTemplateVar::new("device_path")
+        .with_label("Device Path")
+        .with_description("Destination path on the target device.")
+        .with_required(true),
 ]);
 
 let flow = template.to_command_flow(
