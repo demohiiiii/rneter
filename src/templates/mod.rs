@@ -29,4 +29,7 @@ pub use registry::{
     by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::{build_tx_block, classify_command};
-pub use transfer::build_file_transfer_command;
+pub use transfer::{
+    FileTransferDirection, FileTransferProtocol, FileTransferRequest, build_file_transfer_command,
+    build_file_transfer_flow,
+};

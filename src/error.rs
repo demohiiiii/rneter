@@ -45,6 +45,10 @@ pub enum ConnectError {
     #[error("invalid transfer request: {0}")]
     InvalidTransferRequest(String),
 
+    /// Interactive command prompt-response rules are invalid.
+    #[error("invalid command interaction: {0}")]
+    InvalidCommandInteraction(String),
+
     /// Built-in transfer workflow is not supported for the requested template.
     #[error("transfer not supported: {0}")]
     TransferNotSupported(String),

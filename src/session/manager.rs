@@ -41,14 +41,65 @@ impl SshConnectionManager {
         let mut client_guard = client.write().await;
         let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
         client_guard
-            .write_with_mode_and_timeout_using_dyn_params(
+            .write_with_mode_and_timeout_using_command(
                 &command.command,
                 &command.mode,
                 sys.as_ref(),
                 timeout,
                 &command.dyn_params,
+                &command.interaction,
             )
             .await
+    }
+
+    /// Execute a multi-step command flow on one live connection.
+    pub async fn execute_command_flow_with_context(
+        &self,
+        request: ConnectionRequest,
+        flow: CommandFlow,
+        context: ExecutionContext,
+    ) -> Result<CommandFlowOutput, ConnectError> {
+        let device_addr = request.device_addr();
+        let sys = context.sys.clone();
+        self.get_with_request_and_recording(request, context.security_options, None)
+            .await?;
+
+        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
+            ConnectError::InternalServerError("connection cache miss".to_string())
+        })?;
+
+        let mut client_guard = client.write().await;
+        let CommandFlow {
+            steps,
+            stop_on_error,
+        } = flow;
+        let mut outputs = Vec::with_capacity(steps.len());
+
+        for command in steps {
+            let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
+            let output = client_guard
+                .write_with_mode_and_timeout_using_command(
+                    &command.command,
+                    &command.mode,
+                    sys.as_ref(),
+                    timeout,
+                    &command.dyn_params,
+                    &command.interaction,
+                )
+                .await?;
+
+            let step_success = output.success;
+            outputs.push(output);
+            if stop_on_error && !step_success {
+                return Ok(CommandFlowOutput {
+                    success: false,
+                    outputs,
+                });
+            }
+        }
+
+        let success = outputs.iter().all(|output| output.success);
+        Ok(CommandFlowOutput { success, outputs })
     }
 
     /// Execute a transaction-like block with structured connection/context options.
@@ -90,19 +141,6 @@ impl SshConnectionManager {
         let mut client_guard = client.write().await;
         client_guard
             .execute_tx_workflow(&workflow, sys.as_ref())
-            .await
-    }
-
-    /// Execute a CLI-driven SCP/TFTP transfer workflow for a supported template.
-    pub async fn transfer_file_with_context(
-        &self,
-        request: ConnectionRequest,
-        template: &str,
-        transfer: DeviceFileTransferRequest,
-        context: ExecutionContext,
-    ) -> Result<Output, ConnectError> {
-        let command = crate::templates::build_file_transfer_command(template, &transfer)?;
-        self.execute_command_with_context(request, command, context)
             .await
     }
 
@@ -256,15 +294,17 @@ impl SshConnectionManager {
                             command,
                             timeout,
                             dyn_params,
+                            interaction,
                         } = job.data;
                         let timeout = Duration::from_secs(timeout.unwrap_or(60));
                         client_guard
-                            .write_with_mode_and_timeout_using_dyn_params(
+                            .write_with_mode_and_timeout_using_command(
                                 &command,
                                 &mode,
                                 job.sys.as_ref(),
                                 timeout,
                                 &dyn_params,
+                                &interaction,
                             )
                             .await
                     };

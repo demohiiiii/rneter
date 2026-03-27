@@ -234,7 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 This path requires SFTP support on the remote host. For devices that only expose CLI-driven
-transfer commands such as `copy scp:` or `copy tftp:`, continue using the existing command API.
+transfer commands such as `copy scp:` or `copy tftp:`, build a transfer flow from `templates`
+and execute it through the generic command-flow API.
 
 ### Network Device SCP/TFTP Transfers
 
@@ -242,16 +243,26 @@ For supported Cisco-like templates, `rneter` can also drive device-side `copy sc
 `copy tftp:` workflows by auto-answering the interactive prompts:
 
 ```rust
-use rneter::session::{
-    ConnectionRequest, DeviceFileTransferDirection, DeviceFileTransferProtocol,
-    DeviceFileTransferRequest, ExecutionContext, MANAGER,
-};
-use rneter::templates;
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
+use rneter::templates::{self, FileTransferDirection, FileTransferProtocol, FileTransferRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output = MANAGER
-        .transfer_file_with_context(
+    let flow = templates::build_file_transfer_flow(
+        "cisco",
+        &FileTransferRequest::new(
+            FileTransferProtocol::Scp,
+            FileTransferDirection::ToDevice,
+            "198.51.100.20".to_string(),
+            "/pub/image.bin".to_string(),
+            "flash:/image.bin".to_string(),
+        )
+        .with_credentials("deploy".to_string(), "secret".to_string())
+        .with_timeout_secs(600),
+    )?;
+
+    let result = MANAGER
+        .execute_command_flow_with_context(
             ConnectionRequest::new(
                 "admin".to_string(),
                 "192.168.1.1".to_string(),
@@ -260,21 +271,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 templates::cisco()?,
             ),
-            "cisco",
-            DeviceFileTransferRequest::new(
-                DeviceFileTransferProtocol::Scp,
-                DeviceFileTransferDirection::ToDevice,
-                "198.51.100.20".to_string(),
-                "/pub/image.bin".to_string(),
-                "flash:/image.bin".to_string(),
-            )
-            .with_credentials("deploy".to_string(), "secret".to_string())
-            .with_timeout_secs(600),
+            flow,
             ExecutionContext::default(),
         )
         .await?;
 
-    println!("Transfer output: {}", output.content);
+    if let Some(last) = result.outputs.last() {
+        println!("Transfer output: {}", last.content);
+    }
     Ok(())
 }
 ```
@@ -282,6 +286,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Built-in CLI transfer workflows currently target `cisco`, `arista`, `chaitin`, `maipu`, and
 `venustech`. Other templates can still support transfers by building custom commands and prompt
 rules on top of the same command execution API.
+
+### Custom Interactive Command Flows
+
+If a device workflow needs multiple commands or prompt patterns that are not baked into a template,
+build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to each step:
+
+```rust
+use rneter::session::{
+    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
+    PromptResponseRule,
+};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let flow = CommandFlow::new(vec![Command {
+        mode: "Enable".to_string(),
+        command: "copy http: flash:/image.bin".to_string(),
+        timeout: Some(600),
+        interaction: CommandInteraction::default()
+            .push_prompt(PromptResponseRule::new(
+                vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+                "203.0.113.10\n".to_string(),
+            ))
+            .push_prompt(PromptResponseRule::new(
+                vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
+                "/pub/image.bin\n".to_string(),
+            ))
+            .push_prompt(
+                PromptResponseRule::new(
+                    vec![r"(?i)^Destination (?:file ?name|filename).*\?\s*$".to_string()],
+                    "\n".to_string(),
+                )
+                .with_record_input(true),
+            ),
+        ..Command::default()
+    }]);
+
+    let result = MANAGER
+        .execute_command_flow_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                templates::cisco()?,
+            ),
+            flow,
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    if let Some(last) = result.outputs.last() {
+        println!("Last step output: {}", last.content);
+    }
+    Ok(())
+}
+```
+
+Runtime prompt-response rules are evaluated before template static input rules, so new SCP/TFTP/HTTP
+style wizards can usually be added without changing the underlying template definition.
 
 ### Security Levels
 

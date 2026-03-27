@@ -3,6 +3,67 @@ use super::tx::{
     CommandRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
+use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
+use regex::RegexSet;
+
+fn sanitize_runtime_prompt(line: &str) -> String {
+    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
+    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
+    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
+    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
+    without_simple
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect()
+}
+
+#[derive(Debug)]
+struct RuntimePromptMatcher {
+    patterns: RegexSet,
+    response: String,
+    record_input: bool,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeCommandInteraction {
+    prompts: Vec<RuntimePromptMatcher>,
+}
+
+impl RuntimeCommandInteraction {
+    fn build(interaction: &CommandInteraction) -> Result<Self, ConnectError> {
+        let mut prompts = Vec::with_capacity(interaction.prompts.len());
+
+        for (index, prompt) in interaction.prompts.iter().enumerate() {
+            if prompt.patterns.is_empty() {
+                return Err(ConnectError::InvalidCommandInteraction(format!(
+                    "prompt rule at index {index} must include at least one regex pattern"
+                )));
+            }
+
+            let patterns = RegexSet::new(&prompt.patterns).map_err(|err| {
+                ConnectError::InvalidCommandInteraction(format!(
+                    "invalid prompt regex at index {index}: {err}"
+                ))
+            })?;
+
+            prompts.push(RuntimePromptMatcher {
+                patterns,
+                response: prompt.response.clone(),
+                record_input: prompt.record_input,
+            });
+        }
+
+        Ok(Self { prompts })
+    }
+
+    fn read_need_write(&self, line: &str) -> Option<(String, bool)> {
+        let sanitized = sanitize_runtime_prompt(line);
+        self.prompts
+            .iter()
+            .find(|prompt| prompt.patterns.is_match(&sanitized))
+            .map(|prompt| (prompt.response.clone(), prompt.record_input))
+    }
+}
 
 impl SharedSshClient {
     fn merge_command_dyn_params(
@@ -41,7 +102,7 @@ impl SharedSshClient {
         command: &str,
         timeout: Duration,
     ) -> Result<Output, ConnectError> {
-        self.write_with_timeout_internal(command, timeout, true)
+        self.write_with_timeout_internal(command, timeout, true, &CommandInteraction::default())
             .await
     }
 
@@ -50,7 +111,9 @@ impl SharedSshClient {
         command: &str,
         timeout: Duration,
         capture_exit_status: bool,
+        interaction: &CommandInteraction,
     ) -> Result<Output, ConnectError> {
+        let runtime_interaction = RuntimeCommandInteraction::build(interaction)?;
         let handler = &mut self.handler;
 
         let recv = &mut self.recv;
@@ -112,7 +175,16 @@ impl SharedSshClient {
                             }
                             return Ok(true);
                         }
-                        if let Some((c, is_record)) = handler.read_need_write(&line_buffer) {
+                        if let Some((c, is_record)) =
+                            runtime_interaction.read_need_write(&line_buffer)
+                        {
+                            handler.read(&line_buffer);
+                            if !is_record {
+                                line_buffer.clear();
+                            }
+                            trace!("Runtime input required: '{:?}'", c);
+                            self.sender.send(c).await?;
+                        } else if let Some((c, is_record)) = handler.read_need_write(&line_buffer) {
                             handler.read(&line_buffer);
                             if !is_record {
                                 line_buffer.clear();
@@ -234,39 +306,42 @@ impl SharedSshClient {
         sys: Option<&String>,
         timeout: Duration,
     ) -> Result<Output, ConnectError> {
-        self.write_with_mode_and_timeout_using_dyn_params(
+        self.write_with_mode_and_timeout_using_command(
             command,
             mode,
             sys,
             timeout,
             &CommandDynamicParams::default(),
+            &CommandInteraction::default(),
         )
         .await
     }
 
-    /// Executes a command in a specific device mode with per-command dynamic prompt responses.
-    pub(crate) async fn write_with_mode_and_timeout_using_dyn_params(
+    /// Executes a command in a specific device mode with per-command overrides.
+    pub(crate) async fn write_with_mode_and_timeout_using_command(
         &mut self,
         command: &str,
         mode: &str,
         sys: Option<&String>,
         timeout: Duration,
         dyn_params: &CommandDynamicParams,
+        interaction: &CommandInteraction,
     ) -> Result<Output, ConnectError> {
         let previous = self.merge_command_dyn_params(dyn_params);
         let result = self
-            .write_with_mode_and_timeout_without_dyn_params(command, mode, sys, timeout)
+            .write_with_mode_and_timeout_without_overrides(command, mode, sys, timeout, interaction)
             .await;
         self.restore_command_dyn_params(previous);
         result
     }
 
-    async fn write_with_mode_and_timeout_without_dyn_params(
+    async fn write_with_mode_and_timeout_without_overrides(
         &mut self,
         command: &str,
         mode: &str,
         sys: Option<&String>,
         timeout: Duration,
+        interaction: &CommandInteraction,
     ) -> Result<Output, ConnectError> {
         let handler = &self.handler;
 
@@ -280,7 +355,7 @@ impl SharedSshClient {
         for (t_cmd, target_state) in trans_cmds {
             debug!("Trans state command: {}", t_cmd);
             let mut mode_output = self
-                .write_with_timeout_internal(&t_cmd, timeout, false)
+                .write_with_timeout_internal(&t_cmd, timeout, false, &CommandInteraction::default())
                 .await?;
             all.push_str(mode_output.all.as_str());
             if !mode_output.success {
@@ -306,7 +381,7 @@ impl SharedSshClient {
         }
 
         let mut cmd_output = self
-            .write_with_timeout_internal(command, timeout, true)
+            .write_with_timeout_internal(command, timeout, true, interaction)
             .await?;
         all.push_str(cmd_output.all.as_str());
 
@@ -352,5 +427,40 @@ impl TxCommandRunner for SharedSshClient {
             self.write_with_mode_and_timeout(command, mode, sys, timeout)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_command_interaction_matches_sanitized_prompt() {
+        let interaction = RuntimeCommandInteraction::build(&CommandInteraction {
+            prompts: vec![PromptResponseRule::new(
+                vec![r"^Password:\s*$".to_string()],
+                "secret\n".to_string(),
+            )],
+        })
+        .expect("build interaction");
+
+        let prompt = "\u{1b}[31mPassword:\u{1b}[0m";
+        assert_eq!(
+            interaction.read_need_write(prompt),
+            Some(("secret\n".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn runtime_command_interaction_rejects_invalid_regex() {
+        let err = RuntimeCommandInteraction::build(&CommandInteraction {
+            prompts: vec![PromptResponseRule::new(
+                vec!["[".to_string()],
+                "secret\n".to_string(),
+            )],
+        })
+        .expect_err("invalid regex should fail");
+
+        assert!(matches!(err, ConnectError::InvalidCommandInteraction(_)));
     }
 }

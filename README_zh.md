@@ -156,23 +156,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的网络设备，仍然更适合继续使用现有的命令执行 API。
+这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的网络设备，更适合先通过 `templates` 构建 transfer flow，再交给通用的 command-flow 执行 API。
 
 ### 网络设备 SCP/TFTP 传输
 
 对于已支持的 Cisco-like 模板，`rneter` 也可以驱动设备侧的 `copy scp:` / `copy tftp:` 流程，并自动回答交互提示：
 
 ```rust
-use rneter::session::{
-    ConnectionRequest, DeviceFileTransferDirection, DeviceFileTransferProtocol,
-    DeviceFileTransferRequest, ExecutionContext, MANAGER,
-};
-use rneter::templates;
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
+use rneter::templates::{self, FileTransferDirection, FileTransferProtocol, FileTransferRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output = MANAGER
-        .transfer_file_with_context(
+    let flow = templates::build_file_transfer_flow(
+        "cisco",
+        &FileTransferRequest::new(
+            FileTransferProtocol::Scp,
+            FileTransferDirection::ToDevice,
+            "198.51.100.20".to_string(),
+            "/pub/image.bin".to_string(),
+            "flash:/image.bin".to_string(),
+        )
+        .with_credentials("deploy".to_string(), "secret".to_string())
+        .with_timeout_secs(600),
+    )?;
+
+    let result = MANAGER
+        .execute_command_flow_with_context(
             ConnectionRequest::new(
                 "admin".to_string(),
                 "192.168.1.1".to_string(),
@@ -181,26 +191,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 templates::cisco()?,
             ),
-            "cisco",
-            DeviceFileTransferRequest::new(
-                DeviceFileTransferProtocol::Scp,
-                DeviceFileTransferDirection::ToDevice,
-                "198.51.100.20".to_string(),
-                "/pub/image.bin".to_string(),
-                "flash:/image.bin".to_string(),
-            )
-            .with_credentials("deploy".to_string(), "secret".to_string())
-            .with_timeout_secs(600),
+            flow,
             ExecutionContext::default(),
         )
         .await?;
 
-    println!("传输输出: {}", output.content);
+    if let Some(last) = result.outputs.last() {
+        println!("传输输出: {}", last.content);
+    }
     Ok(())
 }
 ```
 
 当前内置 CLI 传输 workflow 已覆盖 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech`。其它模板仍然可以基于同一套命令执行 API，自行扩展对应的命令和交互提示规则。
+
+### 自定义交互命令流程
+
+如果设备上的流程需要多条命令，或者 prompt 文案并没有内置在模板里，可以直接构建 `CommandFlow`，并给每一步挂运行时 `PromptResponseRule`：
+
+```rust
+use rneter::session::{
+    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
+    PromptResponseRule,
+};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let flow = CommandFlow::new(vec![Command {
+        mode: "Enable".to_string(),
+        command: "copy http: flash:/image.bin".to_string(),
+        timeout: Some(600),
+        interaction: CommandInteraction::default()
+            .push_prompt(PromptResponseRule::new(
+                vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+                "203.0.113.10\n".to_string(),
+            ))
+            .push_prompt(PromptResponseRule::new(
+                vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
+                "/pub/image.bin\n".to_string(),
+            ))
+            .push_prompt(
+                PromptResponseRule::new(
+                    vec![r"(?i)^Destination (?:file ?name|filename).*\?\s*$".to_string()],
+                    "\n".to_string(),
+                )
+                .with_record_input(true),
+            ),
+        ..Command::default()
+    }]);
+
+    let result = MANAGER
+        .execute_command_flow_with_context(
+            ConnectionRequest::new(
+                "admin".to_string(),
+                "192.168.1.1".to_string(),
+                22,
+                "password".to_string(),
+                None,
+                templates::cisco()?,
+            ),
+            flow,
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    if let Some(last) = result.outputs.last() {
+        println!("最后一步输出: {}", last.content);
+    }
+    Ok(())
+}
+```
+
+运行时 prompt-response 规则会优先于模板里的静态输入规则生效，所以后续新增 `scp`、`tftp`、`http` 这类向导式 CLI 交互时，通常不需要再改底层模板定义。
 
 ### 会话录制与回放
 

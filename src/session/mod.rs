@@ -9,7 +9,7 @@
 //! - [`SshConnectionManager`] - Connection pool manager (singleton via `MANAGER`)
 //! - [`SharedSshClient`] - Individual SSH connection with state tracking
 //! - [`Command`] - Command configuration for device execution
-//! - [`DeviceFileTransferRequest`] - Device-side CLI transfer configuration
+//! - [`CommandFlow`] - Multi-step interactive command flow
 //! - [`FileUploadRequest`] - SFTP upload configuration
 //! - [`Output`] - Command execution results
 
@@ -144,22 +144,6 @@ pub struct CommandDynamicParams {
     pub enable_password: Option<String>,
     #[serde(default, alias = "SudoPassword")]
     pub sudo_password: Option<String>,
-    #[serde(default, alias = "TransferRemoteHost")]
-    pub transfer_remote_host: Option<String>,
-    #[serde(default, alias = "TransferSourceUsername")]
-    pub transfer_source_username: Option<String>,
-    #[serde(default, alias = "TransferDestinationUsername")]
-    pub transfer_destination_username: Option<String>,
-    #[serde(default, alias = "TransferSourcePath")]
-    pub transfer_source_path: Option<String>,
-    #[serde(default, alias = "TransferDestinationPath")]
-    pub transfer_destination_path: Option<String>,
-    #[serde(default, alias = "TransferPassword")]
-    pub transfer_password: Option<String>,
-    #[serde(default, alias = "TransferConfirm")]
-    pub transfer_confirm: Option<String>,
-    #[serde(default, alias = "TransferOverwrite")]
-    pub transfer_overwrite: Option<String>,
     /// Extra prompt-response pairs for template-specific interactive flows.
     #[serde(default, flatten)]
     pub extra: HashMap<String, String>,
@@ -168,17 +152,7 @@ pub struct CommandDynamicParams {
 impl CommandDynamicParams {
     /// Returns true when no structured or extra prompt responses are set.
     pub fn is_empty(&self) -> bool {
-        self.enable_password.is_none()
-            && self.sudo_password.is_none()
-            && self.transfer_remote_host.is_none()
-            && self.transfer_source_username.is_none()
-            && self.transfer_destination_username.is_none()
-            && self.transfer_source_path.is_none()
-            && self.transfer_destination_path.is_none()
-            && self.transfer_password.is_none()
-            && self.transfer_confirm.is_none()
-            && self.transfer_overwrite.is_none()
-            && self.extra.is_empty()
+        self.enable_password.is_none() && self.sudo_password.is_none() && self.extra.is_empty()
     }
 
     /// Insert a template-specific prompt-response pair.
@@ -199,32 +173,62 @@ impl CommandDynamicParams {
         if let Some(value) = self.sudo_password.as_ref() {
             values.insert("SudoPassword".to_string(), value.clone());
         }
-        if let Some(value) = self.transfer_remote_host.as_ref() {
-            values.insert("TransferRemoteHost".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_source_username.as_ref() {
-            values.insert("TransferSourceUsername".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_destination_username.as_ref() {
-            values.insert("TransferDestinationUsername".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_source_path.as_ref() {
-            values.insert("TransferSourcePath".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_destination_path.as_ref() {
-            values.insert("TransferDestinationPath".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_password.as_ref() {
-            values.insert("TransferPassword".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_confirm.as_ref() {
-            values.insert("TransferConfirm".to_string(), value.clone());
-        }
-        if let Some(value) = self.transfer_overwrite.as_ref() {
-            values.insert("TransferOverwrite".to_string(), value.clone());
-        }
 
         values
+    }
+}
+
+/// One runtime prompt-response rule attached directly to a command.
+///
+/// These rules are matched before template-defined static input rules so
+/// protocol-specific workflows can inject new interactive prompts without
+/// modifying the underlying device template.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PromptResponseRule {
+    /// Regex patterns that identify the prompt requiring a response.
+    pub patterns: Vec<String>,
+    /// Raw response sent back to the remote device when a pattern matches.
+    pub response: String,
+    /// Whether the response-producing prompt should remain in captured output.
+    #[serde(default)]
+    pub record_input: bool,
+}
+
+impl PromptResponseRule {
+    /// Build a prompt-response rule from regex patterns and a raw response payload.
+    pub fn new(patterns: Vec<String>, response: String) -> Self {
+        Self {
+            patterns,
+            response,
+            record_input: false,
+        }
+    }
+
+    /// Control whether the matched prompt should remain in captured output.
+    pub fn with_record_input(mut self, record_input: bool) -> Self {
+        self.record_input = record_input;
+        self
+    }
+}
+
+/// Runtime interactive behavior for a single command execution.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CommandInteraction {
+    /// Prompt-response rules evaluated before template static input rules.
+    #[serde(default)]
+    pub prompts: Vec<PromptResponseRule>,
+}
+
+impl CommandInteraction {
+    /// Returns true when the command has no runtime prompt-response rules.
+    pub fn is_empty(&self) -> bool {
+        self.prompts.is_empty()
+    }
+
+    /// Append a runtime prompt-response rule.
+    pub fn push_prompt(mut self, prompt: PromptResponseRule) -> Self {
+        self.prompts.push(prompt);
+        self
     }
 }
 
@@ -258,6 +262,13 @@ pub struct Command {
     /// expects the response to be submitted immediately.
     #[serde(default)]
     pub dyn_params: CommandDynamicParams,
+
+    /// Runtime prompt-response rules evaluated before template static input rules.
+    ///
+    /// Prefer this for protocol-specific interactive workflows such as `copy scp:`,
+    /// `copy tftp:`, or future HTTP-style wizards that should not require template edits.
+    #[serde(default)]
+    pub interaction: CommandInteraction,
 }
 
 /// Configuration for uploading a local file to a remote host over SFTP.
@@ -310,93 +321,42 @@ impl FileUploadRequest {
     }
 }
 
-fn default_transfer_mode() -> String {
-    "Enable".to_string()
+fn default_stop_on_error() -> bool {
+    true
 }
 
-/// File transfer protocol executed by the device CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceFileTransferProtocol {
-    Scp,
-    Tftp,
-}
-
-/// Direction of the transfer from the device's point of view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceFileTransferDirection {
-    /// Pull a file from the external server onto the device.
-    ToDevice,
-    /// Push a file from the device to the external server.
-    FromDevice,
-}
-
-/// High-level request for CLI-driven device file transfer workflows.
+/// Multi-step command flow executed sequentially on one connection.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DeviceFileTransferRequest {
-    /// Transfer protocol used by the device.
-    pub protocol: DeviceFileTransferProtocol,
-    /// Whether the device is importing or exporting the file.
-    pub direction: DeviceFileTransferDirection,
-    /// Address or DNS name of the external SCP/TFTP server reachable from the device.
-    pub server_addr: String,
-    /// Path on the external SCP/TFTP server.
-    pub remote_path: String,
-    /// Path on the device filesystem, e.g. `flash:/image.bin`.
-    pub device_path: String,
-    /// Optional SCP username.
+pub struct CommandFlow {
+    /// Ordered list of commands executed on the same live session.
     #[serde(default)]
-    pub username: Option<String>,
-    /// Optional SCP password.
-    #[serde(default)]
-    pub password: Option<String>,
-    /// Device mode used to run the transfer command. Defaults to `Enable`.
-    #[serde(default = "default_transfer_mode")]
-    pub mode: String,
-    /// Optional transfer timeout in seconds.
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
+    pub steps: Vec<Command>,
+    /// Stop immediately after the first command that reports `success = false`.
+    #[serde(default = "default_stop_on_error")]
+    pub stop_on_error: bool,
 }
 
-impl DeviceFileTransferRequest {
-    /// Build a new CLI transfer request with an `Enable`-mode default.
-    pub fn new(
-        protocol: DeviceFileTransferProtocol,
-        direction: DeviceFileTransferDirection,
-        server_addr: String,
-        remote_path: String,
-        device_path: String,
-    ) -> Self {
+impl Default for CommandFlow {
+    fn default() -> Self {
         Self {
-            protocol,
-            direction,
-            server_addr,
-            remote_path,
-            device_path,
-            username: None,
-            password: None,
-            mode: default_transfer_mode(),
-            timeout_secs: None,
+            steps: Vec::new(),
+            stop_on_error: true,
+        }
+    }
+}
+
+impl CommandFlow {
+    /// Build a command flow from preconstructed command steps.
+    pub fn new(steps: Vec<Command>) -> Self {
+        Self {
+            steps,
+            ..Self::default()
         }
     }
 
-    /// Attach SCP credentials for the transfer.
-    pub fn with_credentials(mut self, username: String, password: String) -> Self {
-        self.username = Some(username);
-        self.password = Some(password);
-        self
-    }
-
-    /// Override the device mode used to run the transfer command.
-    pub fn with_mode(mut self, mode: String) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// Override the transfer timeout in seconds.
-    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
-        self.timeout_secs = Some(timeout_secs);
+    /// Override whether execution should stop after the first unsuccessful step.
+    pub fn with_stop_on_error(mut self, stop_on_error: bool) -> Self {
+        self.stop_on_error = stop_on_error;
         self
     }
 }
@@ -410,6 +370,7 @@ pub struct CmdJob {
 }
 
 /// The output result of a command execution.
+#[derive(Debug, Clone)]
 pub struct Output {
     pub success: bool,
     /// Exit code captured from shell execution when supported by the active handler.
@@ -418,6 +379,13 @@ pub struct Output {
     pub all: String,
     /// Prompt captured by the internal state machine after command execution.
     pub prompt: Option<String>,
+}
+
+/// Aggregated result for a multi-step command flow.
+#[derive(Debug, Clone)]
+pub struct CommandFlowOutput {
+    pub success: bool,
+    pub outputs: Vec<Output>,
 }
 
 /// SSH connection pool manager.
@@ -489,60 +457,50 @@ mod tests {
         assert!(cmd.mode.is_empty());
         assert!(cmd.command.is_empty());
         assert!(cmd.dyn_params.is_empty());
+        assert!(cmd.interaction.is_empty());
     }
 
     #[test]
-    fn command_dynamic_params_accept_legacy_runtime_keys() {
+    fn command_dynamic_params_collect_unknown_keys_into_extra() {
         let cmd: Command = serde_json::from_value(serde_json::json!({
             "mode": "Enable",
-            "command": "copy scp: flash:/image.bin",
+            "command": "show version",
             "dyn_params": {
-                "TransferRemoteHost": "198.51.100.20\n",
-                "TransferPassword": "secret\n",
+                "EnablePassword": "enable\n",
+                "SudoPassword": "sudo\n",
                 "CustomPrompt": "yes\n"
             }
         }))
         .expect("deserialize command");
 
-        assert_eq!(
-            cmd.dyn_params.transfer_remote_host.as_deref(),
-            Some("198.51.100.20\n")
-        );
-        assert_eq!(
-            cmd.dyn_params.transfer_password.as_deref(),
-            Some("secret\n")
-        );
+        assert_eq!(cmd.dyn_params.enable_password.as_deref(), Some("enable\n"));
+        assert_eq!(cmd.dyn_params.sudo_password.as_deref(), Some("sudo\n"));
         assert_eq!(
             cmd.dyn_params.extra.get("CustomPrompt"),
             Some(&"yes\n".to_string())
         );
         assert_eq!(
-            cmd.dyn_params.runtime_values().get("TransferRemoteHost"),
-            Some(&"198.51.100.20\n".to_string())
+            cmd.dyn_params.runtime_values().get("EnablePassword"),
+            Some(&"enable\n".to_string())
         );
     }
 
     #[test]
-    fn device_file_transfer_request_builder_overrides_defaults() {
-        let transfer = DeviceFileTransferRequest::new(
-            DeviceFileTransferProtocol::Scp,
-            DeviceFileTransferDirection::ToDevice,
-            "192.0.2.10".to_string(),
-            "/images/new.bin".to_string(),
-            "flash:/new.bin".to_string(),
-        )
-        .with_credentials("backup".to_string(), "secret".to_string())
-        .with_mode("Config".to_string())
-        .with_timeout_secs(300);
+    fn command_flow_defaults_to_stop_on_error() {
+        let flow = CommandFlow::default();
 
-        assert_eq!(transfer.protocol, DeviceFileTransferProtocol::Scp);
-        assert_eq!(transfer.direction, DeviceFileTransferDirection::ToDevice);
-        assert_eq!(transfer.server_addr, "192.0.2.10");
-        assert_eq!(transfer.remote_path, "/images/new.bin");
-        assert_eq!(transfer.device_path, "flash:/new.bin");
-        assert_eq!(transfer.username.as_deref(), Some("backup"));
-        assert_eq!(transfer.password.as_deref(), Some("secret"));
-        assert_eq!(transfer.mode, "Config");
-        assert_eq!(transfer.timeout_secs, Some(300));
+        assert!(flow.steps.is_empty());
+        assert!(flow.stop_on_error);
+    }
+
+    #[test]
+    fn prompt_response_rule_builder_sets_recording_flag() {
+        let rule =
+            PromptResponseRule::new(vec![r"^Password:\s*$".to_string()], "secret\n".to_string())
+                .with_record_input(true);
+
+        assert_eq!(rule.patterns, vec![r"^Password:\s*$".to_string()]);
+        assert_eq!(rule.response, "secret\n");
+        assert!(rule.record_input);
     }
 }
