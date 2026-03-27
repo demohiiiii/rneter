@@ -19,9 +19,9 @@ const MISSING_PROMPT_AFTER_FIXTURE: &str = r#"{"ts_ms":1,"event":{"kind":"connec
 "#;
 const TX_EVENTS_FIXTURE: &str = r#"{"ts_ms":1,"event":{"kind":"connection_established","device_addr":"admin@192.168.1.1:22","prompt_after":"router#","fsm_prompt_after":"enable"}}
 {"ts_ms":2,"event":{"kind":"tx_block_started","block_name":"cfg-1","block_kind":"config"}}
-{"ts_ms":3,"event":{"kind":"tx_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","command":"object network WEB01"}}
+{"ts_ms":3,"event":{"kind":"tx_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","operation_summary":"object network WEB01"}}
 {"ts_ms":4,"event":{"kind":"tx_rollback_started","block_name":"cfg-1"}}
-{"ts_ms":5,"event":{"kind":"tx_rollback_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","command":"no object network WEB01"}}
+{"ts_ms":5,"event":{"kind":"tx_rollback_step_succeeded","block_name":"cfg-1","step_index":0,"mode":"Config","operation_summary":"no object network WEB01"}}
 {"ts_ms":6,"event":{"kind":"tx_block_finished","block_name":"cfg-1","committed":false,"rollback_attempted":true,"rollback_succeeded":true}}
 {"ts_ms":7,"event":{"kind":"command_output","command":"show version","mode":"Enable","prompt_before":"router#","prompt_after":"router#","fsm_prompt_before":"enable","fsm_prompt_after":"enable","success":true,"content":"Version 1.0","all":"show version\nVersion 1.0\nrouter#"}}
 "#;

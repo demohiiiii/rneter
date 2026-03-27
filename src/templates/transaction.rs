@@ -1,5 +1,5 @@
 use crate::error::ConnectError;
-use crate::session::{CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
+use crate::session::{Command, CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
 
 use super::catalog::template_metadata;
 use super::linux::{LinuxCommandType, classify_linux_command};
@@ -65,12 +65,13 @@ pub fn build_tx_block(
             rollback_policy: RollbackPolicy::None,
             steps: commands
                 .iter()
-                .map(|cmd| TxStep {
-                    mode: mode.to_string(),
-                    command: cmd.clone(),
-                    timeout_secs,
-                    rollback_command: None,
-                    rollback_on_failure: false,
+                .map(|cmd| {
+                    TxStep::new(Command {
+                        mode: mode.to_string(),
+                        command: cmd.clone(),
+                        timeout: timeout_secs,
+                        ..Command::default()
+                    })
                 })
                 .collect(),
             fail_fast: true,
@@ -85,12 +86,13 @@ pub fn build_tx_block(
 
     let steps = commands
         .iter()
-        .map(|cmd| TxStep {
-            mode: mode.to_string(),
-            command: cmd.clone(),
-            timeout_secs,
-            rollback_command: None,
-            rollback_on_failure: false,
+        .map(|cmd| {
+            TxStep::new(Command {
+                mode: mode.to_string(),
+                command: cmd.clone(),
+                timeout: timeout_secs,
+                ..Command::default()
+            })
         })
         .collect();
 
@@ -98,9 +100,15 @@ pub fn build_tx_block(
         name: block_name.to_string(),
         kind: CommandBlockKind::Config,
         rollback_policy: RollbackPolicy::WholeResource {
-            mode: mode.to_string(),
-            undo_command: undo,
-            timeout_secs,
+            rollback: Box::new(
+                Command {
+                    mode: mode.to_string(),
+                    command: undo,
+                    timeout: timeout_secs,
+                    ..Command::default()
+                }
+                .into(),
+            ),
             trigger_step_index: 0,
         },
         steps,
@@ -125,7 +133,7 @@ mod tests {
             .expect("build show tx");
         assert_eq!(tx.kind, CommandBlockKind::Show);
         assert!(matches!(tx.rollback_policy, RollbackPolicy::None));
-        assert!(tx.steps.iter().all(|s| s.rollback_command.is_none()));
+        assert!(tx.steps.iter().all(|s| s.rollback.is_none()));
     }
 
     #[test]
@@ -147,7 +155,7 @@ mod tests {
             tx.rollback_policy,
             RollbackPolicy::WholeResource { .. }
         ));
-        assert!(tx.steps.iter().all(|s| s.rollback_command.is_none()));
+        assert!(tx.steps.iter().all(|s| s.rollback.is_none()));
     }
 
     #[test]

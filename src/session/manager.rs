@@ -29,34 +29,22 @@ impl SshConnectionManager {
         command: Command,
         context: ExecutionContext,
     ) -> Result<Output, ConnectError> {
-        let device_addr = request.device_addr();
-        let sys = context.sys.clone();
-        self.get_with_request_and_recording(request, context.security_options, None)
+        let mut result = self
+            .execute_operation_with_context(request, SessionOperation::from(command), context)
             .await?;
-
-        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            ConnectError::InternalServerError("connection cache miss".to_string())
-        })?;
-
-        let mut client_guard = client.write().await;
-        let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
-        client_guard
-            .write_with_mode_and_timeout_using_command(
-                &command.command,
-                &command.mode,
-                sys.as_ref(),
-                timeout,
-                &command.dyn_params,
-                &command.interaction,
-            )
-            .await
+        match result.outputs.len() {
+            1 => Ok(result.outputs.remove(0)),
+            count => Err(ConnectError::InternalServerError(format!(
+                "expected one output for command execution, got {count}"
+            ))),
+        }
     }
 
-    /// Execute a multi-step command flow on one live connection.
-    pub async fn execute_command_flow_with_context(
+    /// Execute any supported session operation using a structured connection/context pair.
+    pub async fn execute_operation_with_context(
         &self,
         request: ConnectionRequest,
-        flow: CommandFlow,
+        operation: SessionOperation,
         context: ExecutionContext,
     ) -> Result<CommandFlowOutput, ConnectError> {
         let device_addr = request.device_addr();
@@ -69,37 +57,20 @@ impl SshConnectionManager {
         })?;
 
         let mut client_guard = client.write().await;
-        let CommandFlow {
-            steps,
-            stop_on_error,
-        } = flow;
-        let mut outputs = Vec::with_capacity(steps.len());
+        client_guard
+            .execute_operation(&operation, sys.as_ref())
+            .await
+    }
 
-        for command in steps {
-            let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
-            let output = client_guard
-                .write_with_mode_and_timeout_using_command(
-                    &command.command,
-                    &command.mode,
-                    sys.as_ref(),
-                    timeout,
-                    &command.dyn_params,
-                    &command.interaction,
-                )
-                .await?;
-
-            let step_success = output.success;
-            outputs.push(output);
-            if stop_on_error && !step_success {
-                return Ok(CommandFlowOutput {
-                    success: false,
-                    outputs,
-                });
-            }
-        }
-
-        let success = outputs.iter().all(|output| output.success);
-        Ok(CommandFlowOutput { success, outputs })
+    /// Execute a multi-step command flow on one live connection.
+    pub async fn execute_command_flow_with_context(
+        &self,
+        request: ConnectionRequest,
+        flow: CommandFlow,
+        context: ExecutionContext,
+    ) -> Result<CommandFlowOutput, ConnectError> {
+        self.execute_operation_with_context(request, SessionOperation::from(flow), context)
+            .await
     }
 
     /// Execute a transaction-like block with structured connection/context options.

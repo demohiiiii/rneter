@@ -108,33 +108,33 @@ pub enum SessionEvent {
         block_name: String,
         step_index: usize,
         mode: String,
-        command: String,
+        operation_summary: String,
     },
     /// One forward step inside transaction block failed.
     TxStepFailed {
         block_name: String,
         step_index: usize,
         mode: String,
-        command: String,
+        operation_summary: String,
         reason: String,
     },
     /// Rollback phase started after forward failure.
     TxRollbackStarted {
         block_name: String,
     },
-    /// One rollback command succeeded.
+    /// One rollback operation succeeded.
     TxRollbackStepSucceeded {
         block_name: String,
         step_index: Option<usize>,
         mode: String,
-        command: String,
+        operation_summary: String,
     },
-    /// One rollback command failed.
+    /// One rollback operation failed.
     TxRollbackStepFailed {
         block_name: String,
         step_index: Option<usize>,
         mode: String,
-        command: String,
+        operation_summary: String,
         reason: String,
     },
     TxBlockFinished {

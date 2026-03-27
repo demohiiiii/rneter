@@ -16,12 +16,8 @@ pub enum RollbackPolicy {
     None,
     /// Roll back the whole resource with one command.
     WholeResource {
-        /// Mode used to execute the rollback command.
-        mode: String,
-        /// Single compensating command for the whole block.
-        undo_command: String,
-        /// Optional timeout for rollback command execution.
-        timeout_secs: Option<u64>,
+        /// Compensating operation for the whole block.
+        rollback: Box<SessionOperation>,
         /// Only run whole-resource rollback when this step index has executed
         /// successfully. Defaults to first command (index 0).
         #[serde(default = "default_whole_resource_trigger_step_index")]
@@ -35,19 +31,15 @@ fn default_whole_resource_trigger_step_index() -> usize {
     0
 }
 
-/// One command step inside a block.
+/// One step inside a block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TxStep {
-    /// Target mode before running this step.
-    pub mode: String,
-    /// Forward command.
-    pub command: String,
-    /// Optional timeout for this step.
-    pub timeout_secs: Option<u64>,
-    /// Compensating command for `PerStep` rollback policy.
-    pub rollback_command: Option<String>,
-    /// Whether to run this step's rollback command even when the forward
-    /// command of this very step failed.
+    /// Forward operation executed for this step.
+    pub run: SessionOperation,
+    /// Compensating operation for `PerStep` rollback policy.
+    pub rollback: Option<SessionOperation>,
+    /// Whether to run this step's rollback operation even when the forward
+    /// operation of this very step failed.
     ///
     /// Default is `false`: only previously successful steps are rolled back.
     #[serde(default)]
@@ -69,19 +61,15 @@ pub struct TxBlock {
     pub fail_fast: bool,
 }
 
-/// Planned rollback command.
+/// Planned rollback operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedRollback {
-    /// Step index associated with this rollback command.
+    /// Step index associated with this rollback operation.
     ///
     /// `None` means the rollback is block-level (`WholeResource`).
     pub step_index: Option<usize>,
-    /// Mode used for rollback command execution.
-    pub mode: String,
-    /// Rollback command text.
-    pub command: String,
-    /// Optional timeout for this rollback command.
-    pub timeout_secs: Option<u64>,
+    /// Rollback operation to execute.
+    pub operation: SessionOperation,
 }
 
 /// Final forward execution state of one step.
@@ -91,9 +79,9 @@ pub enum TxStepExecutionState {
     /// Step was not attempted because execution stopped earlier.
     #[default]
     NotRun,
-    /// Forward command completed successfully.
+    /// Forward operation completed successfully.
     Succeeded,
-    /// Forward command was attempted and failed.
+    /// Forward operation was attempted and failed.
     Failed,
 }
 
@@ -104,9 +92,9 @@ pub enum TxStepRollbackState {
     /// No rollback was needed for this step.
     #[default]
     NotNeeded,
-    /// Step-level rollback command succeeded.
+    /// Step-level rollback operation succeeded.
     Succeeded,
-    /// Step-level rollback command failed.
+    /// Step-level rollback operation failed.
     Failed,
     /// Step-level rollback was skipped.
     Skipped,
@@ -125,16 +113,16 @@ pub struct TxStepResult {
     pub step_index: usize,
     /// Mode used for forward execution.
     pub mode: String,
-    /// Forward command text.
-    pub command: String,
+    /// Forward operation summary text.
+    pub operation_summary: String,
     /// Final forward execution state.
     pub execution_state: TxStepExecutionState,
     /// Forward failure summary when the step failed.
     pub failure_reason: Option<String>,
     /// Final rollback state related to this step.
     pub rollback_state: TxStepRollbackState,
-    /// Rollback command associated with this step, if any.
-    pub rollback_command: Option<String>,
+    /// Rollback operation summary associated with this step, if any.
+    pub rollback_operation_summary: Option<String>,
     /// Rollback failure or skip reason, if any.
     pub rollback_reason: Option<String>,
 }
@@ -154,7 +142,7 @@ pub struct TxResult {
     pub rollback_attempted: bool,
     /// Whether rollback phase ended without rollback errors.
     pub rollback_succeeded: bool,
-    /// Number of rollback commands attempted.
+    /// Number of rollback operations attempted.
     pub rollback_steps: usize,
     /// First-level failure summary for the forward phase.
     pub failure_reason: Option<String>,
@@ -196,27 +184,172 @@ pub struct TxWorkflowResult {
 }
 
 impl TxStep {
-    pub(crate) fn rollback_command_text(&self) -> Option<&str> {
-        self.rollback_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+    /// Build a transaction step from any supported session operation.
+    pub fn new<T>(run: T) -> Self
+    where
+        T: Into<SessionOperation>,
+    {
+        Self {
+            run: run.into(),
+            rollback: None,
+            rollback_on_failure: false,
+        }
+    }
+
+    /// Attach an optional rollback operation to the step.
+    pub fn with_rollback<T>(mut self, rollback: T) -> Self
+    where
+        T: Into<SessionOperation>,
+    {
+        self.rollback = Some(rollback.into());
+        self
+    }
+
+    /// Control whether a failed forward step should run its own rollback.
+    pub fn with_rollback_on_failure(mut self, rollback_on_failure: bool) -> Self {
+        self.rollback_on_failure = rollback_on_failure;
+        self
+    }
+
+    pub(crate) fn rollback_operation(&self) -> Option<&SessionOperation> {
+        self.rollback.as_ref()
     }
 }
 
 impl TxStepResult {
-    pub fn from_step(step_index: usize, step: &TxStep) -> Self {
-        Self {
+    pub fn from_step(step_index: usize, step: &TxStep) -> Result<Self, ConnectError> {
+        let summary = step.run.summary()?;
+        Ok(Self {
             step_index,
-            mode: step.mode.clone(),
-            command: step.command.clone(),
+            mode: summary.mode,
+            operation_summary: summary.description,
             execution_state: TxStepExecutionState::NotRun,
             failure_reason: None,
             rollback_state: TxStepRollbackState::NotNeeded,
-            rollback_command: None,
+            rollback_operation_summary: None,
             rollback_reason: None,
+        })
+    }
+}
+
+impl SessionOperation {
+    pub fn to_command_flow(&self) -> Result<CommandFlow, ConnectError> {
+        match self {
+            SessionOperation::Command(command) => {
+                validate_command(command, "session operation command")?;
+                Ok(CommandFlow::new(vec![command.clone()]))
+            }
+            SessionOperation::Flow(flow) => {
+                validate_command_flow(flow, "session operation flow")?;
+                Ok(flow.clone())
+            }
+            SessionOperation::Template { template, runtime } => {
+                let flow = template.to_command_flow(runtime)?;
+                validate_command_flow(&flow, "session operation template")?;
+                Ok(flow)
+            }
         }
     }
+
+    pub(crate) fn summary_impl(&self) -> Result<SessionOperationSummary, ConnectError> {
+        match self {
+            SessionOperation::Command(command) => Ok(SessionOperationSummary {
+                kind: "command".to_string(),
+                mode: command.mode.clone(),
+                description: command.command.clone(),
+                step_count: 1,
+            }),
+            SessionOperation::Flow(flow) => {
+                validate_command_flow(flow, "session operation flow")?;
+                let (mode, description) = summarize_command_flow(flow, None);
+                Ok(SessionOperationSummary {
+                    kind: "flow".to_string(),
+                    mode,
+                    description,
+                    step_count: flow.steps.len(),
+                })
+            }
+            SessionOperation::Template { template, runtime } => {
+                let flow = template.to_command_flow(runtime)?;
+                validate_command_flow(&flow, "session operation template")?;
+                let (mode, description) =
+                    summarize_command_flow(&flow, Some(template.name.as_str()));
+                Ok(SessionOperationSummary {
+                    kind: "template".to_string(),
+                    mode,
+                    description,
+                    step_count: flow.steps.len(),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn display_summary(&self) -> Result<(String, String), ConnectError> {
+        let summary = self.summary_impl()?;
+        Ok((summary.mode, summary.description))
+    }
+
+    pub(crate) fn validate(&self, context: &str) -> Result<(), ConnectError> {
+        match self {
+            SessionOperation::Command(command) => validate_command(command, context),
+            SessionOperation::Flow(flow) => validate_command_flow(flow, context),
+            SessionOperation::Template { template, runtime } => {
+                let flow = template.to_command_flow(runtime)?;
+                validate_command_flow(&flow, context)
+            }
+        }
+    }
+}
+
+fn validate_command(command: &Command, context: &str) -> Result<(), ConnectError> {
+    if command.mode.trim().is_empty() {
+        return Err(ConnectError::InvalidTransaction(format!(
+            "{context}: command mode is empty"
+        )));
+    }
+    if command.command.trim().is_empty() {
+        return Err(ConnectError::InvalidTransaction(format!(
+            "{context}: command text is empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_command_flow(flow: &CommandFlow, context: &str) -> Result<(), ConnectError> {
+    if flow.steps.is_empty() {
+        return Err(ConnectError::InvalidTransaction(format!(
+            "{context}: flow has no steps"
+        )));
+    }
+
+    for (index, command) in flow.steps.iter().enumerate() {
+        validate_command(command, &format!("{context}: flow step[{index}]"))?;
+    }
+
+    Ok(())
+}
+
+fn summarize_command_flow(flow: &CommandFlow, template_name: Option<&str>) -> (String, String) {
+    let first_mode = flow
+        .steps
+        .first()
+        .map(|step| step.mode.clone())
+        .unwrap_or_default();
+
+    if flow.steps.len() == 1 {
+        let command = flow
+            .steps
+            .first()
+            .map(|step| step.command.clone())
+            .unwrap_or_default();
+        return (first_mode, command);
+    }
+
+    let label = match template_name {
+        Some(name) => format!("<template:{name} {} steps>", flow.steps.len()),
+        None => format!("<flow:{} steps>", flow.steps.len()),
+    };
+    (first_mode, label)
 }
 
 /// Calculate reverse rollback order for committed blocks before a failure point.
@@ -271,15 +404,9 @@ impl TxBlock {
         }
 
         for (i, step) in self.steps.iter().enumerate() {
-            if step.mode.trim().is_empty() {
-                return Err(ConnectError::InvalidTransaction(format!(
-                    "step[{i}] mode is empty"
-                )));
-            }
-            if step.command.trim().is_empty() {
-                return Err(ConnectError::InvalidTransaction(format!(
-                    "step[{i}] command is empty"
-                )));
+            step.run.validate(&format!("step[{i}] forward operation"))?;
+            if let Some(rollback) = step.rollback.as_ref() {
+                rollback.validate(&format!("step[{i}] rollback operation"))?;
             }
         }
 
@@ -298,18 +425,11 @@ impl TxBlock {
             (
                 CommandBlockKind::Config,
                 RollbackPolicy::WholeResource {
-                    mode,
-                    undo_command,
+                    rollback,
                     trigger_step_index,
-                    ..
                 },
             ) => {
-                if mode.trim().is_empty() || undo_command.trim().is_empty() {
-                    return Err(ConnectError::InvalidTransaction(
-                        "whole_resource rollback requires non-empty mode and undo_command"
-                            .to_string(),
-                    ));
-                }
+                rollback.validate("whole_resource rollback operation")?;
                 if *trigger_step_index >= self.steps.len() {
                     return Err(ConnectError::InvalidTransaction(format!(
                         "whole_resource trigger_step_index out of range: {}",
@@ -331,17 +451,13 @@ impl TxBlock {
         match &self.rollback_policy {
             RollbackPolicy::None => Ok(Vec::new()),
             RollbackPolicy::WholeResource {
-                mode,
-                undo_command,
-                timeout_secs,
+                rollback,
                 trigger_step_index,
             } => {
                 if executed_step_indices.contains(trigger_step_index) {
                     Ok(vec![PlannedRollback {
                         step_index: None,
-                        mode: mode.clone(),
-                        command: undo_command.clone(),
-                        timeout_secs: *timeout_secs,
+                        operation: rollback.as_ref().clone(),
                     }])
                 } else {
                     Ok(Vec::new())
@@ -356,13 +472,11 @@ impl TxBlock {
                         ))
                     })?;
                     if failed_step.rollback_on_failure
-                        && let Some(rollback_command) = failed_step.rollback_command_text()
+                        && let Some(rollback) = failed_step.rollback_operation()
                     {
                         commands.push(PlannedRollback {
                             step_index: Some(failed_idx),
-                            mode: failed_step.mode.clone(),
-                            command: rollback_command.to_string(),
-                            timeout_secs: failed_step.timeout_secs,
+                            operation: rollback.clone(),
                         });
                     }
                 }
@@ -373,12 +487,10 @@ impl TxBlock {
                             "executed step index out of range: {idx}"
                         ))
                     })?;
-                    if let Some(rollback_command) = step.rollback_command_text() {
+                    if let Some(rollback) = step.rollback_operation() {
                         commands.push(PlannedRollback {
                             step_index: Some(*idx),
-                            mode: step.mode.clone(),
-                            command: rollback_command.to_string(),
-                            timeout_secs: step.timeout_secs,
+                            operation: rollback.clone(),
                         });
                     }
                 }
@@ -412,26 +524,26 @@ impl TxBlock {
                         reasons.push(format!(
                             "step[{failed_idx}] rollback skipped: rollback_on_failure=false"
                         ));
-                    } else if step.rollback_command_text().is_none() {
+                    } else if step.rollback_operation().is_none() {
                         reasons.push(format!(
-                            "step[{failed_idx}] rollback skipped: rollback_command is missing"
+                            "step[{failed_idx}] rollback skipped: rollback operation is missing"
                         ));
                     }
                 }
 
                 for idx in executed_step_indices.iter().rev() {
                     if let Some(step) = self.steps.get(*idx)
-                        && step.rollback_command_text().is_none()
+                        && step.rollback_operation().is_none()
                     {
                         reasons.push(format!(
-                            "step[{idx}] rollback skipped: rollback_command is missing"
+                            "step[{idx}] rollback skipped: rollback operation is missing"
                         ));
                     }
                 }
 
                 if reasons.is_empty() {
                     reasons.push(
-                        "rollback not attempted: no per-step rollback commands were planned"
+                        "rollback not attempted: no per-step rollback operations were planned"
                             .to_string(),
                     );
                 }
@@ -485,26 +597,24 @@ impl TxWorkflow {
 mod tests {
     use super::*;
 
+    fn command(mode: &str, command: &str) -> Command {
+        Command {
+            mode: mode.to_string(),
+            command: command.to_string(),
+            ..Command::default()
+        }
+    }
+
     fn per_step_block() -> TxBlock {
         TxBlock {
             name: "addr-update".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset addr 1".to_string()),
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 2".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset addr 2".to_string()),
-                    rollback_on_failure: false,
-                },
+                TxStep::new(command("Config", "set addr 1"))
+                    .with_rollback(command("Config", "unset addr 1")),
+                TxStep::new(command("Config", "set addr 2"))
+                    .with_rollback(command("Config", "unset addr 2")),
             ],
             fail_fast: true,
         }
@@ -534,35 +644,42 @@ mod tests {
         let plan = block.plan_rollback(&[0, 1], None).expect("plan rollback");
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].step_index, Some(1));
-        assert_eq!(plan[0].command, "unset addr 2");
+        assert_eq!(
+            plan[0].operation.summary().expect("summary").description,
+            "unset addr 2"
+        );
         assert_eq!(plan[1].step_index, Some(0));
-        assert_eq!(plan[1].command, "unset addr 1");
+        assert_eq!(
+            plan[1].operation.summary().expect("summary").description,
+            "unset addr 1"
+        );
     }
 
     #[test]
-    fn whole_resource_plan_is_single_command() {
+    fn whole_resource_plan_is_single_operation() {
         let block = TxBlock {
             name: "addr-create".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
-                mode: "Config".to_string(),
-                undo_command: "no address-object A".to_string(),
-                timeout_secs: Some(30),
+                rollback: Box::new(
+                    Command {
+                        timeout: Some(30),
+                        ..command("Config", "no address-object A")
+                    }
+                    .into(),
+                ),
                 trigger_step_index: 0,
             },
-            steps: vec![TxStep {
-                mode: "Config".to_string(),
-                command: "address-object A".to_string(),
-                timeout_secs: None,
-                rollback_command: None,
-                rollback_on_failure: false,
-            }],
+            steps: vec![TxStep::new(command("Config", "address-object A"))],
             fail_fast: true,
         };
         let plan = block.plan_rollback(&[0], None).expect("plan rollback");
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].step_index, None);
-        assert_eq!(plan[0].command, "no address-object A");
+        assert_eq!(
+            plan[0].operation.summary().expect("summary").description,
+            "no address-object A"
+        );
     }
 
     #[test]
@@ -571,18 +688,16 @@ mod tests {
             name: "addr-create".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
-                mode: "Config".to_string(),
-                undo_command: "no address-object A".to_string(),
-                timeout_secs: Some(30),
+                rollback: Box::new(
+                    Command {
+                        timeout: Some(30),
+                        ..command("Config", "no address-object A")
+                    }
+                    .into(),
+                ),
                 trigger_step_index: 0,
             },
-            steps: vec![TxStep {
-                mode: "Config".to_string(),
-                command: "address-object A".to_string(),
-                timeout_secs: None,
-                rollback_command: None,
-                rollback_on_failure: false,
-            }],
+            steps: vec![TxStep::new(command("Config", "address-object A"))],
             fail_fast: true,
         };
 
@@ -596,26 +711,12 @@ mod tests {
             name: "policy-create".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
-                mode: "Config".to_string(),
-                undo_command: "delete policy P1".to_string(),
-                timeout_secs: None,
+                rollback: Box::new(command("Config", "delete policy P1").into()),
                 trigger_step_index: 1,
             },
             steps: vec![
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr A".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set policy P1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
+                TxStep::new(command("Config", "set addr A")),
+                TxStep::new(command("Config", "set policy P1")),
             ],
             fail_fast: true,
         };
@@ -627,7 +728,14 @@ mod tests {
             .plan_rollback(&[0, 1], Some(1))
             .expect("plan rollback");
         assert_eq!(after_trigger.len(), 1);
-        assert_eq!(after_trigger[0].command, "delete policy P1");
+        assert_eq!(
+            after_trigger[0]
+                .operation
+                .summary()
+                .expect("summary")
+                .description,
+            "delete policy P1"
+        );
     }
 
     #[test]
@@ -649,13 +757,7 @@ mod tests {
             name: "bad".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
-            steps: vec![TxStep {
-                mode: "".to_string(),
-                command: "set x".to_string(),
-                timeout_secs: None,
-                rollback_command: None,
-                rollback_on_failure: false,
-            }],
+            steps: vec![TxStep::new(command("", "set x"))],
             fail_fast: true,
         };
         let workflow = TxWorkflow {
@@ -668,41 +770,41 @@ mod tests {
     }
 
     #[test]
-    fn per_step_rollback_plan_skips_steps_without_rollback_command() {
+    fn per_step_rollback_plan_skips_steps_without_rollback_operation() {
         let block = TxBlock {
             name: "addr-update".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset addr 1".to_string()),
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 2".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 3".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("".to_string()),
-                    rollback_on_failure: false,
-                },
+                TxStep::new(command("Config", "set addr 1"))
+                    .with_rollback(command("Config", "unset addr 1")),
+                TxStep::new(command("Config", "set addr 2")),
             ],
             fail_fast: true,
         };
-        let plan = block
-            .plan_rollback(&[0, 1, 2], None)
-            .expect("plan rollback");
+        let plan = block.plan_rollback(&[0, 1], None).expect("plan rollback");
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].command, "unset addr 1");
+        assert_eq!(
+            plan[0].operation.summary().expect("summary").description,
+            "unset addr 1"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_empty_rollback_operation() {
+        let block = TxBlock {
+            name: "addr-update".to_string(),
+            kind: CommandBlockKind::Config,
+            rollback_policy: RollbackPolicy::PerStep,
+            steps: vec![
+                TxStep::new(command("Config", "set addr 1")).with_rollback(command("Config", "")),
+            ],
+            fail_fast: true,
+        };
+
+        let err = block.validate().expect_err("empty rollback must fail");
+        assert!(matches!(err, ConnectError::InvalidTransaction(_)));
+        assert!(err.to_string().contains("rollback operation"));
     }
 
     #[test]
@@ -712,28 +814,24 @@ mod tests {
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set a".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset a".to_string()),
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set b".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset b".to_string()),
-                    rollback_on_failure: true,
-                },
+                TxStep::new(command("Config", "set a")).with_rollback(command("Config", "unset a")),
+                TxStep::new(command("Config", "set b"))
+                    .with_rollback(command("Config", "unset b"))
+                    .with_rollback_on_failure(true),
             ],
             fail_fast: true,
         };
 
         let plan = block.plan_rollback(&[0], Some(1)).expect("plan rollback");
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].command, "unset b");
-        assert_eq!(plan[1].command, "unset a");
+        assert_eq!(
+            plan[0].operation.summary().expect("summary").description,
+            "unset b"
+        );
+        assert_eq!(
+            plan[1].operation.summary().expect("summary").description,
+            "unset a"
+        );
     }
 
     #[test]
@@ -759,13 +857,13 @@ mod tests {
             rollback_succeeded: false,
             rollback_steps: 1,
             failure_reason: Some("step failed".to_string()),
-            rollback_errors: vec!["undo command failed".to_string()],
+            rollback_errors: vec!["undo operation failed".to_string()],
             step_results: Vec::new(),
         };
         let (attempted, succeeded, errors) = failed_block_rollback_summary(Some(&failed));
         assert!(attempted);
         assert!(!succeeded);
-        assert_eq!(errors, vec!["undo command failed".to_string()]);
+        assert_eq!(errors, vec!["undo operation failed".to_string()]);
     }
 
     #[test]
@@ -795,20 +893,8 @@ mod tests {
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
-                TxStep {
-                    mode: "Config".to_string(),
-                    command: "set addr 2".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
+                TxStep::new(command("Config", "set addr 1")),
+                TxStep::new(command("Config", "set addr 2")),
             ],
             fail_fast: true,
         };
@@ -818,29 +904,40 @@ mod tests {
             reasons,
             vec![
                 "step[1] rollback skipped: rollback_on_failure=false".to_string(),
-                "step[0] rollback skipped: rollback_command is missing".to_string()
+                "step[0] rollback skipped: rollback operation is missing".to_string()
             ]
         );
     }
 
     #[test]
     fn tx_step_result_is_initialized_from_step() {
-        let step = TxStep {
-            mode: "Config".to_string(),
-            command: "set addr 1".to_string(),
-            timeout_secs: Some(30),
-            rollback_command: Some("unset addr 1".to_string()),
-            rollback_on_failure: false,
-        };
+        let step = TxStep::new(Command {
+            timeout: Some(30),
+            ..command("Config", "set addr 1")
+        })
+        .with_rollback(command("Config", "unset addr 1"));
 
-        let result = TxStepResult::from_step(3, &step);
+        let result = TxStepResult::from_step(3, &step).expect("step result");
         assert_eq!(result.step_index, 3);
         assert_eq!(result.mode, "Config");
-        assert_eq!(result.command, "set addr 1");
+        assert_eq!(result.operation_summary, "set addr 1");
         assert_eq!(result.execution_state, TxStepExecutionState::NotRun);
         assert_eq!(result.rollback_state, TxStepRollbackState::NotNeeded);
         assert!(result.failure_reason.is_none());
-        assert!(result.rollback_command.is_none());
+        assert!(result.rollback_operation_summary.is_none());
         assert!(result.rollback_reason.is_none());
+    }
+
+    #[test]
+    fn tx_step_result_summarizes_flow_operations() {
+        let flow = CommandFlow::new(vec![
+            command("Enable", "terminal length 0"),
+            command("Enable", "show version"),
+        ]);
+        let step = TxStep::new(flow);
+
+        let result = TxStepResult::from_step(0, &step).expect("step result");
+        assert_eq!(result.mode, "Enable");
+        assert_eq!(result.operation_summary, "<flow:2 steps>");
     }
 }

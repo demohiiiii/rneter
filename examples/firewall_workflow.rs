@@ -1,4 +1,6 @@
-use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, TxWorkflow, TxWorkflowResult};
+use rneter::session::{
+    ConnectionRequest, ExecutionContext, MANAGER, RollbackPolicy, TxWorkflow, TxWorkflowResult,
+};
 use rneter::templates;
 use std::error::Error;
 
@@ -51,8 +53,8 @@ fn print_workflow_report(result: &TxWorkflowResult) {
             if let Some(reason) = &step.failure_reason {
                 println!("      failure_reason={reason}");
             }
-            if let Some(command) = &step.rollback_command {
-                println!("      rollback_command={command}");
+            if let Some(operation_summary) = &step.rollback_operation_summary {
+                println!("      rollback_operation_summary={operation_summary}");
             }
             if let Some(reason) = &step.rollback_reason {
                 println!("      rollback_reason={reason}");
@@ -65,7 +67,7 @@ fn print_workflow_report(result: &TxWorkflowResult) {
     }
 }
 
-fn print_workflow_plan(workflow: &TxWorkflow) {
+fn print_workflow_plan(workflow: &TxWorkflow) -> Result<(), Box<dyn Error>> {
     println!(
         "dry-run workflow={} blocks={} fail_fast={}",
         workflow.name,
@@ -80,13 +82,39 @@ fn print_workflow_plan(workflow: &TxWorkflow) {
             block.rollback_policy,
             block.steps.len()
         );
-        for (step_idx, step) in block.steps.iter().enumerate() {
+        if let RollbackPolicy::WholeResource {
+            rollback,
+            trigger_step_index,
+        } = &block.rollback_policy
+        {
+            let rollback_summary = rollback.summary()?;
             println!(
-                "    step[{step_idx}] mode={} cmd={} rollback={:?} rollback_on_failure={}",
-                step.mode, step.command, step.rollback_command, step.rollback_on_failure
+                "    whole_resource_rollback kind={} mode={} steps={} desc={} trigger_step_index={}",
+                rollback_summary.kind,
+                rollback_summary.mode,
+                rollback_summary.step_count,
+                rollback_summary.description,
+                trigger_step_index
+            );
+        }
+        for (step_idx, step) in block.steps.iter().enumerate() {
+            let run_summary = step.run.summary()?;
+            let rollback_summary = step.rollback.as_ref().map(|operation| operation.summary());
+            println!(
+                "    step[{step_idx}] kind={} mode={} steps={} desc={} rollback={:?} rollback_on_failure={}",
+                run_summary.kind,
+                run_summary.mode,
+                run_summary.step_count,
+                run_summary.description,
+                rollback_summary
+                    .as_ref()
+                    .and_then(|summary| summary.as_ref().ok())
+                    .map(|summary| summary.description.as_str()),
+                step.rollback_on_failure
             );
         }
     }
+    Ok(())
 }
 
 #[tokio::main]
@@ -148,7 +176,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if dry_run {
-        print_workflow_plan(&workflow);
+        print_workflow_plan(&workflow)?;
         return Ok(());
     }
 

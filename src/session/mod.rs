@@ -233,7 +233,7 @@ impl CommandInteraction {
 }
 
 /// Configuration for a command to execute on a device.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Command {
     /// Execution mode - Specifies the device mode in which the command should run
     /// Common values:
@@ -269,6 +269,73 @@ pub struct Command {
     /// `copy tftp:`, or future HTTP-style wizards that should not require template edits.
     #[serde(default)]
     pub interaction: CommandInteraction,
+}
+
+/// Higher-level executable operation supported by the session layer.
+///
+/// Transactions and workflows run this abstraction instead of assuming every
+/// step is a plain text command. This keeps the current executor compatible
+/// with direct commands, multi-step command flows, and higher-level template
+/// invocations that resolve into a flow at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionOperation {
+    Command(Command),
+    Flow(CommandFlow),
+    Template {
+        template: crate::templates::CommandFlowTemplate,
+        runtime: crate::templates::CommandFlowTemplateRuntime,
+    },
+}
+
+/// Stable summary metadata for any executable session operation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionOperationSummary {
+    /// Operation kind identifier used for logging and dry-run inspection.
+    pub kind: String,
+    /// Primary mode used by the operation, typically the first command mode.
+    pub mode: String,
+    /// Human-readable description of what will run.
+    pub description: String,
+    /// Number of concrete command steps the operation expands to.
+    pub step_count: usize,
+}
+
+impl SessionOperation {
+    /// Wrap a single command as a session operation.
+    pub fn command(command: Command) -> Self {
+        Self::Command(command)
+    }
+
+    /// Wrap a multi-step flow as a session operation.
+    pub fn flow(flow: CommandFlow) -> Self {
+        Self::Flow(flow)
+    }
+
+    /// Wrap a structured template invocation as a session operation.
+    pub fn template(
+        template: crate::templates::CommandFlowTemplate,
+        runtime: crate::templates::CommandFlowTemplateRuntime,
+    ) -> Self {
+        Self::Template { template, runtime }
+    }
+
+    /// Inspect this operation without executing it.
+    pub fn summary(&self) -> Result<SessionOperationSummary, ConnectError> {
+        self.summary_impl()
+    }
+}
+
+impl From<Command> for SessionOperation {
+    fn from(value: Command) -> Self {
+        Self::Command(value)
+    }
+}
+
+impl From<CommandFlow> for SessionOperation {
+    fn from(value: CommandFlow) -> Self {
+        Self::Flow(value)
+    }
 }
 
 /// Configuration for uploading a local file to a remote host over SFTP.
@@ -326,7 +393,7 @@ fn default_stop_on_error() -> bool {
 }
 
 /// Multi-step command flow executed sequentially on one connection.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlow {
     /// Ordered list of commands executed on the same live session.
     #[serde(default)]

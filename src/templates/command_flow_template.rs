@@ -124,7 +124,7 @@ fn render_value_as_text(value: &Value) -> String {
 }
 
 /// Declarative reusable definition for an interactive command flow.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplate {
     /// Stable template identifier.
     pub name: String,
@@ -335,7 +335,7 @@ impl CommandFlowTemplate {
 }
 
 /// One step inside a reusable command-flow template.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplateStep {
     /// Structured command renderer.
     pub command: CommandFlowTemplateText,
@@ -381,7 +381,7 @@ impl CommandFlowTemplateStep {
 }
 
 /// One prompt-response rule inside a reusable command-flow template.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplatePrompt {
     /// Regex patterns that identify the prompt.
     pub patterns: Vec<String>,
@@ -452,7 +452,7 @@ impl CommandFlowTemplateVarKind {
 }
 
 /// Variable metadata exposed by a reusable command-flow template.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplateVar {
     /// Variable name referenced by the template.
     pub name: String,
@@ -579,7 +579,7 @@ impl CommandFlowTemplateVar {
 }
 
 /// Runtime values used to render a structured command-flow template.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplateRuntime {
     /// Per-render default mode. Falls back to template `default_mode`.
     #[serde(default)]

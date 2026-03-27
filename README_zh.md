@@ -413,35 +413,47 @@ assert_eq!(outputs.len(), 2);
 
 ```rust
 use rneter::session::{
-    ConnectionRequest, ExecutionContext, MANAGER, CommandBlockKind, RollbackPolicy, TxBlock,
-    TxStep,
+    Command, CommandBlockKind, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
+    RollbackPolicy, SessionOperation, TxBlock, TxStep,
 };
-use rneter::templates;
+use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
 
 let block = TxBlock {
     name: "addr-create".to_string(),
     kind: CommandBlockKind::Config,
     rollback_policy: RollbackPolicy::WholeResource {
-        mode: "Config".to_string(),
-        undo_command: "no object network WEB01".to_string(),
-        timeout_secs: Some(30),
+        rollback: Box::new(
+            Command {
+                mode: "Config".to_string(),
+                command: "no object network WEB01".to_string(),
+                timeout: Some(30),
+                ..Command::default()
+            }
+            .into(),
+        ),
         trigger_step_index: 0,
     },
     steps: vec![
-        TxStep {
+        TxStep::new(Command {
             mode: "Config".to_string(),
             command: "object network WEB01".to_string(),
-            timeout_secs: Some(30),
-            rollback_command: None,
-            rollback_on_failure: false,
-        },
-        TxStep {
-            mode: "Config".to_string(),
-            command: "host 10.0.0.10".to_string(),
-            timeout_secs: Some(30),
-            rollback_command: None,
-            rollback_on_failure: false,
-        },
+            timeout: Some(30),
+            ..Command::default()
+        }),
+        TxStep::new(CommandFlow::new(vec![
+            Command {
+                mode: "Config".to_string(),
+                command: "host 10.0.0.10".to_string(),
+                timeout: Some(30),
+                ..Command::default()
+            },
+            Command {
+                mode: "Config".to_string(),
+                command: "description WEB01".to_string(),
+                timeout: Some(30),
+                ..Command::default()
+            },
+        ])),
     ],
     fail_fast: true,
 };
@@ -463,6 +475,30 @@ let result = MANAGER
 println!(
     "committed={}, rollback_succeeded={}",
     result.committed, result.rollback_succeeded
+);
+```
+
+现在 `TxStep::new(...)` 接受的是任意 `SessionOperation`，所以 workflow 里的一个步骤既可以是
+单条命令，也可以是多步 `CommandFlow`，或者一个可复用的模板调用：
+
+```rust
+let copy_step = TxStep::new(SessionOperation::template(
+    cisco_like_copy_template(),
+    CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
+        "protocol": "scp",
+        "direction": "to_device",
+        "server_addr": "192.168.1.100",
+        "remote_path": "/srv/images/fw.bin",
+        "device_path": "flash:/fw.bin",
+        "transfer_username": "deploy",
+        "transfer_password": "secret",
+    })),
+));
+
+let summary = copy_step.run.summary()?;
+println!(
+    "kind={} mode={} steps={} desc={}",
+    summary.kind, summary.mode, summary.step_count, summary.description
 );
 ```
 
@@ -495,8 +531,11 @@ let workflow_result: TxWorkflowResult = MANAGER
 for block in &workflow_result.block_results {
     for step in &block.step_results {
         println!(
-            "step[{}] execution={:?} rollback={:?}",
-            step.step_index, step.execution_state, step.rollback_state
+            "step[{}] op={} execution={:?} rollback={:?}",
+            step.step_index,
+            step.operation_summary,
+            step.execution_state,
+            step.rollback_state
         );
     }
 }

@@ -1,6 +1,6 @@
 use super::super::*;
 use super::tx::{
-    CommandRunFuture, TxCommandRunner, execute_tx_block_with_runner,
+    OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
 use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
@@ -66,6 +66,53 @@ impl RuntimeCommandInteraction {
 }
 
 impl SharedSshClient {
+    pub(crate) async fn execute_command_flow(
+        &mut self,
+        flow: &CommandFlow,
+        sys: Option<&String>,
+    ) -> Result<CommandFlowOutput, ConnectError> {
+        let CommandFlow {
+            steps,
+            stop_on_error,
+        } = flow;
+        let mut outputs = Vec::with_capacity(steps.len());
+
+        for command in steps {
+            let timeout = Duration::from_secs(command.timeout.unwrap_or(60));
+            let output = self
+                .write_with_mode_and_timeout_using_command(
+                    &command.command,
+                    &command.mode,
+                    sys,
+                    timeout,
+                    &command.dyn_params,
+                    &command.interaction,
+                )
+                .await?;
+
+            let step_success = output.success;
+            outputs.push(output);
+            if *stop_on_error && !step_success {
+                return Ok(CommandFlowOutput {
+                    success: false,
+                    outputs,
+                });
+            }
+        }
+
+        let success = outputs.iter().all(|output| output.success);
+        Ok(CommandFlowOutput { success, outputs })
+    }
+
+    pub(crate) async fn execute_operation(
+        &mut self,
+        operation: &SessionOperation,
+        sys: Option<&String>,
+    ) -> Result<CommandFlowOutput, ConnectError> {
+        let flow = operation.to_command_flow()?;
+        self.execute_command_flow(&flow, sys).await
+    }
+
     fn merge_command_dyn_params(
         &mut self,
         dyn_params: &CommandDynamicParams,
@@ -416,17 +463,12 @@ impl TxCommandRunner for SharedSshClient {
         self.recorder.as_ref()
     }
 
-    fn run_command<'a>(
+    fn run_operation<'a>(
         &'a mut self,
-        command: &'a str,
-        mode: &'a str,
+        operation: &'a SessionOperation,
         sys: Option<&'a String>,
-        timeout: Duration,
-    ) -> CommandRunFuture<'a> {
-        Box::pin(async move {
-            self.write_with_mode_and_timeout(command, mode, sys, timeout)
-                .await
-        })
+    ) -> OperationRunFuture<'a> {
+        Box::pin(async move { self.execute_operation(operation, sys).await })
     }
 }
 

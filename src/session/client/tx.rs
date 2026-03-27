@@ -2,22 +2,20 @@ use super::super::*;
 use std::future::Future;
 use std::pin::Pin;
 
-pub(super) type CommandRunFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Output, ConnectError>> + Send + 'a>>;
+pub(super) type OperationRunFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CommandFlowOutput, ConnectError>> + Send + 'a>>;
 
 pub(super) trait TxCommandRunner {
     fn recorder(&self) -> Option<&SessionRecorder>;
 
-    fn run_command<'a>(
+    fn run_operation<'a>(
         &'a mut self,
-        command: &'a str,
-        mode: &'a str,
+        operation: &'a SessionOperation,
         sys: Option<&'a String>,
-        timeout: Duration,
-    ) -> CommandRunFuture<'a>;
+    ) -> OperationRunFuture<'a>;
 }
 
-fn init_step_results(block: &TxBlock) -> Vec<TxStepResult> {
+fn init_step_results(block: &TxBlock) -> Result<Vec<TxStepResult>, ConnectError> {
     block
         .steps
         .iter()
@@ -46,13 +44,15 @@ fn annotate_step_results_for_rollback(
     executed_indices: &[usize],
     failed_step_indices: &[usize],
     rollback_failed_step: Option<usize>,
-) {
+) -> Result<(), ConnectError> {
     match &block.rollback_policy {
         RollbackPolicy::None => {}
-        RollbackPolicy::WholeResource { undo_command, .. } => {
+        RollbackPolicy::WholeResource { rollback, .. } => {
+            let (_, rollback_operation_summary) = rollback.display_summary()?;
             for idx in attempted_step_indices(executed_indices, failed_step_indices) {
                 if let Some(step_result) = step_results.get_mut(idx) {
-                    step_result.rollback_command = Some(undo_command.clone());
+                    step_result.rollback_operation_summary =
+                        Some(rollback_operation_summary.clone());
                 }
             }
         }
@@ -61,12 +61,16 @@ fn annotate_step_results_for_rollback(
                 if let (Some(step), Some(step_result)) =
                     (block.steps.get(idx), step_results.get_mut(idx))
                 {
-                    step_result.rollback_command = step.rollback_command_text().map(str::to_string);
+                    step_result.rollback_operation_summary = step
+                        .rollback_operation()
+                        .map(|rollback| rollback.display_summary())
+                        .transpose()?
+                        .map(|(_, rollback_operation_summary)| rollback_operation_summary);
                     if step.rollback_on_failure {
-                        if step.rollback_command_text().is_none() {
+                        if step.rollback_operation().is_none() {
                             step_result.rollback_state = TxStepRollbackState::Skipped;
                             step_result.rollback_reason =
-                                Some("rollback_command is missing".to_string());
+                                Some("rollback operation is missing".to_string());
                         } else if Some(idx) != rollback_failed_step {
                             step_result.rollback_state = TxStepRollbackState::Skipped;
                             step_result.rollback_reason = Some(
@@ -84,28 +88,31 @@ fn annotate_step_results_for_rollback(
                 if let (Some(step), Some(step_result)) =
                     (block.steps.get(idx), step_results.get_mut(idx))
                 {
-                    if let Some(rollback_command) = step.rollback_command_text() {
-                        step_result.rollback_command = Some(rollback_command.to_string());
+                    if let Some(rollback) = step.rollback_operation() {
+                        let (_, rollback_operation_summary) = rollback.display_summary()?;
+                        step_result.rollback_operation_summary = Some(rollback_operation_summary);
                     } else {
                         step_result.rollback_state = TxStepRollbackState::Skipped;
                         step_result.rollback_reason =
-                            Some("rollback_command is missing".to_string());
+                            Some("rollback operation is missing".to_string());
                     }
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 fn apply_step_rollback_outcome(
     step_results: &mut [TxStepResult],
     step_index: usize,
-    command: &str,
+    operation_summary: &str,
     rollback_state: TxStepRollbackState,
     rollback_reason: Option<String>,
 ) {
     if let Some(step_result) = step_results.get_mut(step_index) {
-        step_result.rollback_command = Some(command.to_string());
+        step_result.rollback_operation_summary = Some(operation_summary.to_string());
         step_result.rollback_state = rollback_state;
         step_result.rollback_reason = rollback_reason;
     }
@@ -114,17 +121,31 @@ fn apply_step_rollback_outcome(
 fn apply_block_rollback_outcome(
     step_results: &mut [TxStepResult],
     affected_step_indices: &[usize],
-    command: &str,
+    operation_summary: &str,
     rollback_state: TxStepRollbackState,
     rollback_reason: Option<String>,
 ) {
     for &idx in affected_step_indices {
         if let Some(step_result) = step_results.get_mut(idx) {
-            step_result.rollback_command = Some(command.to_string());
+            step_result.rollback_operation_summary = Some(operation_summary.to_string());
             step_result.rollback_state = rollback_state;
             step_result.rollback_reason = rollback_reason.clone();
         }
     }
+}
+
+fn operation_failure_output(output: &CommandFlowOutput) -> String {
+    output
+        .outputs
+        .last()
+        .map(|last| {
+            if last.content.is_empty() {
+                last.all.clone()
+            } else {
+                last.content.clone()
+            }
+        })
+        .unwrap_or_default()
 }
 
 pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?Sized>(
@@ -138,7 +159,7 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
     }
     let executed = (0..block.steps.len()).collect::<Vec<_>>();
     let failed = Vec::new();
-    annotate_step_results_for_rollback(block, &mut result.step_results, &executed, &failed, None);
+    annotate_step_results_for_rollback(block, &mut result.step_results, &executed, &failed, None)?;
     let plan = block.plan_rollback(&executed, None)?;
     result.rollback_attempted = !plan.is_empty();
     result.rollback_succeeded = result.rollback_attempted;
@@ -150,11 +171,12 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
         result
             .rollback_errors
             .extend(block.explain_missing_rollback_plan(&executed, None));
-        if let RollbackPolicy::WholeResource { undo_command, .. } = &block.rollback_policy {
+        if let RollbackPolicy::WholeResource { rollback, .. } = &block.rollback_policy {
+            let (_, rollback_operation_summary) = rollback.display_summary()?;
             apply_block_rollback_outcome(
                 &mut result.step_results,
                 &block_level_indices,
-                undo_command,
+                &rollback_operation_summary,
                 TxStepRollbackState::BlockSkipped,
                 Some(result.rollback_errors.join("; ")),
             );
@@ -167,18 +189,15 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
         });
     }
     for (plan_idx, rollback) in plan.into_iter().enumerate() {
-        let timeout = Duration::from_secs(rollback.timeout_secs.unwrap_or(60));
+        let (rollback_mode, rollback_operation_summary) = rollback.operation.display_summary()?;
         result.rollback_steps += 1;
-        match runner
-            .run_command(&rollback.command, &rollback.mode, sys, timeout)
-            .await
-        {
+        match runner.run_operation(&rollback.operation, sys).await {
             Ok(output) if output.success => {
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut result.step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Succeeded,
                         None,
                     );
@@ -186,7 +205,7 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     apply_block_rollback_outcome(
                         &mut result.step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockSucceeded,
                         None,
                     );
@@ -195,23 +214,25 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepSucceeded {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode.clone(),
+                        operation_summary: rollback_operation_summary.clone(),
                     });
                 }
             }
             Ok(output) => {
                 result.rollback_succeeded = false;
                 let reason = format!(
-                    "workflow rollback command failed for block '{}': '{}' output='{}'",
-                    block.name, rollback.command, output.content
+                    "workflow rollback operation failed for block '{}': '{}' output='{}'",
+                    block.name,
+                    rollback_operation_summary,
+                    operation_failure_output(&output)
                 );
                 result.rollback_errors.push(reason.clone());
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut result.step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Failed,
                         Some(reason.clone()),
                     );
@@ -219,7 +240,7 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     apply_block_rollback_outcome(
                         &mut result.step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockFailed,
                         Some(reason.clone()),
                     );
@@ -228,8 +249,8 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode.clone(),
+                        operation_summary: rollback_operation_summary.clone(),
                         reason,
                     });
                 }
@@ -237,15 +258,15 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
             Err(err) => {
                 result.rollback_succeeded = false;
                 let reason = format!(
-                    "workflow rollback command error for block '{}': '{}' err={}",
-                    block.name, rollback.command, err
+                    "workflow rollback operation error for block '{}': '{}' err={}",
+                    block.name, rollback_operation_summary, err
                 );
                 result.rollback_errors.push(reason.clone());
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut result.step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Failed,
                         Some(reason.clone()),
                     );
@@ -253,7 +274,7 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     apply_block_rollback_outcome(
                         &mut result.step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockFailed,
                         Some(reason.clone()),
                     );
@@ -262,8 +283,8 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode,
+                        operation_summary: rollback_operation_summary,
                         reason,
                     });
                 }
@@ -292,14 +313,11 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
     let mut failure_reason = None;
     let mut failed_step = None;
     let mut rollback_failed_step = None;
-    let mut step_results = init_step_results(block);
+    let mut step_results = init_step_results(block)?;
 
     for (idx, step) in block.steps.iter().enumerate() {
-        let timeout = Duration::from_secs(step.timeout_secs.unwrap_or(60));
-        match runner
-            .run_command(&step.command, &step.mode, sys, timeout)
-            .await
-        {
+        let (step_mode, step_operation_summary) = step.run.display_summary()?;
+        match runner.run_operation(&step.run, sys).await {
             Ok(output) if output.success => {
                 executed_indices.push(idx);
                 if let Some(step_result) = step_results.get_mut(idx) {
@@ -309,15 +327,16 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxStepSucceeded {
                         block_name: block.name.clone(),
                         step_index: idx,
-                        mode: step.mode.clone(),
-                        command: step.command.clone(),
+                        mode: step_mode.clone(),
+                        operation_summary: step_operation_summary.clone(),
                     });
                 }
             }
             Ok(output) => {
                 let reason = format!(
-                    "step[{idx}] command failed: '{}' output='{}'",
-                    step.command, output.content
+                    "step[{idx}] operation failed: '{}' output='{}'",
+                    step_operation_summary,
+                    operation_failure_output(&output)
                 );
                 if failed_step.is_none() {
                     failed_step = Some(idx);
@@ -333,8 +352,8 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxStepFailed {
                         block_name: block.name.clone(),
                         step_index: idx,
-                        mode: step.mode.clone(),
-                        command: step.command.clone(),
+                        mode: step_mode.clone(),
+                        operation_summary: step_operation_summary.clone(),
                         reason,
                     });
                 }
@@ -343,7 +362,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                 }
             }
             Err(err) => {
-                let reason = format!("step[{idx}] command error: {err}");
+                let reason = format!("step[{idx}] operation error: {err}");
                 if failed_step.is_none() {
                     failed_step = Some(idx);
                     failure_reason = Some(reason.clone());
@@ -358,8 +377,8 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxStepFailed {
                         block_name: block.name.clone(),
                         step_index: idx,
-                        mode: step.mode.clone(),
-                        command: step.command.clone(),
+                        mode: step_mode,
+                        operation_summary: step_operation_summary,
                         reason,
                     });
                 }
@@ -414,7 +433,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
         &executed_indices,
         &failed_step_indices,
         rollback_failed_step,
-    );
+    )?;
     let rollback_plan = block.plan_rollback(&executed_indices, rollback_failed_step)?;
     let rollback_attempted = !rollback_plan.is_empty();
     if rollback_attempted && let Some(recorder) = runner.recorder() {
@@ -436,11 +455,12 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string())
         ));
-        if let RollbackPolicy::WholeResource { undo_command, .. } = &block.rollback_policy {
+        if let RollbackPolicy::WholeResource { rollback, .. } = &block.rollback_policy {
+            let (_, rollback_operation_summary) = rollback.display_summary()?;
             apply_block_rollback_outcome(
                 &mut step_results,
                 &block_level_indices,
-                undo_command,
+                &rollback_operation_summary,
                 TxStepRollbackState::BlockSkipped,
                 Some(missing_rollback_reasons.join("; ")),
             );
@@ -448,18 +468,15 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
     }
 
     for (plan_idx, rollback) in rollback_plan.into_iter().enumerate() {
-        let timeout = Duration::from_secs(rollback.timeout_secs.unwrap_or(60));
+        let (rollback_mode, rollback_operation_summary) = rollback.operation.display_summary()?;
         rollback_steps += 1;
-        match runner
-            .run_command(&rollback.command, &rollback.mode, sys, timeout)
-            .await
-        {
+        match runner.run_operation(&rollback.operation, sys).await {
             Ok(output) if output.success => {
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Succeeded,
                         None,
                     );
@@ -467,7 +484,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     apply_block_rollback_outcome(
                         &mut step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockSucceeded,
                         None,
                     );
@@ -476,23 +493,24 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepSucceeded {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode.clone(),
+                        operation_summary: rollback_operation_summary.clone(),
                     });
                 }
             }
             Ok(output) => {
                 rollback_succeeded = false;
                 let reason = format!(
-                    "rollback command failed: '{}' output='{}'",
-                    rollback.command, output.content
+                    "rollback operation failed: '{}' output='{}'",
+                    rollback_operation_summary,
+                    operation_failure_output(&output)
                 );
                 rollback_errors.push(reason.clone());
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Failed,
                         Some(reason.clone()),
                     );
@@ -500,7 +518,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     apply_block_rollback_outcome(
                         &mut step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockFailed,
                         Some(reason.clone()),
                     );
@@ -509,21 +527,24 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode.clone(),
+                        operation_summary: rollback_operation_summary.clone(),
                         reason,
                     });
                 }
             }
             Err(err) => {
                 rollback_succeeded = false;
-                let reason = format!("rollback command error: '{}' err={}", rollback.command, err);
+                let reason = format!(
+                    "rollback operation error: '{}' err={}",
+                    rollback_operation_summary, err
+                );
                 rollback_errors.push(reason.clone());
                 if let Some(step_idx) = rollback.step_index {
                     apply_step_rollback_outcome(
                         &mut step_results,
                         step_idx,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::Failed,
                         Some(reason.clone()),
                     );
@@ -531,7 +552,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     apply_block_rollback_outcome(
                         &mut step_results,
                         &block_level_indices,
-                        &rollback.command,
+                        &rollback_operation_summary,
                         TxStepRollbackState::BlockFailed,
                         Some(reason.clone()),
                     );
@@ -540,8 +561,8 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
                     let _ = recorder.record_event(SessionEvent::TxRollbackStepFailed {
                         block_name: block.name.clone(),
                         step_index: Some(plan_idx),
-                        mode: rollback.mode.clone(),
-                        command: rollback.command.clone(),
+                        mode: rollback_mode,
+                        operation_summary: rollback_operation_summary,
                         reason,
                     });
                 }
@@ -668,19 +689,19 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    struct ScriptedCommand {
+    struct ScriptedOperation {
         command: String,
         mode: String,
-        result: Result<Output, ConnectError>,
+        result: Result<CommandFlowOutput, ConnectError>,
     }
 
     struct FakeRunner {
-        scripted: VecDeque<ScriptedCommand>,
+        scripted: VecDeque<ScriptedOperation>,
         recorder: Option<SessionRecorder>,
     }
 
     impl FakeRunner {
-        fn new(scripted: Vec<ScriptedCommand>) -> Self {
+        fn new(scripted: Vec<ScriptedOperation>) -> Self {
             Self {
                 scripted: scripted.into(),
                 recorder: None,
@@ -693,19 +714,18 @@ mod tests {
             self.recorder.as_ref()
         }
 
-        fn run_command<'a>(
+        fn run_operation<'a>(
             &'a mut self,
-            command: &'a str,
-            mode: &'a str,
+            operation: &'a SessionOperation,
             _sys: Option<&'a String>,
-            _timeout: Duration,
-        ) -> CommandRunFuture<'a> {
+        ) -> OperationRunFuture<'a> {
             Box::pin(async move {
                 let scripted = self.scripted.pop_front().ok_or_else(|| {
                     ConnectError::InternalServerError(
                         "unexpected scripted command exhaustion".to_string(),
                     )
                 })?;
+                let (mode, command) = operation.display_summary()?;
                 assert_eq!(scripted.command, command);
                 assert_eq!(scripted.mode, mode);
                 scripted.result
@@ -733,26 +753,40 @@ mod tests {
         }
     }
 
+    fn single_output(output: Output) -> CommandFlowOutput {
+        CommandFlowOutput {
+            success: output.success,
+            outputs: vec![output],
+        }
+    }
+
     fn per_step_block(rollback_on_failure: bool) -> TxBlock {
         TxBlock {
             name: "addr-update".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
-                TxStep {
+                TxStep::new(Command {
                     mode: "Config".to_string(),
                     command: "set addr 1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset addr 1".to_string()),
-                    rollback_on_failure: false,
-                },
-                TxStep {
+                    ..Command::default()
+                })
+                .with_rollback(Command {
+                    mode: "Config".to_string(),
+                    command: "unset addr 1".to_string(),
+                    ..Command::default()
+                }),
+                TxStep::new(Command {
                     mode: "Config".to_string(),
                     command: "set addr 2".to_string(),
-                    timeout_secs: None,
-                    rollback_command: Some("unset addr 2".to_string()),
-                    rollback_on_failure,
-                },
+                    ..Command::default()
+                })
+                .with_rollback(Command {
+                    mode: "Config".to_string(),
+                    command: "unset addr 2".to_string(),
+                    ..Command::default()
+                })
+                .with_rollback_on_failure(rollback_on_failure),
             ],
             fail_fast: true,
         }
@@ -761,20 +795,20 @@ mod tests {
     #[tokio::test]
     async fn execute_tx_block_skips_failed_step_rollback_by_default() {
         let mut runner = FakeRunner::new(vec![
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("ok")),
+                result: Ok(single_output(ok_output("ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr 2".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(failed_output("invalid input")),
+                result: Ok(single_output(failed_output("invalid input"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "unset addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("rollback ok")),
+                result: Ok(single_output(ok_output("rollback ok"))),
             },
         ]);
 
@@ -813,25 +847,25 @@ mod tests {
     #[tokio::test]
     async fn execute_tx_block_can_rollback_failed_step_when_enabled() {
         let mut runner = FakeRunner::new(vec![
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("ok")),
+                result: Ok(single_output(ok_output("ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr 2".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(failed_output("invalid input")),
+                result: Ok(single_output(failed_output("invalid input"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "unset addr 2".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("failed-step rollback ok")),
+                result: Ok(single_output(ok_output("failed-step rollback ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "unset addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("rollback ok")),
+                result: Ok(single_output(ok_output("rollback ok"))),
             },
         ]);
 
@@ -860,39 +894,40 @@ mod tests {
             name: "policy-create".to_string(),
             kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
-                mode: "Config".to_string(),
-                undo_command: "delete policy P1".to_string(),
-                timeout_secs: None,
+                rollback: Box::new(
+                    Command {
+                        mode: "Config".to_string(),
+                        command: "delete policy P1".to_string(),
+                        ..Command::default()
+                    }
+                    .into(),
+                ),
                 trigger_step_index: 1,
             },
             steps: vec![
-                TxStep {
+                TxStep::new(Command {
                     mode: "Config".to_string(),
                     command: "set addr A".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
-                TxStep {
+                    ..Command::default()
+                }),
+                TxStep::new(Command {
                     mode: "Config".to_string(),
                     command: "set policy P1".to_string(),
-                    timeout_secs: None,
-                    rollback_command: None,
-                    rollback_on_failure: false,
-                },
+                    ..Command::default()
+                }),
             ],
             fail_fast: true,
         };
         let mut runner = FakeRunner::new(vec![
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr A".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("ok")),
+                result: Ok(single_output(ok_output("ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set policy P1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(failed_output("invalid input")),
+                result: Ok(single_output(failed_output("invalid input"))),
             },
         ]);
 
@@ -929,26 +964,37 @@ mod tests {
                     name: "addr-create".to_string(),
                     kind: CommandBlockKind::Config,
                     rollback_policy: RollbackPolicy::PerStep,
-                    steps: vec![TxStep {
-                        mode: "Config".to_string(),
-                        command: "set addr 1".to_string(),
-                        timeout_secs: None,
-                        rollback_command: Some("unset addr 1".to_string()),
-                        rollback_on_failure: false,
-                    }],
+                    steps: vec![
+                        TxStep::new(Command {
+                            mode: "Config".to_string(),
+                            command: "set addr 1".to_string(),
+                            ..Command::default()
+                        })
+                        .with_rollback(Command {
+                            mode: "Config".to_string(),
+                            command: "unset addr 1".to_string(),
+                            ..Command::default()
+                        }),
+                    ],
                     fail_fast: true,
                 },
                 TxBlock {
                     name: "policy-create".to_string(),
                     kind: CommandBlockKind::Config,
                     rollback_policy: RollbackPolicy::PerStep,
-                    steps: vec![TxStep {
-                        mode: "Config".to_string(),
-                        command: "set policy 1".to_string(),
-                        timeout_secs: None,
-                        rollback_command: Some("unset policy 1".to_string()),
-                        rollback_on_failure: true,
-                    }],
+                    steps: vec![
+                        TxStep::new(Command {
+                            mode: "Config".to_string(),
+                            command: "set policy 1".to_string(),
+                            ..Command::default()
+                        })
+                        .with_rollback(Command {
+                            mode: "Config".to_string(),
+                            command: "unset policy 1".to_string(),
+                            ..Command::default()
+                        })
+                        .with_rollback_on_failure(true),
+                    ],
                     fail_fast: true,
                 },
             ],
@@ -956,25 +1002,25 @@ mod tests {
         };
 
         let mut runner = FakeRunner::new(vec![
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("ok")),
+                result: Ok(single_output(ok_output("ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "set policy 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(failed_output("invalid input")),
+                result: Ok(single_output(failed_output("invalid input"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "unset policy 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("rollback ok")),
+                result: Ok(single_output(ok_output("rollback ok"))),
             },
-            ScriptedCommand {
+            ScriptedOperation {
                 command: "unset addr 1".to_string(),
                 mode: "Config".to_string(),
-                result: Ok(ok_output("rollback ok")),
+                result: Ok(single_output(ok_output("rollback ok"))),
             },
         ]);
 
@@ -1001,6 +1047,47 @@ mod tests {
             result.block_results[1].step_results[0].rollback_state,
             TxStepRollbackState::Succeeded
         );
+        assert!(runner.scripted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_tx_block_accepts_flow_operations() {
+        let block = TxBlock {
+            name: "precheck".to_string(),
+            kind: CommandBlockKind::Show,
+            rollback_policy: RollbackPolicy::None,
+            steps: vec![TxStep::new(CommandFlow::new(vec![
+                Command {
+                    mode: "Enable".to_string(),
+                    command: "terminal length 0".to_string(),
+                    ..Command::default()
+                },
+                Command {
+                    mode: "Enable".to_string(),
+                    command: "show version".to_string(),
+                    ..Command::default()
+                },
+            ]))],
+            fail_fast: true,
+        };
+
+        let mut runner = FakeRunner::new(vec![ScriptedOperation {
+            command: "<flow:2 steps>".to_string(),
+            mode: "Enable".to_string(),
+            result: Ok(CommandFlowOutput {
+                success: true,
+                outputs: vec![ok_output("paging disabled"), ok_output("version output")],
+            }),
+        }]);
+
+        let result = execute_tx_block_with_runner(&mut runner, &block, None)
+            .await
+            .expect("execute block");
+
+        assert!(result.committed);
+        assert_eq!(result.executed_steps, 1);
+        assert_eq!(result.step_results.len(), 1);
+        assert_eq!(result.step_results[0].operation_summary, "<flow:2 steps>");
         assert!(runner.scripted.is_empty());
     }
 }
