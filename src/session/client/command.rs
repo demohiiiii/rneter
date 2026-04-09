@@ -23,6 +23,70 @@ fn latest_terminal_fragment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+fn normalize_runtime_output(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+
+    for chunk in text.split_inclusive('\n') {
+        let has_newline = chunk.ends_with('\n');
+        let body = if has_newline {
+            &chunk[..chunk.len().saturating_sub(1)]
+        } else {
+            chunk
+        };
+        let sanitized = sanitize_runtime_prompt(body);
+        let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
+        normalized.push_str(visible);
+        if has_newline {
+            normalized.push('\n');
+        }
+    }
+
+    normalized
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_sent_command_prefix(output: &str, sent_command: &str) -> String {
+    let trimmed = output.trim_start_matches(['\n', '\r']);
+    let sent = sent_command.trim();
+    if sent.is_empty() {
+        return trimmed.to_string();
+    }
+
+    if let Some(rest) = trimmed.strip_prefix(sent) {
+        return rest.trim_start_matches(['\n', '\r']).to_string();
+    }
+
+    if let Some((first_line, rest)) = trimmed.split_once('\n') {
+        let first = first_line.trim_end_matches('\r');
+        if first == sent || normalize_whitespace(first) == normalize_whitespace(sent) {
+            return rest.trim_start_matches(['\n', '\r']).to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn extract_command_content(all: &str, sent_command: &str, prompt: Option<&str>) -> String {
+    let normalized_all = normalize_runtime_output(all);
+    let normalized_command = normalize_runtime_output(sent_command);
+    let stripped = strip_sent_command_prefix(&normalized_all, &normalized_command);
+    let trimmed = stripped.trim_end_matches(['\n', '\r']);
+
+    if let Some(prompt_text) = prompt {
+        let normalized_prompt = normalize_runtime_output(prompt_text);
+        if !normalized_prompt.is_empty()
+            && let Some(without_prompt) = trimmed.strip_suffix(&normalized_prompt)
+        {
+            return without_prompt.trim_end_matches(['\n', '\r']).to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 #[derive(Debug)]
 struct RuntimePromptMatcher {
     patterns: RegexSet,
@@ -321,7 +385,7 @@ impl SharedSshClient {
                         all: clean_output.clone(),
                     });
                 }
-                return Err(ConnectError::ExecTimeout(clean_output));
+                return Err(ConnectError::ExecTimeout(normalize_runtime_output(&clean_output)));
             }
             Ok(Err(err)) => {
                 if let Some(recorder) = self.recorder.as_ref() {
@@ -349,27 +413,15 @@ impl SharedSshClient {
         let success = parsed.success;
         let exit_code = parsed.exit_code;
         let all = parsed.output;
-
-        let mut content = all.as_str();
-        if !sent_command.is_empty() && content.starts_with(&sent_command) {
-            content = content
-                .strip_prefix(&sent_command)
-                .unwrap_or(content)
-                .trim_start_matches(['\n', '\r']);
-        }
-
-        let content = if let Some(pos) = content.rfind('\n') {
-            &content[..pos]
-        } else {
-            ""
-        };
+        let prompt_after = self.handler.current_prompt().map(|v| v.to_string());
+        let content = extract_command_content(&all, &sent_command, prompt_after.as_deref());
 
         let output = Output {
             success,
             exit_code,
-            content: content.to_string(),
+            content,
             all,
-            prompt: self.handler.current_prompt().map(|v| v.to_string()),
+            prompt: prompt_after,
         };
 
         if let Some(recorder) = self.recorder.as_ref() {
@@ -579,5 +631,22 @@ mod tests {
         .expect_err("invalid regex should fail");
 
         assert!(matches!(err, ConnectError::InvalidCommandInteraction(_)));
+    }
+
+    #[test]
+    fn extract_command_content_strips_fish_wrapper_echo_and_prompt() {
+        let sent_command = r#"date; printf '\n__RNETER_EXIT_CODE__:%s:__\n' "$status""#;
+        let raw_output = concat!(
+            "date;\r",
+            "\u{1b}[27C \r\u{1b}[28Cprintf \r\u{1b}[35C'\\n__RNETER_EXIT_CODE__:%s:__\\n' ",
+            "\r\u{1b}[68C\u{1b}[?2004l\u{1b}[>4;0m\u{1b}>\"$status\"\r",
+            "\u{1b}[77C\u{1b}[55Ddate\u{1b}[32m;\u{1b}[m printf \u{1b}[33m'\\n__RNETER_EXIT_CODE__:%s:__\\n'\u{1b}[m ",
+            "\u{1b}[33m\"\u{1b}[96m$status\u{1b}[33m\"\u{1b}[m\r\u{1b}[77C\n",
+            "Thu Apr  9 10:51:14 AM CST 2026\n",
+            "[192-168-30] ~# "
+        );
+
+        let content = extract_command_content(raw_output, sent_command, Some("[192-168-30] ~# "));
+        assert_eq!(content, "Thu Apr  9 10:51:14 AM CST 2026");
     }
 }
