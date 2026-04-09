@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.1] - 2026-04-09
+
+### New Features
+- Added fish-focused prompt recovery that matches only the latest terminal fragment after carriage-return redraws, so command completion no longer stalls when prompts are prefixed by transient terminal noise.
+- Added default Linux template prompt coverage for bracket-style fish prompts such as `[host] path>`, `[host] path#`, and `[host]#`.
+- Added regression tests for fish prompt matching and runtime interactive input matching when ANSI escapes and carriage returns appear in the same buffer.
+
+### Optimizations
+- Extended simple escape stripping to remove `\x1b>` and `\x1b=` probes before prompt-state classification.
+- Unified prompt parsing in `read`, `read_prompt`, `read_sys_prompt`, `read_need_write`, and runtime interaction matching to use the same final-fragment normalization path.
+- Reduced false prompt mismatches by storing normalized prompt text from the matched terminal fragment instead of preserving earlier non-prompt buffer segments.
+
+### API Changes
+- No public API signatures changed in `0.4.1`.
+- Prompt/state detection behavior now prioritizes the latest terminal fragment, which may change matching outcomes for custom prompt regexes that previously depended on full-buffer content.
+- Built-in Linux prompt regex defaults now include broader fish prompt variants, reducing the need for custom Linux prompt overrides in common fish deployments.
+
+### Risks
+- Broader bracket-style Linux prompt patterns can increase accidental prompt matches on unusual command output lines that end with shell markers.
+- Final-fragment prompt matching intentionally ignores earlier carriage-return redraw content, so highly customized multiline prompts may still require custom prompt regex configuration.
+- Fish compatibility is validated through unit and integration-oriented test cases, but highly customized fish themes and terminal emulators may still need environment-specific regex tuning.
+
 ## [0.4.0] - 2026-03-27
 
 ### New Features

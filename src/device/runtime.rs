@@ -15,6 +15,12 @@ fn sanitize_terminal_line(line: &str) -> String {
         .collect()
 }
 
+fn latest_terminal_fragment(line: &str) -> &str {
+    line.rsplit(['\n', '\r'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(line)
+}
+
 impl DeviceHandler {
     /// Converts a line of output to a state.
     ///
@@ -60,17 +66,18 @@ impl DeviceHandler {
     /// Reads a line of output and updates the current state.
     pub fn read(&mut self, line: &str) {
         let sanitized_line = sanitize_terminal_line(line);
-        trace!("Read line: '{:?}'", sanitized_line);
-        let (state_index, state, catch) = self.line2state(&sanitized_line, true);
+        let prompt_line = latest_terminal_fragment(&sanitized_line);
+        trace!("Read line: '{:?}'", prompt_line);
+        let (state_index, state, catch) = self.line2state(prompt_line, true);
         trace!("Converted to state: '{:?}'", state);
-        if self.ignore_error(&sanitized_line) {
+        if self.ignore_error(prompt_line) {
             trace!("Ignoring error state");
             self.current_state_index = 0;
         } else {
             if self.match_prompt(state_index) {
                 trace!("State captured value: '{:?}'", catch);
                 self.sys = catch;
-                self.current_prompt = Some(sanitized_line);
+                self.current_prompt = Some(prompt_line.to_string());
             }
 
             self.current_state_index = state_index;
@@ -97,27 +104,30 @@ impl DeviceHandler {
     /// Checks if a line matches a prompt pattern.
     pub fn read_prompt(&mut self, line: &str) -> bool {
         let sanitized_line = sanitize_terminal_line(line);
-        trace!("Checking if line is a prompt: '{:?}'", sanitized_line);
-        let (index, _, _) = self.line2state(&sanitized_line, false);
+        let prompt_line = latest_terminal_fragment(&sanitized_line);
+        trace!("Checking if line is a prompt: '{:?}'", prompt_line);
+        let (index, _, _) = self.line2state(prompt_line, false);
         self.match_prompt(index)
     }
 
     /// Checks if a line matches a system-specific prompt pattern.
     pub fn read_sys_prompt(&mut self, line: &str) -> bool {
         let sanitized_line = sanitize_terminal_line(line);
+        let prompt_line = latest_terminal_fragment(&sanitized_line);
         trace!(
             "Checking if line is a system prompt: '{:?}'",
-            sanitized_line
+            prompt_line
         );
-        let (index, _, _) = self.line2state(&sanitized_line, false);
+        let (index, _, _) = self.line2state(prompt_line, false);
         self.match_sys_prompt(index)
     }
 
     /// Checks if a line requires input and returns the input to send.
     pub fn read_need_write(&mut self, line: &str) -> Option<(String, bool)> {
         let sanitized_line = sanitize_terminal_line(line);
-        trace!("Checking if input is required: '{:?}'", sanitized_line);
-        let (_, input, _) = self.line2state(&sanitized_line, false);
+        let prompt_line = latest_terminal_fragment(&sanitized_line);
+        trace!("Checking if input is required: '{:?}'", prompt_line);
+        let (_, input, _) = self.line2state(prompt_line, false);
         if let Some((is_dyn, s, is_record)) = self.input_map.get(input) {
             if *is_dyn {
                 return self.dyn_param.get(s).map(|cmd| (cmd.clone(), *is_record));
@@ -228,5 +238,17 @@ mod tests {
         handler.read(raw_prompt);
         assert_eq!(handler.current_state(), "root");
         assert_eq!(handler.current_prompt(), Some("root@192-168-30-92 ~# "));
+    }
+
+    #[test]
+    fn fish_prompt_matches_last_carriage_return_fragment() {
+        let mut handler = templates::linux().expect("create linux template");
+        let raw_prompt =
+            "noise-before\r\u{1b}>\u{1b}[92m[192-168-30]\u{1b}[m \u{1b}[31m~\u{1b}[m# ";
+
+        assert!(handler.read_prompt(raw_prompt));
+        handler.read(raw_prompt);
+        assert_eq!(handler.current_state(), "root");
+        assert_eq!(handler.current_prompt(), Some("[192-168-30] ~# "));
     }
 }

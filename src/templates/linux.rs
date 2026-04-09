@@ -142,6 +142,8 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
                 r"^[^\s@]+@.+\$\s*$",    // user@host path$
                 r"^[^\s@]+@.+>\s*$",     // fish: user@host path>
                 r"^\[[^\]]+\]\$\s*$",    // [user@host]$
+                r"^\[[^\]]+\]\s+.+\$\s*$", // [host] path$
+                r"^\[[^\]]+\]\s+.+>\s*$", // fish: [host] path>
                 r"^\$\s*$",              // $
             ],
             vec![
@@ -149,6 +151,8 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
                 r"^root@[^\s]+#\s*$",     // root@host#
                 r"^[^\s@]+@.+#\s*$",      // root@host path#
                 r"^\[root@[^\]]+\]#\s*$", // [root@host]#
+                r"^\[[^\]]+\]\s+.+#\s*$", // fish: [host] path#
+                r"^\[[^\]]+\]#\s*$",      // [host]#
                 r"^#\s*$",                // #
             ],
         )

@@ -126,11 +126,12 @@ pub static STRIP_CSI_ESCAPE: Lazy<Regex> =
         Err(err) => panic!("invalid STRIP_CSI_ESCAPE regex: {err}"),
     });
 
-/// Regex pattern for stripping single-character escape sequences such as `\x1b=`.
-pub static STRIP_SIMPLE_ESCAPE: Lazy<Regex> = Lazy::new(|| match Regex::new(r"\x1B[@-Z\\-_]") {
-    Ok(re) => re,
-    Err(err) => panic!("invalid STRIP_SIMPLE_ESCAPE regex: {err}"),
-});
+/// Regex pattern for stripping simple escape sequences such as `\x1b=` and `\x1b>`.
+pub static STRIP_SIMPLE_ESCAPE: Lazy<Regex> =
+    Lazy::new(|| match Regex::new(r"\x1B(?:[@-Z\\-_]|[=>])") {
+        Ok(re) => re,
+        Err(err) => panic!("invalid STRIP_SIMPLE_ESCAPE regex: {err}"),
+    });
 
 #[cfg(test)]
 fn build_test_handler() -> DeviceHandler {

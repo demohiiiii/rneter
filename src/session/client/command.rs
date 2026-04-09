@@ -17,6 +17,12 @@ fn sanitize_runtime_prompt(line: &str) -> String {
         .collect()
 }
 
+fn latest_terminal_fragment(line: &str) -> &str {
+    line.rsplit(['\n', '\r'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(line)
+}
+
 #[derive(Debug)]
 struct RuntimePromptMatcher {
     patterns: RegexSet,
@@ -58,9 +64,10 @@ impl RuntimeCommandInteraction {
 
     fn read_need_write(&self, line: &str) -> Option<(String, bool)> {
         let sanitized = sanitize_runtime_prompt(line);
+        let prompt = latest_terminal_fragment(&sanitized);
         self.prompts
             .iter()
-            .find(|prompt| prompt.patterns.is_match(&sanitized))
+            .find(|rule| rule.patterns.is_match(prompt))
             .map(|prompt| (prompt.response.clone(), prompt.record_input))
     }
 }
@@ -538,6 +545,23 @@ mod tests {
         .expect("build interaction");
 
         let prompt = "\u{1b}[31mPassword:\u{1b}[0m";
+        assert_eq!(
+            interaction.read_need_write(prompt),
+            Some(("secret\n".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn runtime_command_interaction_matches_last_carriage_return_fragment() {
+        let interaction = RuntimeCommandInteraction::build(&CommandInteraction {
+            prompts: vec![PromptResponseRule::new(
+                vec![r"^Password:\s*$".to_string()],
+                "secret\n".to_string(),
+            )],
+        })
+        .expect("build interaction");
+
+        let prompt = "noise\r\u{1b}[31mPassword:\u{1b}[0m";
         assert_eq!(
             interaction.read_need_write(prompt),
             Some(("secret\n".to_string(), false))
