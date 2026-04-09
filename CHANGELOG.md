@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.2] - 2026-04-09
+
+### New Features
+- Added normalized runtime output extraction for shell command execution, including explicit handling of ANSI/control-sequence redraw noise before building command content.
+- Added resilient command-echo stripping for wrapped fish status-capture commands (for example `date; printf ... "$status"`), so `Output.content` returns the actual command result instead of terminal redraw text.
+- Added regression coverage for noisy fish output parsing through `extract_command_content_strips_fish_wrapper_echo_and_prompt`, using a real-world fish redraw sample with exit-code wrapper output.
+
+### Optimizations
+- Normalized timeout error payloads by applying the same output sanitization path to `ConnectError::ExecTimeout`, improving readability when shells emit terminal control chatter.
+- Unified command content extraction into dedicated helpers (`normalize_runtime_output`, `strip_sent_command_prefix`, `extract_command_content`) to reduce fish-specific parsing edge cases.
+- Improved trailing prompt trimming by normalizing prompt text and stripping it from parsed command output when present.
+
+### API Changes
+- No public type signatures changed in `0.4.2`.
+- `Output.content` formatting behavior for interactive shells is now more aggressive about removing command echoes, redraw artifacts, and trailing prompts; integrations that relied on raw echoed shell lines should switch to `Output.all`.
+- `ConnectError::ExecTimeout` now returns normalized output text instead of raw terminal control sequences in many fish/interactive-terminal scenarios.
+
+### Risks
+- More aggressive normalization can hide terminal artifacts that some troubleshooting workflows previously relied on when reading `Output.content`; use `Output.all` for full raw context.
+- Prompt and echo stripping is heuristic-based, so heavily customized shell prompts or wrapper commands may still need environment-specific validation.
+- The fix is validated by unit and integration-oriented test coverage plus the reproduced fish sample, but unusual terminal emulator escape behaviors may require follow-up tuning.
+
 ## [0.4.1] - 2026-04-09
 
 ### New Features
