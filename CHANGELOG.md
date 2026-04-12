@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.3] - 2026-04-13
+
+### New Features
+- Added output-driven command-flow branching with `CommandOutputBranchRule`, `CommandOutputBranchSource` (`all`/`content`/`prompt`), and `CommandBranchTarget` (`next`/`stop_success`/`stop_failure`/`jump`), so flows can branch on device output instead of only caller-provided inputs.
+- Added flow-level loop guards through `CommandFlow.max_steps` and runtime validation for branch configuration (`InvalidCommandFlow` on invalid regex/targets), improving safety for jump-based interactive workflows.
+- Added simplified inline template ergonomics for command-flow templates (`CommandFlowTemplateText` as `{{var}}` text plus string-based step/prompt builders), reducing boilerplate when defining reusable interactive workflows.
+
+### Optimizations
+- Simplified built-in Cisco-like copy workflow modeling by switching `cisco_like_copy_template()` to a command-driven variable set (`command`, `server_addr`, `remote_path`, optional credentials), removing input-side conditional template trees.
+- Unified template and runtime branching design around post-command output evaluation, so SCP/TFTP/HTTP-style wizard flows can be extended without introducing protocol-specific control paths in the core executor.
+- Simplified transaction execution internals by removing block-kind branching and relying on `RollbackPolicy` directly for rollback planning and failure handling.
+
+### API Changes
+- `Command` now supports output-branch controls via `output_branches` and `output_fallback`; `CommandFlow` now includes optional `max_steps` for bounded branching loops.
+- `TxBlock` no longer contains `kind`, and `CommandBlockKind` is removed from public session exports; rollback behavior is now fully driven by `RollbackPolicy` (`None`, `WholeResource`, `PerStep`).
+- `SessionEvent::TxBlockStarted` no longer includes `block_kind`; JSONL consumers that deserialize transaction events must update to the new event shape.
+- `templates::classify_command(...)` is no longer publicly exported; transaction strategy selection now occurs inside `templates::build_tx_block(...)`.
+- Built-in `cisco_like_copy_template()` runtime inputs are now command-oriented (`command` + shared prompt vars) rather than direction/protocol-driven conditional rendering, so existing callers should migrate their runtime var payloads.
+
+### Risks
+- Branch-enabled command flows can still terminate early or loop unexpectedly if regex rules are misconfigured; callers should validate rule order and tune `max_steps` for long-running wizard flows.
+- This release includes a breaking transaction API/model migration (`TxBlock.kind`, `CommandBlockKind`, and `TxBlockStarted.block_kind` removal), so downstream schema and serialization consumers require coordinated upgrades.
+- Integrations using the previous copy-template variable contract (for example `protocol`/`direction`-style inputs) need runtime payload migration to avoid empty or mismatched interactive responses.
+
 ## [0.4.2] - 2026-04-09
 
 ### New Features
