@@ -137,14 +137,14 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
         // Default prompt patterns
         (
             vec![
-                r"^[^\s]+\$\s*$",        // user$
-                r"^[^\s]+@[^\s]+\$\s*$", // user@host$
-                r"^[^\s@]+@.+\$\s*$",    // user@host path$
-                r"^[^\s@]+@.+>\s*$",     // fish: user@host path>
-                r"^\[[^\]]+\]\$\s*$",    // [user@host]$
+                r"^[^\s]+\$\s*$",          // user$
+                r"^[^\s]+@[^\s]+\$\s*$",   // user@host$
+                r"^[^\s@]+@.+\$\s*$",      // user@host path$
+                r"^[^\s@]+@.+>\s*$",       // fish: user@host path>
+                r"^\[[^\]]+\]\$\s*$",      // [user@host]$
                 r"^\[[^\]]+\]\s+.+\$\s*$", // [host] path$
-                r"^\[[^\]]+\]\s+.+>\s*$", // fish: [host] path>
-                r"^\$\s*$",              // $
+                r"^\[[^\]]+\]\s+.+>\s*$",  // fish: [host] path>
+                r"^\$\s*$",                // $
             ],
             vec![
                 r"^[^\s]+#\s*$",          // root#

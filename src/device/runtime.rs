@@ -114,10 +114,7 @@ impl DeviceHandler {
     pub fn read_sys_prompt(&mut self, line: &str) -> bool {
         let sanitized_line = sanitize_terminal_line(line);
         let prompt_line = latest_terminal_fragment(&sanitized_line);
-        trace!(
-            "Checking if line is a system prompt: '{:?}'",
-            prompt_line
-        );
+        trace!("Checking if line is a system prompt: '{:?}'", prompt_line);
         let (index, _, _) = self.line2state(prompt_line, false);
         self.match_sys_prompt(index)
     }

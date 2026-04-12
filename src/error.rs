@@ -45,6 +45,10 @@ pub enum ConnectError {
     #[error("invalid command interaction: {0}")]
     InvalidCommandInteraction(String),
 
+    /// Command flow definition is invalid at runtime.
+    #[error("invalid command flow: {0}")]
+    InvalidCommandFlow(String),
+
     /// Command flow template definition or rendering is invalid.
     #[error("invalid command flow template: {0}")]
     InvalidCommandFlowTemplate(String),

@@ -173,11 +173,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &CommandFlowTemplateRuntime::new()
             .with_default_mode("Enable")
             .with_vars(json!({
-                "protocol": "scp",
-                "direction": "to_device",
+                "command": "copy scp: flash:/image.bin",
                 "server_addr": "198.51.100.20",
                 "remote_path": "/pub/image.bin",
-                "device_path": "flash:/image.bin",
                 "transfer_username": "deploy",
                 "transfer_password": "secret",
             })),
@@ -206,34 +204,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 这个内置模板适配 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
+这个模板有意不在输入侧做条件分支：只需要传完整的 `command`，再配合通用的
+`server_addr`、`remote_path` 和可选凭据变量即可。
 
 ### 结构化命令流模板
 
 如果你希望交互流程不要写死在 Rust 里，可以直接构建一个可复用的
 `CommandFlowTemplate`。它保留了之前 TOML 设计里的核心结构：`vars`、`steps`、
-`prompts`、`default_mode`，以及条件分支。
+`prompts`、`default_mode`。更简洁的方式是使用 `{{var}}` 内联模板，并把分支判断放到“命令输出”上，而不是在输入模板里堆条件分支。
 
 ```rust
+use rneter::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
+    CommandFlowTemplateStep, CommandFlowTemplateVar,
 };
 use serde_json::json;
 
 let template = CommandFlowTemplate::new(
-    "cisco_like_copy",
-    vec![CommandFlowTemplateStep::new(CommandFlowTemplateText::concat(vec![
-        CommandFlowTemplateText::literal("copy "),
-        CommandFlowTemplateText::var("protocol"),
-        CommandFlowTemplateText::literal(": "),
-        CommandFlowTemplateText::var("device_path"),
-    ]))
-    .with_prompts(vec![CommandFlowTemplatePrompt::new(
-        vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
-        CommandFlowTemplateText::var("server_addr"),
-    )
-    .with_append_newline(true)
-    .with_record_input(true)])],
+    "copy_with_verify",
+    vec![
+        CommandFlowTemplateStep::from_template("copy {{protocol}}: {{device_path}}")
+            .with_prompts(vec![
+                CommandFlowTemplatePrompt::from_template(
+                    vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+                    "{{server_addr}}",
+                )
+                .with_append_newline(true),
+            ])
+            .with_output_branches(vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(copy complete|bytes copied)".to_string()],
+                    CommandBranchTarget::Jump { step_index: 1 },
+                )
+                .with_source(CommandOutputBranchSource::Content),
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(failed|error|denied)".to_string()],
+                    CommandBranchTarget::StopFailure,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+            ]),
+        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}")
+            .with_output_branches(vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(verified|ok)".to_string()],
+                    CommandBranchTarget::StopSuccess,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(mismatch|failed|error)".to_string()],
+                    CommandBranchTarget::StopFailure,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+            ]),
+    ],
 )
 .with_default_mode("Enable")
 .with_vars(vec![
@@ -257,12 +281,8 @@ let flow = template.to_command_flow(
         .with_default_mode("Enable")
         .with_vars(json!({
             "protocol": "scp",
-            "direction": "to_device",
             "server_addr": "198.51.100.20",
-            "remote_path": "/pub/image.bin",
             "device_path": "flash:/image.bin",
-            "transfer_username": "deploy",
-            "transfer_password": "secret",
         })),
 )?;
 ```
@@ -276,8 +296,8 @@ let flow = template.to_command_flow(
 
 ```rust
 use rneter::session::{
-    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
-    PromptResponseRule,
+    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
+    CommandOutputBranchSource, ConnectionRequest, ExecutionContext, MANAGER, PromptResponseRule,
 };
 use rneter::templates;
 
@@ -303,6 +323,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_record_input(true),
             ),
+        output_branches: vec![
+            CommandOutputBranchRule::new(
+                vec![r"(?i)(copy complete|bytes copied)".to_string()],
+                CommandBranchTarget::StopSuccess,
+            )
+            .with_source(CommandOutputBranchSource::Content),
+            CommandOutputBranchRule::new(
+                vec![r"(?i)(failed|error|denied)".to_string()],
+                CommandBranchTarget::StopFailure,
+            )
+            .with_source(CommandOutputBranchSource::Content),
+        ],
+        output_fallback: CommandBranchTarget::StopFailure,
         ..Command::default()
     }]);
 
@@ -329,6 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 运行时 prompt-response 规则会优先于模板里的静态输入规则生效，所以后续新增 `scp`、`tftp`、`http` 这类向导式 CLI 交互时，通常不需要再改底层模板定义。
+随后会按每一步的输出再做分支判断，因此流程可以根据设备真实返回来继续、跳转或提前结束，而不是只依赖输入参数判断。
 
 ### 会话录制与回放
 
@@ -485,11 +519,9 @@ println!(
 let copy_step = TxStep::new(SessionOperation::template(
     cisco_like_copy_template(),
     CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
-        "protocol": "scp",
-        "direction": "to_device",
+        "command": "copy scp: flash:/fw.bin",
         "server_addr": "192.168.1.100",
         "remote_path": "/srv/images/fw.bin",
-        "device_path": "flash:/fw.bin",
         "transfer_username": "deploy",
         "transfer_password": "secret",
     })),

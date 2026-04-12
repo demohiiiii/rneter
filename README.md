@@ -253,11 +253,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &CommandFlowTemplateRuntime::new()
             .with_default_mode("Enable")
             .with_vars(json!({
-                "protocol": "scp",
-                "direction": "to_device",
+                "command": "copy scp: flash:/image.bin",
                 "server_addr": "198.51.100.20",
                 "remote_path": "/pub/image.bin",
-                "device_path": "flash:/image.bin",
                 "transfer_username": "deploy",
                 "transfer_password": "secret",
             })),
@@ -288,34 +286,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 This built-in template matches the prompt style used by `cisco`, `arista`, `chaitin`, `maipu`,
 and `venustech`. If a vendor wizard differs, build another `CommandFlowTemplate` on top of the
 same abstraction.
+The template intentionally avoids input-side conditional branches: pass the exact `command`
+plus shared prompt vars (`server_addr`, `remote_path`, and optional credentials).
 
 ### Structured Command-Flow Templates
 
 If you want a less hard-coded workflow, build a reusable `CommandFlowTemplate` in Rust.
-It keeps the same declarative shape as the earlier TOML design: `vars`, `steps`,
-`prompts`, `default_mode`, and conditional branches.
+The simpler path is to use inline `{{var}}` templates and output-driven branches,
+instead of embedding input-side conditional branches into template text.
 
 ```rust
+use rneter::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
+    CommandFlowTemplateStep, CommandFlowTemplateVar,
 };
 use serde_json::json;
 
 let template = CommandFlowTemplate::new(
-    "cisco_like_copy",
-    vec![CommandFlowTemplateStep::new(CommandFlowTemplateText::concat(vec![
-        CommandFlowTemplateText::literal("copy "),
-        CommandFlowTemplateText::var("protocol"),
-        CommandFlowTemplateText::literal(": "),
-        CommandFlowTemplateText::var("device_path"),
-    ]))
-    .with_prompts(vec![CommandFlowTemplatePrompt::new(
-        vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
-        CommandFlowTemplateText::var("server_addr"),
-    )
-    .with_append_newline(true)
-    .with_record_input(true)])],
+    "copy_with_verify",
+    vec![
+        CommandFlowTemplateStep::from_template("copy {{protocol}}: {{device_path}}")
+            .with_prompts(vec![
+                CommandFlowTemplatePrompt::from_template(
+                    vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
+                    "{{server_addr}}",
+                )
+                .with_append_newline(true),
+            ])
+            .with_output_branches(vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(copy complete|bytes copied)".to_string()],
+                    CommandBranchTarget::Jump { step_index: 1 },
+                )
+                .with_source(CommandOutputBranchSource::Content),
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(failed|error|denied)".to_string()],
+                    CommandBranchTarget::StopFailure,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+            ]),
+        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}")
+            .with_output_branches(vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(verified|ok)".to_string()],
+                    CommandBranchTarget::StopSuccess,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)(mismatch|failed|error)".to_string()],
+                    CommandBranchTarget::StopFailure,
+                )
+                .with_source(CommandOutputBranchSource::Content),
+            ]),
+    ],
 )
 .with_default_mode("Enable")
 .with_vars(vec![
@@ -339,12 +363,8 @@ let flow = template.to_command_flow(
         .with_default_mode("Enable")
         .with_vars(json!({
             "protocol": "scp",
-            "direction": "to_device",
             "server_addr": "198.51.100.20",
-            "remote_path": "/pub/image.bin",
             "device_path": "flash:/image.bin",
-            "transfer_username": "deploy",
-            "transfer_password": "secret",
         })),
 )?;
 ```
@@ -360,8 +380,8 @@ build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to each 
 
 ```rust
 use rneter::session::{
-    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
-    PromptResponseRule,
+    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
+    CommandOutputBranchSource, ConnectionRequest, ExecutionContext, MANAGER, PromptResponseRule,
 };
 use rneter::templates;
 
@@ -387,6 +407,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_record_input(true),
             ),
+        output_branches: vec![
+            CommandOutputBranchRule::new(
+                vec![r"(?i)(copy complete|bytes copied)".to_string()],
+                CommandBranchTarget::StopSuccess,
+            )
+            .with_source(CommandOutputBranchSource::Content),
+            CommandOutputBranchRule::new(
+                vec![r"(?i)(failed|error|denied)".to_string()],
+                CommandBranchTarget::StopFailure,
+            )
+            .with_source(CommandOutputBranchSource::Content),
+        ],
+        output_fallback: CommandBranchTarget::StopFailure,
         ..Command::default()
     }]);
 
@@ -414,6 +447,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Runtime prompt-response rules are evaluated before template static input rules, so new SCP/TFTP/HTTP
 style wizards can usually be added without changing the underlying template definition.
+Output branches are then evaluated after each step, so workflows can continue/jump/stop based on
+what the device actually printed instead of only pre-supplied input vars.
 
 ### Security Levels
 
@@ -612,11 +647,9 @@ command, a multi-step `CommandFlow`, or a reusable template invocation:
 let copy_step = TxStep::new(SessionOperation::template(
     cisco_like_copy_template(),
     CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
-        "protocol": "scp",
-        "direction": "to_device",
+        "command": "copy scp: flash:/fw.bin",
         "server_addr": "192.168.1.100",
         "remote_path": "/srv/images/fw.bin",
-        "device_path": "flash:/fw.bin",
         "transfer_username": "deploy",
         "transfer_password": "secret",
     })),

@@ -1,5 +1,8 @@
 use crate::error::ConnectError;
-use crate::session::{Command, CommandFlow, CommandInteraction, PromptResponseRule};
+use crate::session::{
+    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
+    PromptResponseRule,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -17,99 +20,35 @@ fn default_var_kind() -> CommandFlowTemplateVarKind {
     CommandFlowTemplateVarKind::String
 }
 
-/// Structured text expression used by command-flow templates.
-///
-/// This keeps the same overall shape as the TOML design (`vars`, `steps`,
-/// `prompts`, conditional branches), but stays fully native to Rust instead of
-/// introducing a separate parser or rendering engine.
+/// Lightweight `{{var}}` inline text template used by command-flow templates.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommandFlowTemplateText {
-    Literal {
-        value: String,
-    },
-    Var {
-        name: String,
-    },
-    Concat {
-        parts: Vec<CommandFlowTemplateText>,
-    },
-    IfEquals {
-        var: String,
-        value: String,
-        then_text: Box<CommandFlowTemplateText>,
-        #[serde(default)]
-        else_text: Option<Box<CommandFlowTemplateText>>,
-    },
+#[serde(transparent)]
+pub struct CommandFlowTemplateText {
+    value: String,
 }
 
 impl CommandFlowTemplateText {
-    /// Build a literal text node.
-    pub fn literal(value: impl Into<String>) -> Self {
-        Self::Literal {
+    /// Build a lightweight `{{var}}` inline template.
+    pub fn template(value: impl Into<String>) -> Self {
+        Self {
             value: value.into(),
-        }
-    }
-
-    /// Render the value of one runtime variable as text.
-    pub fn var(name: impl Into<String>) -> Self {
-        Self::Var { name: name.into() }
-    }
-
-    /// Concatenate multiple text nodes.
-    pub fn concat(parts: Vec<Self>) -> Self {
-        Self::Concat { parts }
-    }
-
-    /// Render `then_text` when `var == value`, otherwise `else_text`.
-    pub fn if_equals(
-        var: impl Into<String>,
-        value: impl Into<String>,
-        then_text: Self,
-        else_text: Option<Self>,
-    ) -> Self {
-        Self::IfEquals {
-            var: var.into(),
-            value: value.into(),
-            then_text: Box::new(then_text),
-            else_text: else_text.map(Box::new),
         }
     }
 
     fn render(&self, values: &Map<String, Value>) -> String {
-        match self {
-            Self::Literal { value } => value.clone(),
-            Self::Var { name } => values
-                .get(name)
-                .map(render_value_as_text)
-                .unwrap_or_default(),
-            Self::Concat { parts } => {
-                let mut rendered = String::new();
-                for part in parts {
-                    rendered.push_str(&part.render(values));
-                }
-                rendered
-            }
-            Self::IfEquals {
-                var,
-                value,
-                then_text,
-                else_text,
-            } => {
-                let matches = values
-                    .get(var)
-                    .map(render_value_as_text)
-                    .is_some_and(|current| current == *value);
+        render_inline_template(self.value.as_str(), values)
+    }
+}
 
-                if matches {
-                    then_text.render(values)
-                } else if let Some(otherwise) = else_text {
-                    otherwise.render(values)
-                } else {
-                    String::new()
-                }
-            }
-        }
+impl From<String> for CommandFlowTemplateText {
+    fn from(value: String) -> Self {
+        Self::template(value)
+    }
+}
+
+impl From<&str> for CommandFlowTemplateText {
+    fn from(value: &str) -> Self {
+        Self::template(value)
     }
 }
 
@@ -121,6 +60,36 @@ fn render_value_as_text(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         other => other.to_string(),
     }
+}
+
+fn render_inline_template(template: &str, values: &Map<String, Value>) -> String {
+    let mut output = String::new();
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+
+        if let Some(end) = after_start.find("}}") {
+            let raw_name = &after_start[..end];
+            let name = raw_name.trim();
+            if name.is_empty() {
+                output.push_str("{{");
+                output.push_str(raw_name);
+                output.push_str("}}");
+            } else if let Some(value) = values.get(name) {
+                output.push_str(&render_value_as_text(value));
+            }
+            rest = &after_start[end + 2..];
+        } else {
+            output.push_str(&rest[start..]);
+            rest = "";
+            break;
+        }
+    }
+
+    output.push_str(rest);
+    output
 }
 
 /// Declarative reusable definition for an interactive command flow.
@@ -244,12 +213,15 @@ impl CommandFlowTemplate {
                 timeout: step.timeout_secs,
                 dyn_params: Default::default(),
                 interaction: CommandInteraction { prompts },
+                output_branches: step.output_branches.clone(),
+                output_fallback: step.output_fallback.clone(),
             });
         }
 
         Ok(CommandFlow {
             steps,
             stop_on_error: self.stop_on_error,
+            max_steps: None,
         })
     }
 
@@ -337,9 +309,9 @@ impl CommandFlowTemplate {
 /// One step inside a reusable command-flow template.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplateStep {
-    /// Structured command renderer.
+    /// Inline command template renderer.
     pub command: CommandFlowTemplateText,
-    /// Optional structured mode override.
+    /// Optional mode template override.
     #[serde(default)]
     pub mode: Option<CommandFlowTemplateText>,
     /// Step timeout in seconds.
@@ -348,22 +320,35 @@ pub struct CommandFlowTemplateStep {
     /// Interactive prompt-response rules evaluated while this step runs.
     #[serde(default)]
     pub prompts: Vec<CommandFlowTemplatePrompt>,
+    /// Output-driven branch rules evaluated after this step finishes.
+    #[serde(default)]
+    pub output_branches: Vec<CommandOutputBranchRule>,
+    /// Fallback output branch action when no `output_branches` rule matches.
+    #[serde(default)]
+    pub output_fallback: CommandBranchTarget,
 }
 
 impl CommandFlowTemplateStep {
     /// Build a step from its command renderer.
-    pub fn new(command: CommandFlowTemplateText) -> Self {
+    pub fn new(command: impl Into<CommandFlowTemplateText>) -> Self {
         Self {
-            command,
+            command: command.into(),
             mode: None,
             timeout_secs: None,
             prompts: Vec::new(),
+            output_branches: Vec::new(),
+            output_fallback: CommandBranchTarget::Next,
         }
     }
 
+    /// Build a step from a lightweight `{{var}}` inline command template.
+    pub fn from_template(command: impl Into<String>) -> Self {
+        Self::new(CommandFlowTemplateText::template(command))
+    }
+
     /// Override the step mode renderer.
-    pub fn with_mode(mut self, mode: CommandFlowTemplateText) -> Self {
-        self.mode = Some(mode);
+    pub fn with_mode(mut self, mode: impl Into<CommandFlowTemplateText>) -> Self {
+        self.mode = Some(mode.into());
         self
     }
 
@@ -378,6 +363,18 @@ impl CommandFlowTemplateStep {
         self.prompts = prompts;
         self
     }
+
+    /// Replace output-driven branch rules for this step.
+    pub fn with_output_branches(mut self, output_branches: Vec<CommandOutputBranchRule>) -> Self {
+        self.output_branches = output_branches;
+        self
+    }
+
+    /// Override fallback behavior when no output branch matches.
+    pub fn with_output_fallback(mut self, output_fallback: CommandBranchTarget) -> Self {
+        self.output_fallback = output_fallback;
+        self
+    }
 }
 
 /// One prompt-response rule inside a reusable command-flow template.
@@ -385,7 +382,7 @@ impl CommandFlowTemplateStep {
 pub struct CommandFlowTemplatePrompt {
     /// Regex patterns that identify the prompt.
     pub patterns: Vec<String>,
-    /// Structured response renderer.
+    /// Inline response template renderer.
     pub response: CommandFlowTemplateText,
     /// Append `\n` after the rendered response.
     #[serde(default)]
@@ -397,13 +394,18 @@ pub struct CommandFlowTemplatePrompt {
 
 impl CommandFlowTemplatePrompt {
     /// Build a prompt-response rule from regex patterns and a response template.
-    pub fn new(patterns: Vec<String>, response: CommandFlowTemplateText) -> Self {
+    pub fn new(patterns: Vec<String>, response: impl Into<CommandFlowTemplateText>) -> Self {
         Self {
             patterns,
-            response,
+            response: response.into(),
             append_newline: false,
             record_input: false,
         }
+    }
+
+    /// Build a prompt-response rule from a lightweight `{{var}}` inline response template.
+    pub fn from_template(patterns: Vec<String>, response: impl Into<String>) -> Self {
+        Self::new(patterns, CommandFlowTemplateText::template(response))
     }
 
     /// Append `\n` after the rendered response.
@@ -681,39 +683,24 @@ fn is_safe_var_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
     use serde_json::json;
 
     #[test]
-    fn renders_template_with_conditional_text() {
+    fn renders_template_with_inline_text() {
         let template = CommandFlowTemplate::new(
             "demo",
             vec![
-                CommandFlowTemplateStep::new(CommandFlowTemplateText::if_equals(
-                    "direction",
-                    "to_device",
-                    CommandFlowTemplateText::concat(vec![
-                        CommandFlowTemplateText::literal("copy "),
-                        CommandFlowTemplateText::var("protocol"),
-                        CommandFlowTemplateText::literal(": "),
-                        CommandFlowTemplateText::var("device_path"),
+                CommandFlowTemplateStep::new("copy {{protocol}}: {{device_path}}")
+                    .with_timeout_secs(300)
+                    .with_prompts(vec![
+                        CommandFlowTemplatePrompt::new(
+                            vec!["(?i)^Address.*$".to_string()],
+                            "{{server_addr}}",
+                        )
+                        .with_append_newline(true)
+                        .with_record_input(true),
                     ]),
-                    Some(CommandFlowTemplateText::concat(vec![
-                        CommandFlowTemplateText::literal("copy "),
-                        CommandFlowTemplateText::var("device_path"),
-                        CommandFlowTemplateText::literal(" "),
-                        CommandFlowTemplateText::var("protocol"),
-                        CommandFlowTemplateText::literal(":"),
-                    ])),
-                ))
-                .with_timeout_secs(300)
-                .with_prompts(vec![
-                    CommandFlowTemplatePrompt::new(
-                        vec!["(?i)^Address.*$".to_string()],
-                        CommandFlowTemplateText::var("server_addr"),
-                    )
-                    .with_append_newline(true)
-                    .with_record_input(true),
-                ]),
             ],
         )
         .with_default_mode("Enable")
@@ -721,9 +708,6 @@ mod tests {
             CommandFlowTemplateVar::new("protocol")
                 .with_required(true)
                 .with_options(["scp", "tftp"]),
-            CommandFlowTemplateVar::new("direction")
-                .with_required(true)
-                .with_options(["to_device", "from_device"]),
             CommandFlowTemplateVar::new("device_path").with_required(true),
             CommandFlowTemplateVar::new("server_addr").with_required(true),
         ]);
@@ -731,7 +715,6 @@ mod tests {
         let flow = template
             .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({
                 "protocol": "scp",
-                "direction": "to_device",
                 "device_path": "flash:/image.bin",
                 "server_addr": "192.0.2.10",
             })))
@@ -749,15 +732,11 @@ mod tests {
 
     #[test]
     fn missing_required_var_fails_rendering() {
-        let template = CommandFlowTemplate::new(
-            "demo",
-            vec![CommandFlowTemplateStep::new(CommandFlowTemplateText::var(
-                "host",
-            ))],
-        )
-        .with_vars(vec![
-            CommandFlowTemplateVar::new("host").with_required(true),
-        ]);
+        let template =
+            CommandFlowTemplate::new("demo", vec![CommandFlowTemplateStep::new("show {{host}}")])
+                .with_vars(vec![
+                    CommandFlowTemplateVar::new("host").with_required(true),
+                ]);
 
         let err = template
             .to_command_flow(&CommandFlowTemplateRuntime::new())
@@ -768,17 +747,98 @@ mod tests {
 
     #[test]
     fn runtime_vars_must_be_json_object() {
-        let template = CommandFlowTemplate::new(
-            "demo",
-            vec![CommandFlowTemplateStep::new(
-                CommandFlowTemplateText::literal("show version"),
-            )],
-        );
+        let template =
+            CommandFlowTemplate::new("demo", vec![CommandFlowTemplateStep::new("show version")]);
 
         let err = template
             .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!(["bad"])))
             .expect_err("non-object vars should fail");
 
         assert!(matches!(err, ConnectError::InvalidCommandFlowTemplate(_)));
+    }
+
+    #[test]
+    fn inline_template_text_renders_placeholders() {
+        let template = CommandFlowTemplate::new(
+            "demo",
+            vec![CommandFlowTemplateStep::new(
+                "copy {{protocol}}: {{device_path}}",
+            )],
+        );
+
+        let flow = template
+            .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({
+                "protocol": "scp",
+                "device_path": "flash:/image.bin",
+            })))
+            .expect("render flow");
+
+        assert_eq!(flow.steps[0].command, "copy scp: flash:/image.bin");
+    }
+
+    #[test]
+    fn template_step_renders_output_branch_rules() {
+        let template = CommandFlowTemplate::new(
+            "branch-demo",
+            vec![
+                CommandFlowTemplateStep::new("show copy status")
+                    .with_output_branches(vec![
+                        CommandOutputBranchRule::new(
+                            vec![r"(?i)retry".to_string()],
+                            CommandBranchTarget::Jump { step_index: 0 },
+                        )
+                        .with_source(CommandOutputBranchSource::Content),
+                    ])
+                    .with_output_fallback(CommandBranchTarget::StopFailure),
+            ],
+        );
+
+        let flow = template
+            .to_command_flow(&CommandFlowTemplateRuntime::new())
+            .expect("render flow");
+        assert_eq!(flow.steps.len(), 1);
+        assert_eq!(flow.steps[0].output_branches.len(), 1);
+        assert_eq!(
+            flow.steps[0].output_branches[0].source,
+            CommandOutputBranchSource::Content
+        );
+        assert_eq!(
+            flow.steps[0].output_fallback,
+            CommandBranchTarget::StopFailure
+        );
+    }
+
+    #[test]
+    fn prompt_and_mode_accept_plain_text_builders() {
+        let template = CommandFlowTemplate::new(
+            "demo",
+            vec![
+                CommandFlowTemplateStep::new("show {{target}}")
+                    .with_mode("{{exec_mode}}")
+                    .with_prompts(vec![
+                        CommandFlowTemplatePrompt::new(
+                            vec!["(?i)^Proceed\\?\\s*$".to_string()],
+                            "yes",
+                        )
+                        .with_append_newline(true),
+                    ]),
+            ],
+        )
+        .with_default_mode("Enable")
+        .with_vars(vec![
+            CommandFlowTemplateVar::new("target").with_required(true),
+            CommandFlowTemplateVar::new("exec_mode").with_required(true),
+        ]);
+
+        let flow = template
+            .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({
+                "target": "version",
+                "exec_mode": "Config",
+            })))
+            .expect("render flow");
+
+        assert_eq!(flow.steps[0].mode, "Config");
+        assert_eq!(flow.steps[0].command, "show version");
+        assert_eq!(flow.steps[0].interaction.prompts[0].response, "yes\n");
     }
 }

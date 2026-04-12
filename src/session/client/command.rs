@@ -136,6 +136,48 @@ impl RuntimeCommandInteraction {
     }
 }
 
+fn branch_source_text(
+    source: &CommandOutputBranchSource,
+    output: &SessionOperationStepOutput,
+) -> String {
+    match source {
+        CommandOutputBranchSource::All => normalize_runtime_output(&output.all),
+        CommandOutputBranchSource::Content => normalize_runtime_output(&output.content),
+        CommandOutputBranchSource::Prompt => output
+            .prompt
+            .as_deref()
+            .map(normalize_runtime_output)
+            .unwrap_or_default(),
+    }
+}
+
+fn resolve_output_branch_target(
+    command: &Command,
+    output: &SessionOperationStepOutput,
+) -> Result<CommandBranchTarget, ConnectError> {
+    for (rule_index, rule) in command.output_branches.iter().enumerate() {
+        if rule.patterns.is_empty() {
+            return Err(ConnectError::InvalidCommandFlow(format!(
+                "command '{}' has an output branch rule with no patterns at index {}",
+                command.command, rule_index
+            )));
+        }
+
+        let patterns = RegexSet::new(&rule.patterns).map_err(|err| {
+            ConnectError::InvalidCommandFlow(format!(
+                "command '{}' has invalid output branch regex at index {}: {}",
+                command.command, rule_index, err
+            ))
+        })?;
+        let source_text = branch_source_text(&rule.source, output);
+        if patterns.is_match(&source_text) {
+            return Ok(rule.target.clone());
+        }
+    }
+
+    Ok(command.output_fallback.clone())
+}
+
 impl SharedSshClient {
     async fn execute_command_step(
         &mut self,
@@ -175,11 +217,34 @@ impl SharedSshClient {
         let CommandFlow {
             steps,
             stop_on_error,
+            max_steps,
         } = flow;
-        let mut outputs = Vec::with_capacity(steps.len());
+        if steps.is_empty() {
+            return Ok(SessionOperationOutput {
+                success: true,
+                steps: Vec::new(),
+            });
+        }
 
-        for (step_index, command) in steps.iter().enumerate() {
-            let output = match self.execute_command_step(step_index, command, sys).await {
+        let mut outputs = Vec::with_capacity(steps.len());
+        let mut cursor = 0usize;
+        let mut executed_steps = 0usize;
+        let limit = max_steps.unwrap_or_else(|| steps.len().saturating_mul(16).max(steps.len()));
+
+        while cursor < steps.len() {
+            if executed_steps >= limit {
+                return Err(OperationRunError::new(
+                    ConnectError::InvalidCommandFlow(format!(
+                        "command flow exceeded max executed steps (limit: {limit})"
+                    )),
+                    SessionOperationOutput {
+                        success: false,
+                        steps: outputs,
+                    },
+                ));
+            }
+            let command = &steps[cursor];
+            let output = match self.execute_command_step(cursor, command, sys).await {
                 Ok(output) => output,
                 Err(error) => {
                     return Err(OperationRunError::new(
@@ -193,12 +258,61 @@ impl SharedSshClient {
             };
 
             let step_success = output.success;
+            let branch_target =
+                resolve_output_branch_target(command, &output).map_err(|error| {
+                    OperationRunError::new(
+                        error,
+                        SessionOperationOutput {
+                            success: false,
+                            steps: {
+                                let mut partial = outputs.clone();
+                                partial.push(output.clone());
+                                partial
+                            },
+                        },
+                    )
+                })?;
             outputs.push(output);
+            executed_steps += 1;
             if *stop_on_error && !step_success {
                 return Ok(SessionOperationOutput {
                     success: false,
                     steps: outputs,
                 });
+            }
+
+            match branch_target {
+                CommandBranchTarget::Next => {
+                    cursor += 1;
+                }
+                CommandBranchTarget::StopSuccess => {
+                    return Ok(SessionOperationOutput {
+                        success: true,
+                        steps: outputs,
+                    });
+                }
+                CommandBranchTarget::StopFailure => {
+                    return Ok(SessionOperationOutput {
+                        success: false,
+                        steps: outputs,
+                    });
+                }
+                CommandBranchTarget::Jump { step_index } => {
+                    if step_index >= steps.len() {
+                        return Err(OperationRunError::new(
+                            ConnectError::InvalidCommandFlow(format!(
+                                "command flow branch target step {} is out of range (total steps: {})",
+                                step_index,
+                                steps.len()
+                            )),
+                            SessionOperationOutput {
+                                success: false,
+                                steps: outputs,
+                            },
+                        ));
+                    }
+                    cursor = step_index;
+                }
             }
         }
 
@@ -385,7 +499,9 @@ impl SharedSshClient {
                         all: clean_output.clone(),
                     });
                 }
-                return Err(ConnectError::ExecTimeout(normalize_runtime_output(&clean_output)));
+                return Err(ConnectError::ExecTimeout(normalize_runtime_output(
+                    &clean_output,
+                )));
             }
             Ok(Err(err)) => {
                 if let Some(recorder) = self.recorder.as_ref() {
@@ -586,6 +702,23 @@ impl TxCommandRunner for SharedSshClient {
 mod tests {
     use super::*;
 
+    fn sample_step_output(
+        content: &str,
+        all: &str,
+        prompt: Option<&str>,
+    ) -> SessionOperationStepOutput {
+        SessionOperationStepOutput {
+            step_index: 0,
+            mode: "Enable".to_string(),
+            operation_summary: "show version".to_string(),
+            success: true,
+            exit_code: Some(0),
+            content: content.to_string(),
+            all: all.to_string(),
+            prompt: prompt.map(ToString::to_string),
+        }
+    }
+
     #[test]
     fn runtime_command_interaction_matches_sanitized_prompt() {
         let interaction = RuntimeCommandInteraction::build(&CommandInteraction {
@@ -648,5 +781,62 @@ mod tests {
 
         let content = extract_command_content(raw_output, sent_command, Some("[192-168-30] ~# "));
         assert_eq!(content, "Thu Apr  9 10:51:14 AM CST 2026");
+    }
+
+    #[test]
+    fn resolve_output_branch_target_matches_content_rule() {
+        let command = Command {
+            command: "copy scp: flash:/image.bin".to_string(),
+            output_branches: vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)retry".to_string()],
+                    CommandBranchTarget::Jump { step_index: 1 },
+                )
+                .with_source(CommandOutputBranchSource::Content),
+            ],
+            output_fallback: CommandBranchTarget::StopFailure,
+            ..Command::default()
+        };
+        let output = sample_step_output("please retry transfer", "please retry transfer", None);
+
+        let target = resolve_output_branch_target(&command, &output).expect("resolve branch");
+        assert_eq!(target, CommandBranchTarget::Jump { step_index: 1 });
+    }
+
+    #[test]
+    fn resolve_output_branch_target_uses_fallback_when_no_rule_matches() {
+        let command = Command {
+            command: "show version".to_string(),
+            output_branches: vec![
+                CommandOutputBranchRule::new(
+                    vec![r"(?i)fatal".to_string()],
+                    CommandBranchTarget::StopFailure,
+                )
+                .with_source(CommandOutputBranchSource::All),
+            ],
+            output_fallback: CommandBranchTarget::Next,
+            ..Command::default()
+        };
+        let output = sample_step_output("completed", "completed", Some("router#"));
+
+        let target = resolve_output_branch_target(&command, &output).expect("resolve branch");
+        assert_eq!(target, CommandBranchTarget::Next);
+    }
+
+    #[test]
+    fn resolve_output_branch_target_rejects_invalid_regex() {
+        let command = Command {
+            command: "show version".to_string(),
+            output_branches: vec![CommandOutputBranchRule::new(
+                vec!["[".to_string()],
+                CommandBranchTarget::StopFailure,
+            )],
+            ..Command::default()
+        };
+        let output = sample_step_output("completed", "completed", Some("router#"));
+
+        let err =
+            resolve_output_branch_target(&command, &output).expect_err("invalid regex should fail");
+        assert!(matches!(err, ConnectError::InvalidCommandFlow(_)));
     }
 }

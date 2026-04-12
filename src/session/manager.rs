@@ -296,6 +296,7 @@ impl SshConnectionManager {
                             timeout,
                             dyn_params,
                             interaction,
+                            ..
                         } = job.data;
                         let timeout = Duration::from_secs(timeout.unwrap_or(60));
                         client_guard
