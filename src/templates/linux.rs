@@ -236,10 +236,9 @@ pub fn linux_with_config(config: LinuxTemplateConfig) -> Result<DeviceHandler, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{CommandBlockKind, RollbackPolicy};
+    use crate::session::RollbackPolicy;
     use crate::templates::{
-        TemplateCapability, available_templates, build_tx_block, classify_command,
-        template_metadata,
+        TemplateCapability, available_templates, build_tx_block, template_metadata,
     };
 
     #[test]
@@ -364,15 +363,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_command_supports_linux_template() {
-        let kind = classify_command("linux", "ls -la").expect("classify");
-        assert_eq!(kind, CommandBlockKind::Show);
-
-        let kind = classify_command("linux", "apt install nginx").expect("classify");
-        assert_eq!(kind, CommandBlockKind::Config);
-    }
-
-    #[test]
     fn linux_with_config_sudo_interactive() {
         let config = LinuxTemplateConfig {
             sudo_mode: SudoMode::SudoInteractive,
@@ -433,13 +423,12 @@ mod tests {
         let commands = vec!["ls -la".to_string(), "cat /etc/hosts".to_string()];
         let tx = build_tx_block("linux", "show-block", "User", &commands, Some(30), None)
             .expect("build show tx");
-        assert_eq!(tx.kind, CommandBlockKind::Show);
         assert!(matches!(tx.rollback_policy, RollbackPolicy::None));
     }
 
     #[test]
-    fn build_tx_block_for_linux_config_requires_explicit_rollback() {
-        // Config operations require explicit rollback command
+    fn build_tx_block_for_linux_mutating_commands_requires_explicit_rollback() {
+        // Mutating operations require explicit rollback command.
         let commands = vec!["apt install nginx".to_string()];
         let result = build_tx_block("linux", "install-nginx", "Root", &commands, Some(60), None);
         assert!(result.is_err());
@@ -447,13 +436,13 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("require resource_rollback_command")
+                .contains("mutating blocks require resource_rollback_command")
         );
     }
 
     #[test]
-    fn build_tx_block_requires_explicit_rollback_for_config_commands() {
-        // Config commands require explicit resource_rollback_command
+    fn build_tx_block_requires_explicit_rollback_for_mutating_commands() {
+        // Mutating commands require explicit resource_rollback_command.
         let commands = vec!["apt install nginx && rm -rf /".to_string()];
         let result = build_tx_block("linux", "malicious", "Root", &commands, Some(60), None);
 
@@ -463,7 +452,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("require resource_rollback_command")
+                .contains("mutating blocks require resource_rollback_command")
         );
     }
 

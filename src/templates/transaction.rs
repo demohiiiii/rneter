@@ -1,40 +1,34 @@
 use crate::error::ConnectError;
-use crate::session::{Command, CommandBlockKind, RollbackPolicy, TxBlock, TxStep};
+use crate::session::{Command, RollbackPolicy, TxBlock, TxStep};
 
 use super::catalog::template_metadata;
 use super::linux::{LinuxCommandType, classify_linux_command};
 
-/// Classify a command for a specific template.
-///
-/// Current rule is intentionally simple: read-only commands are treated as `show`,
-/// everything else is treated as `config`.
-pub fn classify_command(template: &str, command: &str) -> Result<CommandBlockKind, ConnectError> {
+fn is_read_only_command(template: &str, command: &str) -> Result<bool, ConnectError> {
     let template_key = template.to_ascii_lowercase();
     let _ = template_metadata(&template_key)?;
 
     if template_key == "linux" {
-        return Ok(match classify_linux_command(command) {
-            LinuxCommandType::ReadOnly => CommandBlockKind::Show,
-            LinuxCommandType::FileOp | LinuxCommandType::ServiceOp | LinuxCommandType::Custom => {
-                CommandBlockKind::Config
-            }
-        });
+        return Ok(matches!(
+            classify_linux_command(command),
+            LinuxCommandType::ReadOnly
+        ));
     }
 
     let cmd = command.trim().to_ascii_lowercase();
     let show_prefixes = ["show ", "display ", "ping ", "traceroute "];
     if show_prefixes.iter().any(|prefix| cmd.starts_with(prefix)) {
-        return Ok(CommandBlockKind::Show);
+        return Ok(true);
     }
-    Ok(CommandBlockKind::Config)
+    Ok(false)
 }
 
 /// Build a transaction-like block from template + command list.
 ///
 /// Behavior:
-/// - If all commands are `show`-like, build a `show` block with no rollback.
-/// - Otherwise build a `config` block with `WholeResource` rollback policy.
-/// - Users must provide `resource_rollback_command` for config blocks.
+/// - If all commands are classified as read-only, use `RollbackPolicy::None`.
+/// - Otherwise use `RollbackPolicy::WholeResource`.
+/// - Users must provide `resource_rollback_command` for mutating blocks.
 pub fn build_tx_block(
     template: &str,
     block_name: &str,
@@ -52,16 +46,15 @@ pub fn build_tx_block(
         ));
     }
 
-    let kinds = commands
+    let read_only_flags = commands
         .iter()
-        .map(|cmd| classify_command(&template_key, cmd))
+        .map(|cmd| is_read_only_command(&template_key, cmd))
         .collect::<Result<Vec<_>, _>>()?;
-    let all_show = kinds.iter().all(|k| *k == CommandBlockKind::Show);
+    let all_read_only = read_only_flags.iter().all(|is_read_only| *is_read_only);
 
-    if all_show {
+    if all_read_only {
         return Ok(TxBlock {
             name: block_name.to_string(),
-            kind: CommandBlockKind::Show,
             rollback_policy: RollbackPolicy::None,
             steps: commands
                 .iter()
@@ -80,7 +73,7 @@ pub fn build_tx_block(
 
     let Some(undo) = resource_rollback_command else {
         return Err(ConnectError::InvalidTransaction(
-            "config blocks require resource_rollback_command; automatic rollback inference has been removed".to_string(),
+            "mutating blocks require resource_rollback_command; automatic rollback inference has been removed".to_string(),
         ));
     };
 
@@ -98,7 +91,6 @@ pub fn build_tx_block(
 
     Ok(TxBlock {
         name: block_name.to_string(),
-        kind: CommandBlockKind::Config,
         rollback_policy: RollbackPolicy::WholeResource {
             rollback: Box::new(
                 Command {
@@ -121,17 +113,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_show_command_returns_show_kind() {
-        let kind = classify_command("cisco", "show version").expect("classify");
-        assert_eq!(kind, CommandBlockKind::Show);
+    fn classify_show_command_returns_read_only() {
+        let read_only = is_read_only_command("cisco", "show version").expect("classify");
+        assert!(read_only);
     }
 
     #[test]
-    fn build_tx_block_for_show_uses_none_rollback() {
+    fn build_tx_block_for_read_only_uses_none_rollback() {
         let commands = vec!["show version".to_string(), "show clock".to_string()];
         let tx = build_tx_block("cisco", "show-block", "Enable", &commands, Some(30), None)
             .expect("build show tx");
-        assert_eq!(tx.kind, CommandBlockKind::Show);
         assert!(matches!(tx.rollback_policy, RollbackPolicy::None));
         assert!(tx.steps.iter().all(|s| s.rollback.is_none()));
     }
@@ -159,14 +150,14 @@ mod tests {
     }
 
     #[test]
-    fn build_tx_block_requires_explicit_rollback_for_config() {
+    fn build_tx_block_requires_explicit_rollback_for_mutating_commands() {
         let commands = vec!["undo acl 3000".to_string()];
         let err = build_tx_block("huawei", "bad", "Config", &commands, None, None)
             .expect_err("should fail");
         assert!(matches!(err, ConnectError::InvalidTransaction(_)));
         assert!(
             err.to_string()
-                .contains("require resource_rollback_command")
+                .contains("mutating blocks require resource_rollback_command")
         );
     }
 }

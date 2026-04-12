@@ -98,9 +98,8 @@ fn print_workflow_plan(workflow: &TxWorkflow) -> Result<(), Box<dyn Error>> {
     );
     for (block_idx, block) in workflow.blocks.iter().enumerate() {
         println!(
-            "  block[{block_idx}] name={} kind={:?} rollback_policy={:?} steps={}",
+            "  block[{block_idx}] name={} rollback_policy={:?} steps={}",
             block.name,
-            block.kind,
             block.rollback_policy,
             block.steps.len()
         );

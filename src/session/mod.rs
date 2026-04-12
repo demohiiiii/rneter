@@ -42,9 +42,9 @@ pub use recording::{
 };
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
 pub use transaction::{
-    CommandBlockKind, RollbackPolicy, TxBlock, TxOperationStepResult, TxResult, TxStep,
-    TxStepExecutionState, TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult,
-    failed_block_rollback_summary, workflow_rollback_order,
+    RollbackPolicy, TxBlock, TxOperationStepResult, TxResult, TxStep, TxStepExecutionState,
+    TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult, failed_block_rollback_summary,
+    workflow_rollback_order,
 };
 
 /// Global singleton SSH connection manager.

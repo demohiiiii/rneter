@@ -100,8 +100,6 @@ pub enum SessionEvent {
     /// Transaction block execution started.
     TxBlockStarted {
         block_name: String,
-        /// Block type at runtime (`show` or `config`).
-        block_kind: CommandBlockKind,
     },
     /// One forward step inside transaction block succeeded.
     TxStepSucceeded {
@@ -833,7 +831,6 @@ mod tests {
         recorder
             .record_event(SessionEvent::TxBlockStarted {
                 block_name: "acl-update".to_string(),
-                block_kind: CommandBlockKind::Config,
             })
             .expect("record tx started");
         recorder

@@ -34,5 +34,5 @@ pub use network::{
 pub use registry::{
     by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
-pub use transaction::{build_tx_block, classify_command};
+pub use transaction::build_tx_block;
 pub use transfer::cisco_like_copy_template;

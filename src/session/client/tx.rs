@@ -212,7 +212,13 @@ pub(super) async fn rollback_committed_block_with_runner<R: TxCommandRunner + ?S
     sys: Option<&String>,
     result: &mut TxResult,
 ) -> Result<(), ConnectError> {
-    if block.kind == CommandBlockKind::Show {
+    if matches!(block.rollback_policy, RollbackPolicy::None) {
+        result.rollback_attempted = false;
+        result.rollback_succeeded = true;
+        result.rollback_steps = 0;
+        result.rollback_errors.clear();
+        result.block_rollback_operation_summary = None;
+        result.block_rollback_steps.clear();
         return Ok(());
     }
     let executed = (0..block.steps.len()).collect::<Vec<_>>();
@@ -384,7 +390,6 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
     if let Some(recorder) = runner.recorder() {
         let _ = recorder.record_event(SessionEvent::TxBlockStarted {
             block_name: block.name.clone(),
-            block_kind: block.kind,
         });
     }
 
@@ -493,7 +498,7 @@ pub(super) async fn execute_tx_block_with_runner<R: TxCommandRunner + ?Sized>(
         return Ok(result);
     }
 
-    if block.kind == CommandBlockKind::Show {
+    if matches!(block.rollback_policy, RollbackPolicy::None) {
         let result = TxResult {
             block_name: block.name.clone(),
             committed: false,
@@ -917,7 +922,6 @@ mod tests {
     fn per_step_block(rollback_on_failure: bool) -> TxBlock {
         TxBlock {
             name: "addr-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(Command {
@@ -1090,7 +1094,6 @@ mod tests {
     async fn execute_tx_block_whole_resource_waits_for_trigger_step() {
         let block = TxBlock {
             name: "policy-create".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     Command {
@@ -1169,7 +1172,6 @@ mod tests {
             blocks: vec![
                 TxBlock {
                     name: "addr-create".to_string(),
-                    kind: CommandBlockKind::Config,
                     rollback_policy: RollbackPolicy::PerStep,
                     steps: vec![
                         TxStep::new(Command {
@@ -1187,7 +1189,6 @@ mod tests {
                 },
                 TxBlock {
                     name: "policy-create".to_string(),
-                    kind: CommandBlockKind::Config,
                     rollback_policy: RollbackPolicy::PerStep,
                     steps: vec![
                         TxStep::new(Command {
@@ -1313,7 +1314,6 @@ mod tests {
     async fn execute_tx_block_accepts_flow_operations() {
         let block = TxBlock {
             name: "precheck".to_string(),
-            kind: CommandBlockKind::Show,
             rollback_policy: RollbackPolicy::None,
             steps: vec![TxStep::new(CommandFlow::new(vec![
                 Command {
@@ -1368,7 +1368,6 @@ mod tests {
     async fn execute_tx_block_records_whole_resource_rollback_child_steps() {
         let block = TxBlock {
             name: "image-import".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     CommandFlow::new(vec![
@@ -1474,7 +1473,6 @@ mod tests {
         let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
         let block = TxBlock {
             name: "precheck".to_string(),
-            kind: CommandBlockKind::Show,
             rollback_policy: RollbackPolicy::None,
             steps: vec![TxStep::new(CommandFlow::new(vec![
                 Command {
@@ -1534,7 +1532,6 @@ mod tests {
         let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
         let block = TxBlock {
             name: "image-import".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     CommandFlow::new(vec![
@@ -1624,7 +1621,6 @@ mod tests {
     async fn execute_tx_block_preserves_partial_block_rollback_steps_on_operation_error() {
         let block = TxBlock {
             name: "policy-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     CommandFlow::new(vec![

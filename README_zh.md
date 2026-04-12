@@ -443,18 +443,17 @@ assert_eq!(outputs.len(), 2);
 
 ### 事务化命令块下发
 
-对于配置命令，可以按“块”执行并实现失败补偿回滚：
+对于可变更类流程，可以按“块”执行并显式指定 `RollbackPolicy`：
 
 ```rust
 use rneter::session::{
-    Command, CommandBlockKind, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
+    Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
     RollbackPolicy, SessionOperation, TxBlock, TxStep,
 };
 use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
 
 let block = TxBlock {
     name: "addr-create".to_string(),
-    kind: CommandBlockKind::Config,
     rollback_policy: RollbackPolicy::WholeResource {
         rollback: Box::new(
             Command {

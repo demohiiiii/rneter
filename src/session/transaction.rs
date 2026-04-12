@@ -1,18 +1,10 @@
 use super::*;
 
-/// High-level command block type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandBlockKind {
-    Show,
-    Config,
-}
-
-/// Rollback strategy used when a config block fails.
+/// Rollback strategy used when a block fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackPolicy {
-    /// No rollback. Only valid for `show` blocks.
+    /// No rollback is attempted.
     None,
     /// Roll back the whole resource with one command.
     WholeResource {
@@ -51,8 +43,6 @@ pub struct TxStep {
 pub struct TxBlock {
     /// Logical name used in logs/recording.
     pub name: String,
-    /// Block type (`show` skips rollback, `config` requires rollback policy).
-    pub kind: CommandBlockKind,
     /// Rollback behavior when any step fails.
     pub rollback_policy: RollbackPolicy,
     /// Commands executed in order.
@@ -458,8 +448,6 @@ pub fn failed_block_rollback_summary(
 
 impl TxBlock {
     /// Validate cross-field invariants before execution.
-    ///
-    /// Key rule: `show` blocks must not define rollback; `config` blocks must.
     pub fn validate(&self) -> Result<(), ConnectError> {
         if self.steps.is_empty() {
             return Err(ConnectError::InvalidTransaction(
@@ -474,25 +462,12 @@ impl TxBlock {
             }
         }
 
-        match (&self.kind, &self.rollback_policy) {
-            (CommandBlockKind::Show, RollbackPolicy::None) => {}
-            (CommandBlockKind::Show, _) => {
-                return Err(ConnectError::InvalidTransaction(
-                    "show block must use rollback_policy=none".to_string(),
-                ));
-            }
-            (CommandBlockKind::Config, RollbackPolicy::None) => {
-                return Err(ConnectError::InvalidTransaction(
-                    "config block requires rollback policy".to_string(),
-                ));
-            }
-            (
-                CommandBlockKind::Config,
-                RollbackPolicy::WholeResource {
-                    rollback,
-                    trigger_step_index,
-                },
-            ) => {
+        match &self.rollback_policy {
+            RollbackPolicy::None => {}
+            RollbackPolicy::WholeResource {
+                rollback,
+                trigger_step_index,
+            } => {
                 rollback.validate("whole_resource rollback operation")?;
                 if *trigger_step_index >= self.steps.len() {
                     return Err(ConnectError::InvalidTransaction(format!(
@@ -501,7 +476,7 @@ impl TxBlock {
                     )));
                 }
             }
-            (CommandBlockKind::Config, RollbackPolicy::PerStep) => {}
+            RollbackPolicy::PerStep => {}
         }
 
         Ok(())
@@ -674,7 +649,6 @@ mod tests {
     fn per_step_block() -> TxBlock {
         TxBlock {
             name: "addr-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(command("Config", "set addr 1"))
@@ -687,21 +661,10 @@ mod tests {
     }
 
     #[test]
-    fn config_block_requires_rollback_policy() {
+    fn block_accepts_none_rollback_policy() {
         let mut block = per_step_block();
         block.rollback_policy = RollbackPolicy::None;
-        let err = block
-            .validate()
-            .expect_err("config requires rollback policy");
-        assert!(matches!(err, ConnectError::InvalidTransaction(_)));
-    }
-
-    #[test]
-    fn show_block_requires_none_rollback_policy() {
-        let mut block = per_step_block();
-        block.kind = CommandBlockKind::Show;
-        let err = block.validate().expect_err("show must not define rollback");
-        assert!(matches!(err, ConnectError::InvalidTransaction(_)));
+        block.validate().expect("none rollback should be valid");
     }
 
     #[test]
@@ -725,7 +688,6 @@ mod tests {
     fn whole_resource_plan_is_single_operation() {
         let block = TxBlock {
             name: "addr-create".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     Command {
@@ -752,7 +714,6 @@ mod tests {
     fn whole_resource_plan_requires_trigger_step_success() {
         let block = TxBlock {
             name: "addr-create".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(
                     Command {
@@ -775,7 +736,6 @@ mod tests {
     fn whole_resource_plan_supports_custom_trigger_step() {
         let block = TxBlock {
             name: "policy-create".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::WholeResource {
                 rollback: Box::new(command("Config", "delete policy P1").into()),
                 trigger_step_index: 1,
@@ -821,7 +781,6 @@ mod tests {
     fn workflow_validation_reuses_block_validation() {
         let invalid_block = TxBlock {
             name: "bad".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![TxStep::new(command("", "set x"))],
             fail_fast: true,
@@ -839,7 +798,6 @@ mod tests {
     fn per_step_rollback_plan_skips_steps_without_rollback_operation() {
         let block = TxBlock {
             name: "addr-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(command("Config", "set addr 1"))
@@ -860,7 +818,6 @@ mod tests {
     fn validation_rejects_empty_rollback_operation() {
         let block = TxBlock {
             name: "addr-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(command("Config", "set addr 1")).with_rollback(command("Config", "")),
@@ -877,7 +834,6 @@ mod tests {
     fn per_step_plan_can_include_failed_step_rollback_when_enabled() {
         let block = TxBlock {
             name: "obj-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(command("Config", "set a")).with_rollback(command("Config", "unset a")),
@@ -960,7 +916,6 @@ mod tests {
     fn missing_rollback_plan_reasons_explain_missing_commands() {
         let block = TxBlock {
             name: "addr-update".to_string(),
-            kind: CommandBlockKind::Config,
             rollback_policy: RollbackPolicy::PerStep,
             steps: vec![
                 TxStep::new(command("Config", "set addr 1")),

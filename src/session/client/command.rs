@@ -664,8 +664,8 @@ impl SharedSshClient {
 
     /// Execute a transaction-like command block.
     ///
-    /// For `show` blocks, commands are executed sequentially without rollback.
-    /// For `config` blocks, failure triggers rollback according to policy.
+    /// Forward steps run sequentially. On failure, rollback follows
+    /// the block's [`RollbackPolicy`] (`none`, `whole_resource`, `per_step`).
     pub async fn execute_tx_block(
         &mut self,
         block: &TxBlock,
