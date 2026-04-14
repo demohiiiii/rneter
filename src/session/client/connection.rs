@@ -162,32 +162,50 @@ impl SharedSshClient {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(data) = receiver_from_user.recv() => {
-                        if let Err(e) = channel.data(data.as_bytes()).await {
-                            debug!("{} Failed to send data to shell: {:?}", io_task_device_addr, e);
-                            break;
+                    data = receiver_from_user.recv() => {
+                        match data {
+                            Some(data) => {
+                                if let Err(e) = channel.data(data.as_bytes()).await {
+                                    debug!("{} Failed to send data to shell: {:?}", io_task_device_addr, e);
+                                    break;
+                                }
+                            }
+                            None => {
+                                debug!("{} Shell input sender dropped. Closing task.", io_task_device_addr);
+                                break;
+                            }
                         }
                     },
-                    Some(msg) = channel.wait() => {
+                    msg = channel.wait() => {
                         match msg {
-                            ChannelMsg::Data { ref data } => {
-                                if let Ok(s) = std::str::from_utf8(data)
-                                    && sender_to_user.send(s.to_string()).await.is_err() {
-                                        debug!("{} Shell output receiver dropped. Closing task.", io_task_device_addr);
-                                        break;
-                                    }
-                            }
-                            ChannelMsg::ExitStatus { exit_status } => {
-                                debug!("{} Shell exited with status code: {}", io_task_device_addr, exit_status);
-                                let _ = channel.eof().await;
+                            Some(msg) => match msg {
+                                ChannelMsg::Data { ref data } => {
+                                    if let Ok(s) = std::str::from_utf8(data)
+                                        && sender_to_user.send(s.to_string()).await.is_err() {
+                                            debug!("{} Shell output receiver dropped. Closing task.", io_task_device_addr);
+                                            break;
+                                        }
+                                }
+                                ChannelMsg::ExitStatus { exit_status } => {
+                                    debug!("{} Shell exited with status code: {}", io_task_device_addr, exit_status);
+                                    let _ = channel.eof().await;
+                                    break;
+                                }
+                                ChannelMsg::Eof => {
+                                    debug!("{} Shell sent EOF.", io_task_device_addr);
+                                    break;
+                                }
+                                _ => {}
+                            },
+                            None => {
+                                debug!("{} Shell channel closed. Closing task.", io_task_device_addr);
                                 break;
                             }
-                            ChannelMsg::Eof => {
-                                debug!("{} Shell sent EOF.", io_task_device_addr);
-                                break;
-                            }
-                            _ => {}
                         }
+                    }
+                    else => {
+                        debug!("{} All I/O branches disabled. Closing task.", io_task_device_addr);
+                        break;
                     }
                 }
             }
