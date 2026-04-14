@@ -1,4 +1,47 @@
 use super::super::*;
+use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
+
+fn sanitize_initial_output_line(line: &str) -> String {
+    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
+    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
+    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
+    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
+
+    without_simple
+        .chars()
+        .filter(|ch| {
+            (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+                && !('\u{E000}'..='\u{F8FF}').contains(ch)
+        })
+        .collect()
+}
+
+fn latest_terminal_fragment(line: &str) -> &str {
+    line.rsplit(['\n', '\r'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(line)
+}
+
+fn normalize_initial_output(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+
+    for chunk in text.split_inclusive('\n') {
+        let has_newline = chunk.ends_with('\n');
+        let body = if has_newline {
+            &chunk[..chunk.len().saturating_sub(1)]
+        } else {
+            chunk
+        };
+        let sanitized = sanitize_initial_output_line(body);
+        let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
+        normalized.push_str(visible);
+        if has_newline {
+            normalized.push('\n');
+        }
+    }
+
+    normalized
+}
 
 impl SharedSshClient {
     /// Calculates SHA-256 hash of the password.
@@ -198,11 +241,14 @@ impl SharedSshClient {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(err),
             Err(_) => {
-                return Err(ConnectError::InitTimeout(if initial_output.is_empty() {
-                    "waiting for initial prompt".to_string()
-                } else {
-                    initial_output.clone()
-                }));
+                let normalized_output = normalize_initial_output(&initial_output);
+                return Err(ConnectError::InitTimeout(
+                    if normalized_output.trim().is_empty() {
+                        "waiting for initial prompt".to_string()
+                    } else {
+                        normalized_output
+                    },
+                ));
             }
         }
 
@@ -232,5 +278,24 @@ impl SharedSshClient {
     /// Checks if the underlying SSH connection is still active.
     pub fn is_connected(&self) -> bool {
         !self.client.is_closed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_initial_output;
+
+    #[test]
+    fn normalize_initial_output_strips_terminal_sequences_and_private_use_symbols() {
+        let raw = concat!(
+            "Welcome\r\n",
+            "\u{1b}[1m\u{1b}[7m%\u{1b}[27m\u{1b}[0m ",
+            "\u{1b}[38;2;214;93;14m\u{1b}[0m ",
+            "adam@host ~ % ",
+            "\u{1b}[?2004h"
+        );
+
+        let normalized = normalize_initial_output(raw);
+        assert_eq!(normalized, "Welcome\n%  adam@host ~ % ");
     }
 }
