@@ -58,7 +58,12 @@ fn strip_sent_command_prefix(output: &str, sent_command: &str) -> String {
 
     if let Some((first_line, rest)) = trimmed.split_once('\n') {
         let first = first_line.trim_end_matches('\r');
-        if first == sent || normalize_whitespace(first) == normalize_whitespace(sent) {
+        let normalized_first = normalize_whitespace(first);
+        let normalized_sent = normalize_whitespace(sent);
+        if first == sent
+            || normalized_first == normalized_sent
+            || normalized_first.contains(&normalized_sent)
+        {
             return rest.trim_start_matches(['\n', '\r']).to_string();
         }
     }
@@ -881,6 +886,23 @@ mod tests {
 
         let content = extract_command_content(raw_output, sent_command, Some("[192-168-30] ~# "));
         assert_eq!(content, "Thu Apr  9 10:51:14 AM CST 2026");
+    }
+
+    #[test]
+    fn extract_command_content_strips_redrawn_wrapper_echo_line() {
+        let sent_command = r#"date; printf '\n__RNETER_EXIT_CODE__:%s:__\n' "$?""#;
+        let raw_output = concat!(
+            "ddate; printf '\\n__RNETER_EXIT_CODE__:%s:__\\n' \"$?\"dateprintf '\\n__RNETER_EXIT_CODE__:%s:__\\n' \"$?\"\n",
+            "2026年 04月 15日 星期三 15:20:10 CST\n",
+            "<PUA> adam-work <PUA> ~ <PUA> <PUA> 15:20 <PUA> <PUA>"
+        );
+
+        let content = extract_command_content(
+            raw_output,
+            sent_command,
+            Some("<PUA> adam-work <PUA> ~ <PUA> <PUA> 15:20 <PUA> <PUA>"),
+        );
+        assert_eq!(content, "2026年 04月 15日 星期三 15:20:10 CST");
     }
 
     #[test]
