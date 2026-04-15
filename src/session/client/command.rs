@@ -3,7 +3,10 @@ use super::tx::{
     OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
-use crate::device::{latest_terminal_fragment, normalize_terminal_output, sanitize_terminal_text};
+use crate::device::{
+    latest_terminal_fragment, merge_terminal_prompt_fragments, normalize_terminal_output,
+    sanitize_terminal_text, terminal_fragment_has_pua,
+};
 use regex::RegexSet;
 
 fn sanitize_runtime_prompt(line: &str) -> String {
@@ -20,6 +23,22 @@ fn build_exec_timeout_message(output: &str) -> String {
         return "waiting for prompt".to_string();
     }
     normalized_output
+}
+
+fn flush_pending_prompt_lines(
+    handler: &mut DeviceHandler,
+    pending_prompt_lines: &mut Vec<String>,
+    clean_output: &mut String,
+    is_error: &mut bool,
+) {
+    for pending_line in pending_prompt_lines.drain(..) {
+        let trimmed_line = pending_line.trim_end();
+        handler.read(trimmed_line);
+        if handler.error() {
+            *is_error = true;
+        }
+        clean_output.push_str(&pending_line);
+    }
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -392,6 +411,7 @@ impl SharedSshClient {
         let mut clean_output = String::new();
         let mut line_buffer = String::new();
         let mut line = String::new();
+        let mut pending_prompt_lines = Vec::new();
 
         let result = tokio::time::timeout(timeout, async {
             let mut is_error = false;
@@ -406,8 +426,21 @@ impl SharedSshClient {
                         line.clear();
                         line.extend(line_buffer.drain(..=newline_pos));
                         let trim_start = IGNORE_START_LINE.replace(&line, "");
-                        let trimmed_line = trim_start.trim_end();
+                        let normalized_fragment = normalize_runtime_output(&trim_start);
 
+                        if terminal_fragment_has_pua(&normalized_fragment) {
+                            pending_prompt_lines.push(trim_start.to_string());
+                            continue;
+                        }
+
+                        flush_pending_prompt_lines(
+                            handler,
+                            &mut pending_prompt_lines,
+                            &mut clean_output,
+                            &mut is_error,
+                        );
+
+                        let trimmed_line = trim_start.trim_end();
                         handler.read(trimmed_line);
 
                         if handler.error() {
@@ -417,8 +450,62 @@ impl SharedSshClient {
                         clean_output.push_str(&trim_start);
                     }
 
+                    if let Some(prompt_candidate) =
+                        merge_terminal_prompt_fragments(&pending_prompt_lines, Some(&line_buffer))
+                        && handler.read_prompt(&prompt_candidate)
+                    {
+                        handler.read(&prompt_candidate);
+                        let matched_prompt = handler
+                            .current_prompt()
+                            .unwrap_or(&prompt_candidate)
+                            .to_string();
+                        if let Some(recorder) = self.recorder.as_ref()
+                            && *prompt != matched_prompt
+                        {
+                            let _ = recorder.record_event(SessionEvent::PromptChanged {
+                                prompt: matched_prompt.clone(),
+                            });
+                        }
+                        *prompt = matched_prompt;
+                        if is_error {
+                            return Ok(false);
+                        }
+                        return Ok(true);
+                    }
+
+                    if !pending_prompt_lines.is_empty()
+                        && line_buffer.is_empty()
+                        && let Some(prompt_candidate) =
+                            merge_terminal_prompt_fragments(&pending_prompt_lines, None)
+                        && handler.read_prompt(&prompt_candidate)
+                    {
+                        handler.read(&prompt_candidate);
+                        let matched_prompt = handler
+                            .current_prompt()
+                            .unwrap_or(&prompt_candidate)
+                            .to_string();
+                        if let Some(recorder) = self.recorder.as_ref()
+                            && *prompt != matched_prompt
+                        {
+                            let _ = recorder.record_event(SessionEvent::PromptChanged {
+                                prompt: matched_prompt.clone(),
+                            });
+                        }
+                        *prompt = matched_prompt;
+                        if is_error {
+                            return Ok(false);
+                        }
+                        return Ok(true);
+                    }
+
                     if !line_buffer.is_empty() {
                         if handler.read_prompt(&line_buffer) {
+                            flush_pending_prompt_lines(
+                                handler,
+                                &mut pending_prompt_lines,
+                                &mut clean_output,
+                                &mut is_error,
+                            );
                             handler.read(&line_buffer);
                             let matched_prompt =
                                 handler.current_prompt().unwrap_or(&line_buffer).to_string();
@@ -439,6 +526,12 @@ impl SharedSshClient {
                         if let Some((c, is_record)) =
                             runtime_interaction.read_need_write(&line_buffer)
                         {
+                            flush_pending_prompt_lines(
+                                handler,
+                                &mut pending_prompt_lines,
+                                &mut clean_output,
+                                &mut is_error,
+                            );
                             handler.read(&line_buffer);
                             if !is_record {
                                 line_buffer.clear();
@@ -446,6 +539,12 @@ impl SharedSshClient {
                             trace!("Runtime input required: '{:?}'", c);
                             self.sender.send(c).await?;
                         } else if let Some((c, is_record)) = handler.read_need_write(&line_buffer) {
+                            flush_pending_prompt_lines(
+                                handler,
+                                &mut pending_prompt_lines,
+                                &mut clean_output,
+                                &mut is_error,
+                            );
                             handler.read(&line_buffer);
                             if !is_record {
                                 line_buffer.clear();
@@ -463,6 +562,11 @@ impl SharedSshClient {
 
         let success = match result {
             Err(_) => {
+                let mut timeout_output = clean_output.clone();
+                for pending_line in &pending_prompt_lines {
+                    timeout_output.push_str(pending_line);
+                }
+                timeout_output.push_str(&line_buffer);
                 if let Some(recorder) = self.recorder.as_ref() {
                     let _ = recorder.record_event(SessionEvent::CommandOutput {
                         command: command.to_string(),
@@ -473,12 +577,12 @@ impl SharedSshClient {
                         fsm_prompt_after: Some(self.handler.current_state().to_string()),
                         success: false,
                         exit_code: None,
-                        content: clean_output.clone(),
-                        all: clean_output.clone(),
+                        content: timeout_output.clone(),
+                        all: timeout_output.clone(),
                     });
                 }
                 return Err(ConnectError::ExecTimeout(build_exec_timeout_message(
-                    &clean_output,
+                    &timeout_output,
                 )));
             }
             Ok(Err(err)) => {

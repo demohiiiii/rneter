@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::device::normalize_terminal_output;
+use crate::device::{
+    merge_terminal_prompt_fragments, normalize_terminal_output, terminal_fragment_has_pua,
+};
 
 fn build_init_timeout_message(initial_output: &str) -> String {
     let normalized_output = normalize_terminal_output(initial_output);
@@ -182,6 +184,7 @@ impl SharedSshClient {
         let mut buffer = String::new();
         let mut prompt = String::new();
         let mut initial_output = String::new();
+        let mut pending_prompt_lines = Vec::new();
 
         let mut params = handler.dyn_param.clone();
         if let Some(enable) = enable_password.as_ref() {
@@ -198,18 +201,58 @@ impl SharedSshClient {
 
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer.drain(..=newline_pos).collect::<String>();
+                        if terminal_fragment_has_pua(&line) {
+                            pending_prompt_lines.push(line);
+                            continue;
+                        }
+
+                        for pending_line in pending_prompt_lines.drain(..) {
+                            let trimmed_pending = pending_line.trim_end();
+                            handler.read(trimmed_pending);
+                        }
+
                         let trimmed_line = line.trim_end();
                         handler.read(trimmed_line);
                     }
 
+                    if let Some(prompt_candidate) =
+                        merge_terminal_prompt_fragments(&pending_prompt_lines, Some(&buffer))
+                        && handler.read_prompt(&prompt_candidate)
+                    {
+                        handler.read(&prompt_candidate);
+                        prompt.clear();
+                        prompt.push_str(handler.current_prompt().unwrap_or(&prompt_candidate));
+                        return Ok(());
+                    }
+
+                    if !pending_prompt_lines.is_empty()
+                        && buffer.is_empty()
+                        && let Some(prompt_candidate) =
+                            merge_terminal_prompt_fragments(&pending_prompt_lines, None)
+                        && handler.read_prompt(&prompt_candidate)
+                    {
+                        handler.read(&prompt_candidate);
+                        prompt.clear();
+                        prompt.push_str(handler.current_prompt().unwrap_or(&prompt_candidate));
+                        return Ok(());
+                    }
+
                     if !buffer.is_empty() {
                         if handler.read_prompt(&buffer) {
+                            for pending_line in pending_prompt_lines.drain(..) {
+                                let trimmed_pending = pending_line.trim_end();
+                                handler.read(trimmed_pending);
+                            }
                             handler.read(&buffer);
                             prompt.clear();
                             prompt.push_str(handler.current_prompt().unwrap_or(&buffer));
                             return Ok(());
                         }
                         if let Some((c, _)) = handler.read_need_write(&buffer) {
+                            for pending_line in pending_prompt_lines.drain(..) {
+                                let trimmed_pending = pending_line.trim_end();
+                                handler.read(trimmed_pending);
+                            }
                             handler.read(&buffer);
                             sender_to_shell.send(c).await?;
                         }

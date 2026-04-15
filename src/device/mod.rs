@@ -194,6 +194,46 @@ pub(crate) fn normalize_terminal_output(text: &str) -> String {
     normalized
 }
 
+pub(crate) fn normalize_terminal_fragment(line: &str) -> String {
+    let sanitized = sanitize_terminal_text(line);
+    latest_terminal_fragment(&sanitized)
+        .trim_end_matches('\r')
+        .to_string()
+}
+
+pub(crate) fn terminal_fragment_has_pua(line: &str) -> bool {
+    normalize_terminal_fragment(line).contains(PRIVATE_USE_PLACEHOLDER)
+}
+
+pub(crate) fn merge_terminal_prompt_fragments(
+    lines: &[String],
+    tail: Option<&str>,
+) -> Option<String> {
+    let mut fragments = Vec::with_capacity(lines.len() + usize::from(tail.is_some()));
+
+    for line in lines {
+        let fragment = normalize_terminal_fragment(line);
+        let trimmed = fragment.trim();
+        if !trimmed.is_empty() {
+            fragments.push(trimmed.to_string());
+        }
+    }
+
+    if let Some(tail) = tail {
+        let fragment = normalize_terminal_fragment(tail);
+        let trimmed = fragment.trim();
+        if !trimmed.is_empty() {
+            fragments.push(trimmed.to_string());
+        }
+    }
+
+    if fragments.is_empty() {
+        None
+    } else {
+        Some(fragments.join(" "))
+    }
+}
+
 #[cfg(test)]
 fn build_test_handler() -> DeviceHandler {
     let mut dyn_param = HashMap::new();
