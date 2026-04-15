@@ -3,151 +3,23 @@ use super::tx::{
     OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
-use crate::device::{
-    STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE, is_private_use,
-};
+use crate::device::{latest_terminal_fragment, normalize_terminal_output, sanitize_terminal_text};
 use regex::RegexSet;
 
 fn sanitize_runtime_prompt(line: &str) -> String {
-    sanitize_runtime_prompt_impl(line, false)
-}
-
-fn sanitize_runtime_prompt_signature(line: &str) -> String {
-    sanitize_runtime_prompt_impl(line, true)
-}
-
-fn sanitize_runtime_prompt_impl(line: &str, keep_pua_hints: bool) -> String {
-    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
-    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
-    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
-    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
-    let mut sanitized = String::with_capacity(without_simple.len());
-    let mut in_pua_run = false;
-
-    for ch in without_simple.chars() {
-        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-            continue;
-        }
-        if is_private_use(ch) {
-            if keep_pua_hints && !in_pua_run {
-                sanitized.push_str("<PUA>");
-                in_pua_run = true;
-            }
-            continue;
-        }
-        in_pua_run = false;
-        sanitized.push(ch);
-    }
-
-    sanitized
-}
-
-fn latest_terminal_fragment(line: &str) -> &str {
-    line.rsplit(['\n', '\r'])
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(line)
+    sanitize_terminal_text(line)
 }
 
 fn normalize_runtime_output(text: &str) -> String {
-    normalize_runtime_output_with(text, false)
-}
-
-fn normalize_runtime_prompt_signature(text: &str) -> String {
-    normalize_runtime_output_with(text, true)
-}
-
-fn normalize_runtime_output_with(text: &str, keep_pua_hints: bool) -> String {
-    let mut normalized = String::with_capacity(text.len());
-
-    for chunk in text.split_inclusive('\n') {
-        let has_newline = chunk.ends_with('\n');
-        let body = if has_newline {
-            &chunk[..chunk.len().saturating_sub(1)]
-        } else {
-            chunk
-        };
-        let sanitized = if keep_pua_hints {
-            sanitize_runtime_prompt_signature(body)
-        } else {
-            sanitize_runtime_prompt(body)
-        };
-        let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
-        normalized.push_str(visible);
-        if has_newline {
-            normalized.push('\n');
-        }
-    }
-
-    normalized
-}
-
-fn collect_signature_fragments(text: &str) -> Vec<String> {
-    text.split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|fragment| !fragment.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn is_promptish_fragment(fragment: &str) -> bool {
-    fragment.contains("<PUA>")
-        || fragment.contains(['%', '$', '#', '>'])
-        || fragment.contains('~')
-        || fragment.starts_with('/')
-}
-
-fn is_prompt_tail_fragment(fragment: &str) -> bool {
-    fragment
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || matches!(ch, ':' | '.' | '-' | '/' | ' '))
-}
-
-fn build_prompt_signature(text: &str) -> Option<String> {
-    let fragments = collect_signature_fragments(text);
-    if fragments.is_empty() {
-        return None;
-    }
-
-    let pivot = fragments
-        .iter()
-        .rposition(|fragment| is_promptish_fragment(fragment))
-        .unwrap_or(fragments.len().saturating_sub(1));
-    let mut start = pivot;
-    while start > 0 && is_promptish_fragment(&fragments[start - 1]) {
-        start -= 1;
-    }
-    let mut end = pivot + 1;
-    while end < fragments.len()
-        && (is_promptish_fragment(&fragments[end]) || is_prompt_tail_fragment(&fragments[end]))
-    {
-        end += 1;
-    }
-    let signature = fragments[start..end].join(" ");
-    let compact = signature.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
+    normalize_terminal_output(text)
 }
 
 fn build_exec_timeout_message(output: &str) -> String {
     let normalized_output = normalize_runtime_output(output);
-    let signature_output = normalize_runtime_prompt_signature(output);
-    if normalized_output.trim().is_empty() && signature_output.trim().is_empty() {
+    if normalized_output.trim().is_empty() {
         return "waiting for prompt".to_string();
     }
-    let signature = build_prompt_signature(&signature_output).unwrap_or_else(|| {
-        signature_output
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    if normalized_output.trim().is_empty() {
-        return format!("prompt_signature:\n{signature}");
-    }
-
-    format!("output:\n{normalized_output}\n\nprompt_signature:\n{signature}")
+    normalized_output
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -873,6 +745,24 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_interaction_matches_shared_sanitized_prompt_with_pua_placeholders() {
+        let interaction = RuntimeCommandInteraction::build(&CommandInteraction {
+            prompts: vec![PromptResponseRule::new(
+                vec![r"^<PUA> adam-work ~ <PUA> \d{1,2}:\d{2}$".to_string()],
+                "ok\n".to_string(),
+            )],
+        })
+        .expect("build interaction");
+
+        let prompt = concat!("", " adam-work ~ ", "", " 11:32");
+
+        assert_eq!(
+            interaction.read_need_write(prompt),
+            Some(("ok\n".to_string(), false))
+        );
+    }
+
+    #[test]
     fn extract_command_content_strips_fish_wrapper_echo_and_prompt() {
         let sent_command = r#"date; printf '\n__RNETER_EXIT_CODE__:%s:__\n' "$status""#;
         let raw_output = concat!(
@@ -947,34 +837,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_runtime_prompt_signature_keeps_private_use_placeholders() {
-        let raw = concat!("\u{1b}[1m%\u{1b}[0m ", "󰌽", " adam-work ~ ", "", " 10:38");
+    fn normalize_runtime_output_keeps_private_use_placeholders() {
+        let raw = concat!("", " adam-work ~ ", "", " 10:38");
 
-        let signature = normalize_runtime_prompt_signature(raw);
-        assert_eq!(signature, "% <PUA> adam-work ~ <PUA> 10:38");
+        let output = normalize_runtime_output(raw);
+        assert_eq!(output, "<PUA> adam-work ~ <PUA> 10:38");
     }
 
     #[test]
-    fn exec_timeout_message_reports_prompt_signature() {
-        let raw = concat!(
-            "command output\n",
-            "\u{1b}[1m%\u{1b}[0m ",
-            "󰌽",
-            " adam-work  ~   10:38  "
-        );
+    fn exec_timeout_message_reports_shared_sanitized_output() {
+        let raw = concat!("command output\n", "", " adam-work  ~   10:38  ");
 
         let message = build_exec_timeout_message(raw);
-        assert_eq!(
-            message,
-            "output:\ncommand output\n%  adam-work  ~   10:38  \n\nprompt_signature:\n% <PUA> adam-work ~ 10:38"
-        );
-    }
-
-    #[test]
-    fn build_prompt_signature_joins_tail_fragments_for_exec_timeout() {
-        let signature =
-            build_prompt_signature("%\r<PUA>\radam-work  ~\r<PUA>\r10:38").expect("signature");
-
-        assert_eq!(signature, "% <PUA> adam-work ~ <PUA> 10:38");
+        assert_eq!(message, "command output\n<PUA> adam-work  ~   10:38  ");
     }
 }

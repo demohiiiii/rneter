@@ -1,149 +1,12 @@
 use super::super::*;
-use crate::device::{
-    STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE, is_private_use,
-};
-
-fn sanitize_initial_output_line(line: &str) -> String {
-    sanitize_initial_output_line_impl(line, false)
-}
-
-fn sanitize_initial_output_line_with_pua_hints(line: &str) -> String {
-    sanitize_initial_output_line_impl(line, true)
-}
-
-fn sanitize_initial_output_line_impl(line: &str, keep_pua_hints: bool) -> String {
-    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
-    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
-    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
-    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
-
-    let mut sanitized = String::with_capacity(without_simple.len());
-    let mut in_pua_run = false;
-
-    for ch in without_simple.chars() {
-        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-            continue;
-        }
-        if is_private_use(ch) {
-            if keep_pua_hints && !in_pua_run {
-                sanitized.push_str("<PUA>");
-                in_pua_run = true;
-            }
-            continue;
-        }
-        in_pua_run = false;
-        sanitized.push(ch);
-    }
-
-    sanitized
-}
-
-fn latest_terminal_fragment(line: &str) -> &str {
-    line.rsplit(['\n', '\r'])
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(line)
-}
-
-fn normalize_initial_output(text: &str) -> String {
-    normalize_initial_output_with(text, false)
-}
-
-fn normalize_initial_output_with_pua_hints(text: &str) -> String {
-    normalize_initial_output_with(text, true)
-}
-
-fn normalize_initial_output_with(text: &str, keep_pua_hints: bool) -> String {
-    let mut normalized = String::with_capacity(text.len());
-
-    for chunk in text.split_inclusive('\n') {
-        let has_newline = chunk.ends_with('\n');
-        let body = if has_newline {
-            &chunk[..chunk.len().saturating_sub(1)]
-        } else {
-            chunk
-        };
-        let sanitized = if keep_pua_hints {
-            sanitize_initial_output_line_with_pua_hints(body)
-        } else {
-            sanitize_initial_output_line(body)
-        };
-        let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
-        normalized.push_str(visible);
-        if has_newline {
-            normalized.push('\n');
-        }
-    }
-
-    normalized
-}
-
-fn collect_signature_fragments(text: &str) -> Vec<String> {
-    text.split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|fragment| !fragment.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn is_promptish_fragment(fragment: &str) -> bool {
-    fragment.contains("<PUA>")
-        || fragment.contains(['%', '$', '#', '>'])
-        || fragment.contains('~')
-        || fragment.starts_with('/')
-}
-
-fn is_prompt_tail_fragment(fragment: &str) -> bool {
-    fragment
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || matches!(ch, ':' | '.' | '-' | '/' | ' '))
-}
-
-fn build_prompt_signature(text: &str) -> Option<String> {
-    let fragments = collect_signature_fragments(text);
-    if fragments.is_empty() {
-        return None;
-    }
-
-    let pivot = fragments
-        .iter()
-        .rposition(|fragment| is_promptish_fragment(fragment))
-        .unwrap_or(fragments.len().saturating_sub(1));
-    let mut start = pivot;
-    while start > 0 && is_promptish_fragment(&fragments[start - 1]) {
-        start -= 1;
-    }
-    let mut end = pivot + 1;
-    while end < fragments.len()
-        && (is_promptish_fragment(&fragments[end]) || is_prompt_tail_fragment(&fragments[end]))
-    {
-        end += 1;
-    }
-    let signature = fragments[start..end].join(" ");
-    let compact = signature.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
-}
+use crate::device::normalize_terminal_output;
 
 fn build_init_timeout_message(initial_output: &str) -> String {
-    let normalized_output = normalize_initial_output(initial_output);
-    let signature_output = normalize_initial_output_with_pua_hints(initial_output);
-    if normalized_output.trim().is_empty() && signature_output.trim().is_empty() {
+    let normalized_output = normalize_terminal_output(initial_output);
+    if normalized_output.trim().is_empty() {
         return "waiting for initial prompt".to_string();
     }
-    let signature = build_prompt_signature(&signature_output).unwrap_or_else(|| {
-        signature_output
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    if normalized_output.trim().is_empty() {
-        return format!("prompt_signature:\n{signature}");
-    }
-
-    format!("output:\n{normalized_output}\n\nprompt_signature:\n{signature}")
+    normalized_output
 }
 
 impl SharedSshClient {
@@ -399,13 +262,11 @@ impl SharedSshClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_init_timeout_message, build_prompt_signature, normalize_initial_output,
-        normalize_initial_output_with_pua_hints,
-    };
+    use super::build_init_timeout_message;
+    use crate::device::normalize_terminal_output;
 
     #[test]
-    fn normalize_initial_output_strips_terminal_sequences_and_private_use_symbols() {
+    fn normalize_initial_output_uses_shared_pua_placeholder_logic() {
         let raw = concat!(
             "Welcome\r\n",
             "\u{1b}[1m\u{1b}[7m%\u{1b}[27m\u{1b}[0m ",
@@ -414,40 +275,15 @@ mod tests {
             "\u{1b}[?2004h"
         );
 
-        let normalized = normalize_initial_output(raw);
-        assert_eq!(normalized, "Welcome\n%   adam@host ~ % ");
-        assert!(!normalized.contains('󰌽'));
+        let normalized = normalize_terminal_output(raw);
+        assert_eq!(normalized, "Welcome\n% <PUA> <PUA> adam@host ~ % ");
     }
 
     #[test]
-    fn normalize_initial_output_with_pua_hints_keeps_prompt_shape() {
-        let raw = concat!("\u{1b}[1m%\u{1b}[0m ", "󰌽", " adam@host ~ ", "", " 10:38");
-
-        let hinted = normalize_initial_output_with_pua_hints(raw);
-        assert_eq!(hinted, "% <PUA> adam@host ~ <PUA> 10:38");
-    }
-
-    #[test]
-    fn init_timeout_message_includes_prompt_candidate_hint_when_pua_exists() {
-        let raw = concat!(
-            "Welcome\r\n",
-            "\u{1b}[1m%\u{1b}[0m ",
-            "󰌽",
-            " adam-work  ~   10:38  "
-        );
+    fn init_timeout_message_reports_shared_sanitized_output() {
+        let raw = concat!("Welcome\r\n", "", " adam-work  ~   10:38  ");
 
         let message = build_init_timeout_message(raw);
-        assert_eq!(
-            message,
-            "output:\nWelcome\n%  adam-work  ~   10:38  \n\nprompt_signature:\n% <PUA> adam-work ~ 10:38"
-        );
-    }
-
-    #[test]
-    fn build_prompt_signature_joins_tail_fragments_instead_of_only_last_one() {
-        let signature =
-            build_prompt_signature("%\r<PUA>\radam-work  ~\r<PUA>\r10:38").expect("signature");
-
-        assert_eq!(signature, "% <PUA> adam-work ~ <PUA> 10:38");
+        assert_eq!(message, "Welcome\n<PUA> adam-work  ~   10:38  ");
     }
 }

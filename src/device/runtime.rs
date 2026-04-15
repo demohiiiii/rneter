@@ -1,26 +1,6 @@
 use log::trace;
 
-use super::{
-    DeviceHandler, STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE,
-    is_private_use,
-};
-
-fn sanitize_terminal_line(line: &str) -> String {
-    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
-    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
-    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
-    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
-    without_simple
-        .chars()
-        .filter(|ch| (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) && !is_private_use(*ch))
-        .collect()
-}
-
-fn latest_terminal_fragment(line: &str) -> &str {
-    line.rsplit(['\n', '\r'])
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(line)
-}
+use super::{DeviceHandler, latest_terminal_fragment, sanitize_terminal_text};
 
 impl DeviceHandler {
     /// Converts a line of output to a state.
@@ -37,6 +17,7 @@ impl DeviceHandler {
                 .unwrap_or("output");
             return (0, state, None);
         }
+
         let mut current_state_catch = None;
         let index = match matches.first() {
             Some(v) => *v,
@@ -49,12 +30,14 @@ impl DeviceHandler {
                 return (0, state, None);
             }
         };
+
         if need_catch
             && let Some((regex, catch)) = self.catch_map.get(&index)
             && let Some(caps) = regex.captures(line)
         {
             current_state_catch = caps.name(catch).map(|s| s.as_str().to_string());
         }
+
         let state_index = self.regex_index_map.get(&index).copied().unwrap_or(0);
         let state = self
             .all_states
@@ -66,7 +49,7 @@ impl DeviceHandler {
 
     /// Reads a line of output and updates the current state.
     pub fn read(&mut self, line: &str) {
-        let sanitized_line = sanitize_terminal_line(line);
+        let sanitized_line = sanitize_terminal_text(line);
         let prompt_line = latest_terminal_fragment(&sanitized_line);
         trace!("Read line: '{:?}'", prompt_line);
         let (state_index, state, catch) = self.line2state(prompt_line, true);
@@ -104,7 +87,7 @@ impl DeviceHandler {
 
     /// Checks if a line matches a prompt pattern.
     pub fn read_prompt(&mut self, line: &str) -> bool {
-        let sanitized_line = sanitize_terminal_line(line);
+        let sanitized_line = sanitize_terminal_text(line);
         let prompt_line = latest_terminal_fragment(&sanitized_line);
         trace!("Checking if line is a prompt: '{:?}'", prompt_line);
         let (index, _, _) = self.line2state(prompt_line, false);
@@ -113,7 +96,7 @@ impl DeviceHandler {
 
     /// Checks if a line matches a system-specific prompt pattern.
     pub fn read_sys_prompt(&mut self, line: &str) -> bool {
-        let sanitized_line = sanitize_terminal_line(line);
+        let sanitized_line = sanitize_terminal_text(line);
         let prompt_line = latest_terminal_fragment(&sanitized_line);
         trace!("Checking if line is a system prompt: '{:?}'", prompt_line);
         let (index, _, _) = self.line2state(prompt_line, false);
@@ -122,7 +105,7 @@ impl DeviceHandler {
 
     /// Checks if a line requires input and returns the input to send.
     pub fn read_need_write(&mut self, line: &str) -> Option<(String, bool)> {
-        let sanitized_line = sanitize_terminal_line(line);
+        let sanitized_line = sanitize_terminal_text(line);
         let prompt_line = latest_terminal_fragment(&sanitized_line);
         trace!("Checking if input is required: '{:?}'", prompt_line);
         let (_, input, _) = self.line2state(prompt_line, false);
@@ -172,6 +155,7 @@ impl DeviceHandler {
 #[cfg(test)]
 mod tests {
     use super::super::build_test_handler;
+    use crate::device::normalize_terminal_output;
     use crate::templates;
 
     #[test]
@@ -248,5 +232,39 @@ mod tests {
         handler.read(raw_prompt);
         assert_eq!(handler.current_state(), "root");
         assert_eq!(handler.current_prompt(), Some("[192-168-30] ~# "));
+    }
+
+    #[test]
+    fn prompt_rules_can_match_pua_placeholders_after_shared_sanitization() {
+        let mut handler = crate::device::DeviceHandler::new(crate::device::DeviceHandlerConfig {
+            prompt: vec![crate::device::prompt_rule(
+                "User",
+                &[r"^<PUA>\s+adam-work\s+<PUA>\s+~\s+<PUA>\s+\d{1,2}:\d{2}\s+<PUA>\s+<PUA>$"],
+            )],
+            ..Default::default()
+        })
+        .expect("build handler");
+
+        let raw_prompt = concat!(
+            "",
+            " adam-work ",
+            "",
+            " ~ ",
+            "",
+            "",
+            " 11:32 ",
+            "",
+            " "
+        );
+
+        assert!(handler.read_prompt(raw_prompt));
+        handler.read(raw_prompt);
+        assert_eq!(handler.current_state(), "user");
+    }
+
+    #[test]
+    fn shared_normalization_replaces_private_use_with_placeholder() {
+        let normalized = normalize_terminal_output(concat!("󰌽", " adam-work ", ""));
+        assert_eq!(normalized, "<PUA> adam-work <PUA>");
     }
 }

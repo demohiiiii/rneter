@@ -84,6 +84,7 @@ pub struct DeviceHandler {
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
+pub(crate) const PRIVATE_USE_PLACEHOLDER: &str = "<PUA>";
 
 pub(crate) fn is_private_use(ch: char) -> bool {
     matches!(
@@ -139,6 +140,59 @@ pub static STRIP_SIMPLE_ESCAPE: Lazy<Regex> =
         Ok(re) => re,
         Err(err) => panic!("invalid STRIP_SIMPLE_ESCAPE regex: {err}"),
     });
+
+pub(crate) fn sanitize_terminal_text(line: &str) -> String {
+    let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
+    let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
+    let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
+    let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
+
+    let mut sanitized = String::with_capacity(without_simple.len());
+    let mut in_pua_run = false;
+    for ch in without_simple.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            continue;
+        }
+        if is_private_use(ch) {
+            if !in_pua_run {
+                sanitized.push_str(PRIVATE_USE_PLACEHOLDER);
+                in_pua_run = true;
+            }
+            continue;
+        }
+        in_pua_run = false;
+        sanitized.push(ch);
+    }
+
+    sanitized
+}
+
+pub(crate) fn latest_terminal_fragment(line: &str) -> &str {
+    line.rsplit(['\n', '\r'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(line)
+}
+
+pub(crate) fn normalize_terminal_output(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+
+    for chunk in text.split_inclusive('\n') {
+        let has_newline = chunk.ends_with('\n');
+        let body = if has_newline {
+            &chunk[..chunk.len().saturating_sub(1)]
+        } else {
+            chunk
+        };
+        let sanitized = sanitize_terminal_text(body);
+        let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
+        normalized.push_str(visible);
+        if has_newline {
+            normalized.push('\n');
+        }
+    }
+
+    normalized
+}
 
 #[cfg(test)]
 fn build_test_handler() -> DeviceHandler {
