@@ -9,14 +9,37 @@ use crate::device::{
 use regex::RegexSet;
 
 fn sanitize_runtime_prompt(line: &str) -> String {
+    sanitize_runtime_prompt_impl(line, false)
+}
+
+fn sanitize_runtime_prompt_signature(line: &str) -> String {
+    sanitize_runtime_prompt_impl(line, true)
+}
+
+fn sanitize_runtime_prompt_impl(line: &str, keep_pua_hints: bool) -> String {
     let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
     let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
     let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
     let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
-    without_simple
-        .chars()
-        .filter(|ch| (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) && !is_private_use(*ch))
-        .collect()
+    let mut sanitized = String::with_capacity(without_simple.len());
+    let mut in_pua_run = false;
+
+    for ch in without_simple.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            continue;
+        }
+        if is_private_use(ch) {
+            if keep_pua_hints && !in_pua_run {
+                sanitized.push_str("<PUA>");
+                in_pua_run = true;
+            }
+            continue;
+        }
+        in_pua_run = false;
+        sanitized.push(ch);
+    }
+
+    sanitized
 }
 
 fn latest_terminal_fragment(line: &str) -> &str {
@@ -26,6 +49,14 @@ fn latest_terminal_fragment(line: &str) -> &str {
 }
 
 fn normalize_runtime_output(text: &str) -> String {
+    normalize_runtime_output_with(text, false)
+}
+
+fn normalize_runtime_prompt_signature(text: &str) -> String {
+    normalize_runtime_output_with(text, true)
+}
+
+fn normalize_runtime_output_with(text: &str, keep_pua_hints: bool) -> String {
     let mut normalized = String::with_capacity(text.len());
 
     for chunk in text.split_inclusive('\n') {
@@ -35,7 +66,11 @@ fn normalize_runtime_output(text: &str) -> String {
         } else {
             chunk
         };
-        let sanitized = sanitize_runtime_prompt(body);
+        let sanitized = if keep_pua_hints {
+            sanitize_runtime_prompt_signature(body)
+        } else {
+            sanitize_runtime_prompt(body)
+        };
         let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
         normalized.push_str(visible);
         if has_newline {
@@ -44,6 +79,21 @@ fn normalize_runtime_output(text: &str) -> String {
     }
 
     normalized
+}
+
+fn last_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+fn build_exec_timeout_message(output: &str) -> String {
+    let signature_output = normalize_runtime_prompt_signature(output);
+    if signature_output.trim().is_empty() {
+        return "waiting for prompt".to_string();
+    }
+
+    let last_signature =
+        last_non_empty_line(&signature_output).unwrap_or(signature_output.as_str());
+    format!("prompt_signature:\n{last_signature}")
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -501,7 +551,7 @@ impl SharedSshClient {
                         all: clean_output.clone(),
                     });
                 }
-                return Err(ConnectError::ExecTimeout(normalize_runtime_output(
+                return Err(ConnectError::ExecTimeout(build_exec_timeout_message(
                     &clean_output,
                 )));
             }
@@ -840,5 +890,26 @@ mod tests {
         let err =
             resolve_output_branch_target(&command, &output).expect_err("invalid regex should fail");
         assert!(matches!(err, ConnectError::InvalidCommandFlow(_)));
+    }
+
+    #[test]
+    fn normalize_runtime_prompt_signature_keeps_private_use_placeholders() {
+        let raw = concat!("\u{1b}[1m%\u{1b}[0m ", "󰌽", " adam-work ~ ", "", " 10:38");
+
+        let signature = normalize_runtime_prompt_signature(raw);
+        assert_eq!(signature, "% <PUA> adam-work ~ <PUA> 10:38");
+    }
+
+    #[test]
+    fn exec_timeout_message_reports_prompt_signature() {
+        let raw = concat!(
+            "command output\n",
+            "\u{1b}[1m%\u{1b}[0m ",
+            "󰌽",
+            " adam-work  ~   10:38  "
+        );
+
+        let message = build_exec_timeout_message(raw);
+        assert_eq!(message, "prompt_signature:\n% <PUA> adam-work  ~   10:38  ");
     }
 }

@@ -4,15 +4,38 @@ use crate::device::{
 };
 
 fn sanitize_initial_output_line(line: &str) -> String {
+    sanitize_initial_output_line_impl(line, false)
+}
+
+fn sanitize_initial_output_line_with_pua_hints(line: &str) -> String {
+    sanitize_initial_output_line_impl(line, true)
+}
+
+fn sanitize_initial_output_line_impl(line: &str, keep_pua_hints: bool) -> String {
     let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
     let without_dcs = STRIP_DCS_ESCAPE.replace_all(without_osc.as_ref(), "");
     let without_csi = STRIP_CSI_ESCAPE.replace_all(without_dcs.as_ref(), "");
     let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
 
-    without_simple
-        .chars()
-        .filter(|ch| (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) && !is_private_use(*ch))
-        .collect()
+    let mut sanitized = String::with_capacity(without_simple.len());
+    let mut in_pua_run = false;
+
+    for ch in without_simple.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            continue;
+        }
+        if is_private_use(ch) {
+            if keep_pua_hints && !in_pua_run {
+                sanitized.push_str("<PUA>");
+                in_pua_run = true;
+            }
+            continue;
+        }
+        in_pua_run = false;
+        sanitized.push(ch);
+    }
+
+    sanitized
 }
 
 fn latest_terminal_fragment(line: &str) -> &str {
@@ -21,7 +44,16 @@ fn latest_terminal_fragment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+#[cfg(test)]
 fn normalize_initial_output(text: &str) -> String {
+    normalize_initial_output_with(text, false)
+}
+
+fn normalize_initial_output_with_pua_hints(text: &str) -> String {
+    normalize_initial_output_with(text, true)
+}
+
+fn normalize_initial_output_with(text: &str, keep_pua_hints: bool) -> String {
     let mut normalized = String::with_capacity(text.len());
 
     for chunk in text.split_inclusive('\n') {
@@ -31,7 +63,11 @@ fn normalize_initial_output(text: &str) -> String {
         } else {
             chunk
         };
-        let sanitized = sanitize_initial_output_line(body);
+        let sanitized = if keep_pua_hints {
+            sanitize_initial_output_line_with_pua_hints(body)
+        } else {
+            sanitize_initial_output_line(body)
+        };
         let visible = latest_terminal_fragment(&sanitized).trim_end_matches('\r');
         normalized.push_str(visible);
         if has_newline {
@@ -40,6 +76,20 @@ fn normalize_initial_output(text: &str) -> String {
     }
 
     normalized
+}
+
+fn last_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+fn build_init_timeout_message(initial_output: &str) -> String {
+    let signature_output = normalize_initial_output_with_pua_hints(initial_output);
+    if signature_output.trim().is_empty() {
+        return "waiting for initial prompt".to_string();
+    }
+    let last_signature =
+        last_non_empty_line(&signature_output).unwrap_or(signature_output.as_str());
+    format!("prompt_signature:\n{last_signature}")
 }
 
 impl SharedSshClient {
@@ -258,14 +308,9 @@ impl SharedSshClient {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(err),
             Err(_) => {
-                let normalized_output = normalize_initial_output(&initial_output);
-                return Err(ConnectError::InitTimeout(
-                    if normalized_output.trim().is_empty() {
-                        "waiting for initial prompt".to_string()
-                    } else {
-                        normalized_output
-                    },
-                ));
+                return Err(ConnectError::InitTimeout(build_init_timeout_message(
+                    &initial_output,
+                )));
             }
         }
 
@@ -300,7 +345,10 @@ impl SharedSshClient {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_initial_output;
+    use super::{
+        build_init_timeout_message, normalize_initial_output,
+        normalize_initial_output_with_pua_hints,
+    };
 
     #[test]
     fn normalize_initial_output_strips_terminal_sequences_and_private_use_symbols() {
@@ -315,5 +363,26 @@ mod tests {
         let normalized = normalize_initial_output(raw);
         assert_eq!(normalized, "Welcome\n%   adam@host ~ % ");
         assert!(!normalized.contains('󰌽'));
+    }
+
+    #[test]
+    fn normalize_initial_output_with_pua_hints_keeps_prompt_shape() {
+        let raw = concat!("\u{1b}[1m%\u{1b}[0m ", "󰌽", " adam@host ~ ", "", " 10:38");
+
+        let hinted = normalize_initial_output_with_pua_hints(raw);
+        assert_eq!(hinted, "% <PUA> adam@host ~ <PUA> 10:38");
+    }
+
+    #[test]
+    fn init_timeout_message_includes_prompt_candidate_hint_when_pua_exists() {
+        let raw = concat!(
+            "Welcome\r\n",
+            "\u{1b}[1m%\u{1b}[0m ",
+            "󰌽",
+            " adam-work  ~   10:38  "
+        );
+
+        let message = build_init_timeout_message(raw);
+        assert_eq!(message, "prompt_signature:\n% <PUA> adam-work  ~   10:38  ");
     }
 }
