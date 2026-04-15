@@ -44,7 +44,6 @@ fn latest_terminal_fragment(line: &str) -> &str {
         .unwrap_or(line)
 }
 
-#[cfg(test)]
 fn normalize_initial_output(text: &str) -> String {
     normalize_initial_output_with(text, false)
 }
@@ -78,18 +77,73 @@ fn normalize_initial_output_with(text: &str, keep_pua_hints: bool) -> String {
     normalized
 }
 
-fn last_non_empty_line(text: &str) -> Option<&str> {
-    text.lines().rev().find(|line| !line.trim().is_empty())
+fn collect_signature_fragments(text: &str) -> Vec<String> {
+    text.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn is_promptish_fragment(fragment: &str) -> bool {
+    fragment.contains("<PUA>")
+        || fragment.contains(['%', '$', '#', '>'])
+        || fragment.contains('~')
+        || fragment.starts_with('/')
+}
+
+fn is_prompt_tail_fragment(fragment: &str) -> bool {
+    fragment
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || matches!(ch, ':' | '.' | '-' | '/' | ' '))
+}
+
+fn build_prompt_signature(text: &str) -> Option<String> {
+    let fragments = collect_signature_fragments(text);
+    if fragments.is_empty() {
+        return None;
+    }
+
+    let pivot = fragments
+        .iter()
+        .rposition(|fragment| is_promptish_fragment(fragment))
+        .unwrap_or(fragments.len().saturating_sub(1));
+    let mut start = pivot;
+    while start > 0 && is_promptish_fragment(&fragments[start - 1]) {
+        start -= 1;
+    }
+    let mut end = pivot + 1;
+    while end < fragments.len()
+        && (is_promptish_fragment(&fragments[end]) || is_prompt_tail_fragment(&fragments[end]))
+    {
+        end += 1;
+    }
+    let signature = fragments[start..end].join(" ");
+    let compact = signature.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        None
+    } else {
+        Some(compact)
+    }
 }
 
 fn build_init_timeout_message(initial_output: &str) -> String {
+    let normalized_output = normalize_initial_output(initial_output);
     let signature_output = normalize_initial_output_with_pua_hints(initial_output);
-    if signature_output.trim().is_empty() {
+    if normalized_output.trim().is_empty() && signature_output.trim().is_empty() {
         return "waiting for initial prompt".to_string();
     }
-    let last_signature =
-        last_non_empty_line(&signature_output).unwrap_or(signature_output.as_str());
-    format!("prompt_signature:\n{last_signature}")
+    let signature = build_prompt_signature(&signature_output).unwrap_or_else(|| {
+        signature_output
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    if normalized_output.trim().is_empty() {
+        return format!("prompt_signature:\n{signature}");
+    }
+
+    format!("output:\n{normalized_output}\n\nprompt_signature:\n{signature}")
 }
 
 impl SharedSshClient {
@@ -346,7 +400,7 @@ impl SharedSshClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_init_timeout_message, normalize_initial_output,
+        build_init_timeout_message, build_prompt_signature, normalize_initial_output,
         normalize_initial_output_with_pua_hints,
     };
 
@@ -383,6 +437,17 @@ mod tests {
         );
 
         let message = build_init_timeout_message(raw);
-        assert_eq!(message, "prompt_signature:\n% <PUA> adam-work  ~   10:38  ");
+        assert_eq!(
+            message,
+            "output:\nWelcome\n%  adam-work  ~   10:38  \n\nprompt_signature:\n% <PUA> adam-work ~ 10:38"
+        );
+    }
+
+    #[test]
+    fn build_prompt_signature_joins_tail_fragments_instead_of_only_last_one() {
+        let signature =
+            build_prompt_signature("%\r<PUA>\radam-work  ~\r<PUA>\r10:38").expect("signature");
+
+        assert_eq!(signature, "% <PUA> adam-work ~ <PUA> 10:38");
     }
 }
