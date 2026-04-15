@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
+use crate::device::{
+    STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE, is_private_use,
+};
 
 fn sanitize_initial_output_line(line: &str) -> String {
     let without_osc = STRIP_OSC_ESCAPE.replace_all(line, "");
@@ -9,10 +11,7 @@ fn sanitize_initial_output_line(line: &str) -> String {
 
     without_simple
         .chars()
-        .filter(|ch| {
-            (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
-                && !('\u{E000}'..='\u{F8FF}').contains(ch)
-        })
+        .filter(|ch| (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) && !is_private_use(*ch))
         .collect()
 }
 
@@ -309,11 +308,12 @@ mod tests {
             "Welcome\r\n",
             "\u{1b}[1m\u{1b}[7m%\u{1b}[27m\u{1b}[0m ",
             "\u{1b}[38;2;214;93;14m\u{1b}[0m ",
-            "adam@host ~ % ",
+            "󰌽 adam@host ~ % ",
             "\u{1b}[?2004h"
         );
 
         let normalized = normalize_initial_output(raw);
-        assert_eq!(normalized, "Welcome\n%  adam@host ~ % ");
+        assert_eq!(normalized, "Welcome\n%   adam@host ~ % ");
+        assert!(!normalized.contains('󰌽'));
     }
 }

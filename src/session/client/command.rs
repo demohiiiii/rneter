@@ -3,7 +3,9 @@ use super::tx::{
     OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
     execute_tx_workflow_with_runner,
 };
-use crate::device::{STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE};
+use crate::device::{
+    STRIP_CSI_ESCAPE, STRIP_DCS_ESCAPE, STRIP_OSC_ESCAPE, STRIP_SIMPLE_ESCAPE, is_private_use,
+};
 use regex::RegexSet;
 
 fn sanitize_runtime_prompt(line: &str) -> String {
@@ -13,7 +15,7 @@ fn sanitize_runtime_prompt(line: &str) -> String {
     let without_simple = STRIP_SIMPLE_ESCAPE.replace_all(without_csi.as_ref(), "");
     without_simple
         .chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .filter(|ch| (!ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) && !is_private_use(*ch))
         .collect()
 }
 

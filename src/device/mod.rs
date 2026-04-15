@@ -85,6 +85,13 @@ pub struct DeviceHandler {
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
 
+pub(crate) fn is_private_use(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+    )
+}
+
 /// Predefined states that exist in every device handler.
 static PRE_STATE: Lazy<Vec<String>> = Lazy::new(|| {
     vec![
