@@ -24,7 +24,7 @@ pub fn array_config() -> DeviceHandlerConfig {
             true,
             "EnablePassword",
             true,
-            &[r"^\x00*\rEnable password:"],
+            &[r"^Enable password:"],
         )],
         more_regex: vec![r"\s*--More--\s*".to_string()],
         error_regex: vec![

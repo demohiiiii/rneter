@@ -97,10 +97,7 @@ impl DeviceHandler {
             all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
-            let modified_regexs = patterns
-                .into_iter()
-                .map(|pattern| format!(r"^\x00*\r{{0,1}}{}", pattern.trim_start_matches('^')))
-                .collect::<Vec<_>>();
+            let modified_regexs = patterns;
 
             for pattern in &modified_regexs {
                 prompt_patterns.push((normalized_state.clone(), pattern.clone()));
@@ -124,7 +121,7 @@ impl DeviceHandler {
             all_states.push(normalized_state.clone());
 
             let start_offset = regexs.len();
-            let modified_regex = format!(r"^\x00*\r{{0,1}}{}", regex.trim_start_matches('^'));
+            let modified_regex = regex;
 
             let regex = Regex::new(&modified_regex).map_err(|err| {
                 ConnectError::InvalidDeviceHandlerConfig(format!(

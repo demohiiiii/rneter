@@ -11,7 +11,7 @@ pub fn cisco_config() -> DeviceHandlerConfig {
         true,
         "EnablePassword",
         true,
-        &[r"^\x00*\r(Enable )?Password:"],
+        &[r"^(Enable )?Password:"],
     )];
 
     DeviceHandlerConfig {
@@ -50,4 +50,25 @@ pub fn cisco_config() -> DeviceHandlerConfig {
 /// Returns a `DeviceHandler` configured for Cisco IOS/IOS-XE devices.
 pub fn cisco() -> Result<DeviceHandler, ConnectError> {
     cisco_config().build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enable_password_prompt_matches_with_or_without_carriage_return() {
+        for prompt in ["Password: ", "\rPassword: "] {
+            let mut handler = cisco().expect("create cisco device handler");
+            handler
+                .dyn_param
+                .insert("EnablePassword".to_string(), "secret\n".to_string());
+
+            assert_eq!(
+                handler.read_need_write(prompt),
+                Some(("secret\n".to_string(), true)),
+                "prompt should match: {prompt:?}"
+            );
+        }
+    }
 }
