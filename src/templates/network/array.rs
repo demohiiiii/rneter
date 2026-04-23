@@ -55,7 +55,7 @@ pub fn array_config() -> DeviceHandlerConfig {
             transition_rule("Login", "enable", "Enable", false, false),
             transition_rule("Enable", "configure terminal", "Config", false, false),
             transition_rule("Config", "exit", "Enable", true, false),
-            transition_rule("Enable", "exit", "Login", true, false),
+            transition_rule("Enable", "disable", "Login", true, false),
             transition_rule("Enable", "switch {}", "VSiteEnable", false, true),
             transition_rule("VSiteEnable", "configure terminal", "VSiteConfig", false, false),
             transition_rule("VSiteConfig", "exit", "VSiteEnable", true, false),

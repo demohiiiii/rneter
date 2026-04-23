@@ -38,7 +38,7 @@ pub fn arista_config() -> DeviceHandlerConfig {
             transition_rule("Login", "enable", "Enable", false, false),
             transition_rule("Enable", "configure terminal", "Config", false, false),
             transition_rule("Config", "exit", "Enable", true, false),
-            transition_rule("Enable", "exit", "Login", true, false),
+            transition_rule("Enable", "disable", "Login", true, false),
         ],
         dyn_param: HashMap::new(),
         ..Default::default()

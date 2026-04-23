@@ -40,7 +40,7 @@ pub fn cisco_config() -> DeviceHandlerConfig {
             transition_rule("Login", "enable", "Enable", false, false),
             transition_rule("Enable", "configure terminal", "Config", false, false),
             transition_rule("Config", "exit", "Enable", true, false),
-            transition_rule("Enable", "exit", "Login", true, false),
+            transition_rule("Enable", "disable", "Login", true, false),
         ],
         dyn_param: HashMap::new(),
         ..Default::default()
@@ -70,5 +70,17 @@ mod tests {
                 "prompt should match: {prompt:?}"
             );
         }
+    }
+
+    #[test]
+    fn enable_to_login_transition_uses_disable() {
+        let handler = cisco().expect("create cisco device handler");
+        assert!(handler.edges().contains(&(
+            "enable".to_string(),
+            "disable".to_string(),
+            "login".to_string(),
+            true,
+            false,
+        )));
     }
 }
