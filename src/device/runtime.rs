@@ -111,10 +111,39 @@ impl DeviceHandler {
         let (_, input, _) = self.line2state(prompt_line, false);
         if let Some((is_dyn, s, is_record)) = self.input_map.get(input) {
             if *is_dyn {
-                return self.dyn_param.get(s).map(|cmd| (cmd.clone(), *is_record));
+                if let Some(cmd) = self.dyn_param.get(s) {
+                    trace!(
+                        "Input rule matched dynamic response: state='{}', key='{}', record_input={}, response_len={}",
+                        input,
+                        s,
+                        is_record,
+                        cmd.len()
+                    );
+                    return Some((cmd.clone(), *is_record));
+                }
+
+                let available_keys: Vec<_> = self.dyn_param.keys().cloned().collect();
+                trace!(
+                    "Input rule matched but dynamic response is missing: state='{}', key='{}', available_dyn_keys={:?}",
+                    input,
+                    s,
+                    available_keys
+                );
+                return None;
             }
+            trace!(
+                "Input rule matched static response: state='{}', record_input={}, response_len={}",
+                input,
+                is_record,
+                s.len()
+            );
             return Some((s.clone(), *is_record));
         }
+        trace!(
+            "No input rule matched: derived_state='{}', prompt_fragment={:?}",
+            input,
+            prompt_line
+        );
         None
     }
 

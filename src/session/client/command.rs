@@ -541,7 +541,11 @@ impl SharedSshClient {
                             if !is_record {
                                 line_buffer.clear();
                             }
-                            trace!("Runtime input required: '{:?}'", c);
+                            trace!(
+                                "Runtime input required: record_input={}, response_len={}",
+                                is_record,
+                                c.len()
+                            );
                             self.sender.send(c).await?;
                         } else if let Some((c, is_record)) = handler.read_need_write(&line_buffer) {
                             flush_pending_prompt_lines(
@@ -554,7 +558,11 @@ impl SharedSshClient {
                             if !is_record {
                                 line_buffer.clear();
                             }
-                            trace!("Input required: '{:?}'", c);
+                            trace!(
+                                "Template input required: record_input={}, response_len={}",
+                                is_record,
+                                c.len()
+                            );
                             self.sender.send(c).await?;
                         }
                     }

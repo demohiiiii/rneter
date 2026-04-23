@@ -189,6 +189,14 @@ impl SharedSshClient {
         let mut params = handler.dyn_param.clone();
         if let Some(enable) = enable_password.as_ref() {
             params.insert("EnablePassword".to_string(), format!("{}\n", enable));
+            trace!(
+                "Connection dynamic param injected: key='EnablePassword', source='connection.enable_password', raw_len={}",
+                enable.len()
+            );
+        } else {
+            trace!(
+                "Connection dynamic param missing: key='EnablePassword' (connection.enable_password=None)"
+            );
         }
         handler.dyn_param = params;
 
