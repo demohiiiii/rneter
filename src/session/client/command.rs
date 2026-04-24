@@ -164,6 +164,53 @@ fn terminal_render_line(raw: &str) -> String {
     cells.into_iter().collect()
 }
 
+fn terminal_control_summary(raw: &str) -> Vec<String> {
+    let mut controls = Vec::new();
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => controls.push("CR".to_string()),
+            '\n' => controls.push("LF".to_string()),
+            '\x08' => controls.push("BS".to_string()),
+            '\x1b' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut final_byte = None;
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                        params.push(next);
+                    }
+                    controls.push(format!("CSI({}{})", params, final_byte.unwrap_or('?')));
+                }
+                Some(']') => {
+                    chars.next();
+                    skip_until_string_terminator(&mut chars);
+                    controls.push("OSC".to_string());
+                }
+                Some('P') => {
+                    chars.next();
+                    skip_until_string_terminator(&mut chars);
+                    controls.push("DCS".to_string());
+                }
+                Some(next) => {
+                    chars.next();
+                    controls.push(format!("ESC({next})"));
+                }
+                None => controls.push("ESC".to_string()),
+            },
+            ch if ch.is_control() => controls.push(format!("CTRL({:#04x})", ch as u32)),
+            _ => {}
+        }
+    }
+
+    controls
+}
+
 fn put_terminal_char(cells: &mut Vec<char>, cursor: &mut usize, ch: char) {
     if *cursor >= cells.len() {
         cells.resize(*cursor + 1, ' ');
@@ -301,6 +348,20 @@ fn rendered_line_is_command_echo_fragment(rendered_line: &str, sent_command: &st
     common * 100 / rendered_echo.len() >= 70
 }
 
+fn raw_line_has_command_redraw_marker(
+    raw_line: &str,
+    rendered_line: &str,
+    sent_command: &str,
+) -> bool {
+    let first_word = normalized_command_first_word(sent_command);
+    if first_word.len() < 2 || !raw_line.contains('$') {
+        return false;
+    }
+
+    let rendered = rendered_line.trim().to_ascii_lowercase();
+    rendered.starts_with(&first_word)
+}
+
 #[derive(Debug)]
 struct StreamCommandEchoFilter {
     sent_command: String,
@@ -321,8 +382,13 @@ impl StreamCommandEchoFilter {
         }
 
         let rendered = terminal_render_line(raw_line);
-        if rendered_line_is_command_echo(&rendered, &self.sent_command) {
-            trace!("Dropping command echo line from stream: rendered={rendered:?}");
+        if rendered_line_is_command_echo(&rendered, &self.sent_command)
+            || raw_line_has_command_redraw_marker(raw_line, &rendered, &self.sent_command)
+        {
+            trace!(
+                "Dropping command echo line from stream: rendered={rendered:?}, controls={:?}, raw={raw_line:?}",
+                terminal_control_summary(raw_line)
+            );
             return true;
         }
 
@@ -338,9 +404,13 @@ impl StreamCommandEchoFilter {
         }
 
         let rendered = terminal_render_line(raw_fragment);
-        let should_suppress = rendered_line_is_command_echo_fragment(&rendered, &self.sent_command);
+        let should_suppress = rendered_line_is_command_echo_fragment(&rendered, &self.sent_command)
+            || raw_line_has_command_redraw_marker(raw_fragment, &rendered, &self.sent_command);
         if should_suppress {
-            trace!("Suppressing command echo fragment from stream: rendered={rendered:?}");
+            trace!(
+                "Suppressing command echo fragment from stream: rendered={rendered:?}, controls={:?}, raw={raw_fragment:?}",
+                terminal_control_summary(raw_fragment)
+            );
         }
         should_suppress
     }
@@ -1271,6 +1341,13 @@ mod tests {
     }
 
     #[test]
+    fn terminal_control_summary_reports_cursor_and_erase_sequences() {
+        let controls = terminal_control_summary("abcdef\r\u{1b}[Kxy\u{1b}[3D");
+
+        assert_eq!(controls, vec!["CR", "CSI(K)", "CSI(3D)"]);
+    }
+
+    #[test]
     fn terminal_render_line_overwrites_after_carriage_return() {
         let rendered = terminal_render_line("abcdef\rxy");
 
@@ -1372,6 +1449,30 @@ mod tests {
     }
 
     #[test]
+    fn rendered_line_is_command_echo_fragment_matches_service_redraw_echo() {
+        let sent_command = "no object-group service OG_SVC_WEB tcp";
+
+        assert!(rendered_line_is_command_echo_fragment(
+            "no object-group ser$p serv            ",
+            sent_command
+        ));
+        assert!(rendered_line_is_command_echo_fragment(
+            "no object-group ser$p serv            ice OG_SVC_W$SVC_WE            B tcp",
+            sent_command
+        ));
+    }
+
+    #[test]
+    fn stream_echo_filter_drops_full_service_redraw_echo_line() {
+        let sent_command = "no object-group service OG_SVC_WEB tcp";
+        let mut filter = StreamCommandEchoFilter::new(sent_command);
+
+        assert!(filter.should_drop_line(
+            "no object-group ser$p serv            ice OG_SVC_W$SVC_WE            B tcpno object-group se$\n"
+        ));
+    }
+
+    #[test]
     fn rendered_line_is_command_echo_fragment_rejects_real_output() {
         let sent_command = "no object-group network OG_SRC_APP";
 
@@ -1414,6 +1515,16 @@ mod tests {
         assert!(!filter.should_suppress_fragment(
             "Removing object-group (OG_SRC_APP) not allowed, it is being used."
         ));
+    }
+
+    #[test]
+    fn stream_echo_filter_suppresses_redraw_marker_fragments_during_echo_phase() {
+        let sent_command = "no object-group service OG_SVC_WEB tcp extra-wrapper";
+        let filter = StreamCommandEchoFilter::new(sent_command);
+
+        assert!(
+            filter.should_suppress_fragment("no object-group ser$p serv            ice OG_SVC_W")
+        );
     }
 
     #[test]
