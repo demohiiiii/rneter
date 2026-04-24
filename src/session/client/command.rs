@@ -366,6 +366,7 @@ fn raw_line_has_command_redraw_marker(
 struct StreamCommandEchoFilter {
     sent_command: String,
     active: bool,
+    pending_echo_line: bool,
 }
 
 impl StreamCommandEchoFilter {
@@ -373,12 +374,22 @@ impl StreamCommandEchoFilter {
         Self {
             sent_command: sent_command.to_string(),
             active: true,
+            pending_echo_line: false,
         }
     }
 
     fn should_drop_line(&mut self, raw_line: &str) -> bool {
         if !self.active {
             return false;
+        }
+
+        if self.pending_echo_line {
+            self.pending_echo_line = false;
+            trace!(
+                "Dropping pending command echo line from stream: controls={:?}, raw={raw_line:?}",
+                terminal_control_summary(raw_line)
+            );
+            return true;
         }
 
         let rendered = terminal_render_line(raw_line);
@@ -398,15 +409,20 @@ impl StreamCommandEchoFilter {
         false
     }
 
-    fn should_suppress_fragment(&self, raw_fragment: &str) -> bool {
+    fn should_suppress_fragment(&mut self, raw_fragment: &str) -> bool {
         if !self.active {
             return false;
+        }
+
+        if self.pending_echo_line {
+            return true;
         }
 
         let rendered = terminal_render_line(raw_fragment);
         let should_suppress = rendered_line_is_command_echo_fragment(&rendered, &self.sent_command)
             || raw_line_has_command_redraw_marker(raw_fragment, &rendered, &self.sent_command);
         if should_suppress {
+            self.pending_echo_line = true;
             trace!(
                 "Suppressing command echo fragment from stream: rendered={rendered:?}, controls={:?}, raw={raw_fragment:?}",
                 terminal_control_summary(raw_fragment)
@@ -1506,11 +1522,14 @@ mod tests {
     #[test]
     fn stream_echo_filter_suppresses_incremental_echo_fragments() {
         let sent_command = "no object-group network OG_SRC_APP";
-        let filter = StreamCommandEchoFilter::new(sent_command);
+        let mut filter = StreamCommandEchoFilter::new(sent_command);
 
         assert!(filter.should_suppress_fragment("no object-group net"));
         assert!(filter.should_suppress_fragment(
             "no object-group net$p netw            ork OG_SRC_A$SRC_AP            P"
+        ));
+        assert!(filter.should_drop_line(
+            "no object-group net$p netw            ork OG_SRC_A$SRC_AP            P\n"
         ));
         assert!(!filter.should_suppress_fragment(
             "Removing object-group (OG_SRC_APP) not allowed, it is being used."
@@ -1520,11 +1539,26 @@ mod tests {
     #[test]
     fn stream_echo_filter_suppresses_redraw_marker_fragments_during_echo_phase() {
         let sent_command = "no object-group service OG_SVC_WEB tcp extra-wrapper";
-        let filter = StreamCommandEchoFilter::new(sent_command);
+        let mut filter = StreamCommandEchoFilter::new(sent_command);
 
         assert!(
             filter.should_suppress_fragment("no object-group ser$p serv            ice OG_SVC_W")
         );
+    }
+
+    #[test]
+    fn stream_echo_filter_keeps_suppressing_pending_echo_line_until_newline() {
+        let sent_command = "no object-group service OG_SVC_WEB tcp";
+        let mut filter = StreamCommandEchoFilter::new(sent_command);
+
+        assert!(filter.should_suppress_fragment("no object-group ser"));
+        assert!(filter.should_suppress_fragment("unexpected middle fragment that would not match"));
+        assert!(filter.should_drop_line(
+            "no object-group ser$p serv            ice OG_SVC_W$SVC_WE            B tcp\n"
+        ));
+        assert!(!filter.should_suppress_fragment(
+            "Removing object-group (OG_SVC_WEB) not allowed, it is being used."
+        ));
     }
 
     #[test]
