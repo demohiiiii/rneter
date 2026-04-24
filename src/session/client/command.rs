@@ -71,11 +71,77 @@ fn strip_sent_command_prefix(output: &str, sent_command: &str) -> String {
     trimmed.to_string()
 }
 
+fn tokenize_command_for_echo_match(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_'))
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|token| token.len() >= 3)
+        .collect()
+}
+
+fn normalized_command_first_word(command: &str) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_'))
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default()
+}
+
+fn strip_leading_wrapped_echo_noise(output: &str, sent_command: &str) -> String {
+    let tokens = tokenize_command_for_echo_match(sent_command);
+    let first_word = normalized_command_first_word(sent_command);
+    if tokens.len() < 4 {
+        return output.to_string();
+    }
+
+    let mut lines: Vec<&str> = output.split('\n').collect();
+    let threshold = (tokens.len() * 3).div_ceil(5);
+
+    while let Some(first_line) = lines.first() {
+        let lowered = first_line.to_ascii_lowercase();
+        let trimmed = lowered.trim_start();
+        let matched = tokens
+            .iter()
+            .filter(|token| lowered.contains(token.as_str()))
+            .count();
+        let starts_with_first_word = !first_word.is_empty() && trimmed.starts_with(&first_word);
+        let first_word_repeat_count = if first_word.is_empty() {
+            0
+        } else {
+            lowered.match_indices(&first_word).count()
+        };
+
+        let looks_like_wrapped_echo = starts_with_first_word
+            && (matched >= threshold || (matched >= 2 && first_word_repeat_count >= 2));
+
+        if !looks_like_wrapped_echo {
+            break;
+        }
+
+        lines.remove(0);
+    }
+
+    lines.join("\n")
+}
+
 fn extract_command_content(all: &str, sent_command: &str, prompt: Option<&str>) -> String {
     let normalized_all = normalize_runtime_output(all);
     let normalized_command = normalize_runtime_output(sent_command);
     let stripped = strip_sent_command_prefix(&normalized_all, &normalized_command);
-    let trimmed = stripped.trim_end_matches(['\n', '\r']);
+    let without_wrapped_echo = strip_leading_wrapped_echo_noise(&stripped, &normalized_command);
+    let trimmed = without_wrapped_echo.trim_end_matches(['\n', '\r']);
 
     if let Some(prompt_text) = prompt {
         let normalized_prompt = normalize_runtime_output(prompt_text);
@@ -911,6 +977,40 @@ mod tests {
             Some("<PUA> adam-work <PUA> ~ <PUA> <PUA> 15:20 <PUA> <PUA>"),
         );
         assert_eq!(content, "2026年 04月 15日 星期三 15:20:10 CST");
+    }
+
+    #[test]
+    fn extract_command_content_strips_wrapped_long_command_echo_noise() {
+        let sent_command = "no object-group service OG_SVC_WEB tcp";
+        let raw_output = concat!(
+            "no object-group service OG_SVC_WEB tcp\n",
+            "no object-group ser$p serv            ice OG_SVC_W$SVC_WE            B tcpno object-group se$\n",
+            "Removing object-group (OG_SVC_WEB) not allowed, it is being used.\n",
+            "ciscoasa-3# "
+        );
+
+        let content = extract_command_content(raw_output, sent_command, Some("ciscoasa-3# "));
+        assert_eq!(
+            content,
+            "Removing object-group (OG_SVC_WEB) not allowed, it is being used."
+        );
+    }
+
+    #[test]
+    fn extract_command_content_keeps_real_output_that_only_shares_command_tokens() {
+        let sent_command = "show running-config object-group service OG_SVC_WEB";
+        let raw_output = concat!(
+            "show running-config object-group service OG_SVC_WEB\n",
+            "object-group service OG_SVC_WEB tcp\n",
+            " service-object tcp destination eq www\n",
+            "ciscoasa-3# "
+        );
+
+        let content = extract_command_content(raw_output, sent_command, Some("ciscoasa-3# "));
+        assert_eq!(
+            content,
+            "object-group service OG_SVC_WEB tcp\n service-object tcp destination eq www"
+        );
     }
 
     #[test]
