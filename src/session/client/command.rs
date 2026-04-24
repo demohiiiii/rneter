@@ -71,18 +71,32 @@ fn strip_sent_command_prefix(output: &str, sent_command: &str) -> String {
     trimmed.to_string()
 }
 
-fn tokenize_command_for_echo_match(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|token| {
-            token
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_'))
-                .collect::<String>()
-                .to_ascii_lowercase()
-        })
-        .filter(|token| token.len() >= 3)
+fn normalize_echo_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_' | '/' | '.' | ':'))
+        .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn common_subsequence_len(left: &str, right: &str) -> usize {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut previous = vec![0usize; right.len() + 1];
+    let mut current = vec![0usize; right.len() + 1];
+
+    for left_byte in left {
+        for (index, right_byte) in right.iter().enumerate() {
+            current[index + 1] = if left_byte == right_byte {
+                previous[index] + 1
+            } else {
+                previous[index + 1].max(current[index])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+
+    previous[right.len()]
 }
 
 fn normalized_command_first_word(command: &str) -> String {
@@ -99,37 +113,195 @@ fn normalized_command_first_word(command: &str) -> String {
         .unwrap_or_default()
 }
 
-fn strip_leading_wrapped_echo_noise(output: &str, sent_command: &str) -> String {
-    let tokens = tokenize_command_for_echo_match(sent_command);
-    let first_word = normalized_command_first_word(sent_command);
-    if tokens.len() < 4 {
-        return output.to_string();
+fn terminal_render_line(raw: &str) -> String {
+    let mut cells = Vec::<char>::new();
+    let mut cursor = 0usize;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut final_byte = None;
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                        params.push(next);
+                    }
+                    apply_csi_sequence(&mut cells, &mut cursor, &params, final_byte);
+                }
+                Some(']') => {
+                    chars.next();
+                    skip_until_string_terminator(&mut chars);
+                }
+                Some('P') => {
+                    chars.next();
+                    skip_until_string_terminator(&mut chars);
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            },
+            '\r' => cursor = 0,
+            '\n' => {}
+            '\x08' => cursor = cursor.saturating_sub(1),
+            '\t' => {
+                let spaces = 4 - (cursor % 4);
+                for _ in 0..spaces {
+                    put_terminal_char(&mut cells, &mut cursor, ' ');
+                }
+            }
+            ch if ch.is_control() => {}
+            ch => put_terminal_char(&mut cells, &mut cursor, ch),
+        }
     }
 
-    let mut lines: Vec<&str> = output.split('\n').collect();
-    let threshold = (tokens.len() * 3).div_ceil(5);
+    cells.into_iter().collect()
+}
 
-    while let Some(first_line) = lines.first() {
-        let lowered = first_line.to_ascii_lowercase();
-        let trimmed = lowered.trim_start();
-        let matched = tokens
-            .iter()
-            .filter(|token| lowered.contains(token.as_str()))
-            .count();
-        let starts_with_first_word = !first_word.is_empty() && trimmed.starts_with(&first_word);
-        let first_word_repeat_count = if first_word.is_empty() {
-            0
-        } else {
-            lowered.match_indices(&first_word).count()
-        };
+fn put_terminal_char(cells: &mut Vec<char>, cursor: &mut usize, ch: char) {
+    if *cursor >= cells.len() {
+        cells.resize(*cursor + 1, ' ');
+    }
+    cells[*cursor] = ch;
+    *cursor += 1;
+}
 
-        let looks_like_wrapped_echo = starts_with_first_word
-            && (matched >= threshold || (matched >= 2 && first_word_repeat_count >= 2));
-
-        if !looks_like_wrapped_echo {
+fn skip_until_string_terminator(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        if ch == '\x07' {
             break;
         }
+        if ch == '\x1b' && matches!(chars.peek(), Some('\\')) {
+            chars.next();
+            break;
+        }
+    }
+}
 
+fn first_csi_param(params: &str, default: usize) -> usize {
+    params
+        .split(';')
+        .next()
+        .and_then(|value| {
+            let digits = value.trim_start_matches('?');
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<usize>().ok()
+            }
+        })
+        .unwrap_or(default)
+}
+
+fn apply_csi_sequence(
+    cells: &mut Vec<char>,
+    cursor: &mut usize,
+    params: &str,
+    final_byte: Option<char>,
+) {
+    match final_byte {
+        Some('C') => *cursor += first_csi_param(params, 1),
+        Some('D') => *cursor = cursor.saturating_sub(first_csi_param(params, 1)),
+        Some('G') => *cursor = first_csi_param(params, 1).saturating_sub(1),
+        Some('K') => {
+            let mode = first_csi_param(params, 0);
+            match mode {
+                0 => cells.truncate(*cursor),
+                1 => {
+                    let end = (*cursor).min(cells.len().saturating_sub(1));
+                    for cell in cells.iter_mut().take(end + 1) {
+                        *cell = ' ';
+                    }
+                }
+                2 => {
+                    cells.clear();
+                    *cursor = 0;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rendered_line_is_command_echo(rendered_line: &str, sent_command: &str) -> bool {
+    let first_word = normalized_command_first_word(sent_command);
+    if first_word.len() < 2 {
+        return false;
+    }
+
+    let rendered = rendered_line.trim();
+    if rendered.is_empty() {
+        return false;
+    }
+
+    let rendered_lower = rendered.to_ascii_lowercase();
+    if !rendered_lower.starts_with(&first_word) {
+        return false;
+    }
+
+    let normalized_rendered = normalize_whitespace(rendered);
+    let normalized_sent = normalize_whitespace(sent_command);
+    if normalized_rendered == normalized_sent || normalized_rendered.contains(&normalized_sent) {
+        return true;
+    }
+
+    let rendered_echo = normalize_echo_text(rendered);
+    let sent_echo = normalize_echo_text(sent_command);
+    if rendered_echo.len() < first_word.len() || sent_echo.len() < 8 {
+        return false;
+    }
+
+    let common = common_subsequence_len(&rendered_echo, &sent_echo);
+    common * 100 / sent_echo.len().min(rendered_echo.len()) >= 70
+}
+
+#[derive(Debug)]
+struct StreamCommandEchoFilter {
+    sent_command: String,
+    active: bool,
+}
+
+impl StreamCommandEchoFilter {
+    fn new(sent_command: &str) -> Self {
+        Self {
+            sent_command: sent_command.to_string(),
+            active: true,
+        }
+    }
+
+    fn should_drop_line(&mut self, raw_line: &str) -> bool {
+        if !self.active {
+            return false;
+        }
+
+        let rendered = terminal_render_line(raw_line);
+        if rendered_line_is_command_echo(&rendered, &self.sent_command) {
+            trace!("Dropping command echo line from stream: rendered={rendered:?}");
+            return true;
+        }
+
+        if !rendered.trim().is_empty() {
+            self.active = false;
+        }
+        false
+    }
+}
+
+fn strip_leading_command_echo_lines(output: &str, sent_command: &str) -> String {
+    let mut filter = StreamCommandEchoFilter::new(sent_command);
+    let mut lines: Vec<&str> = output.split('\n').collect();
+
+    while let Some(first_line) = lines.first() {
+        if !filter.should_drop_line(first_line) {
+            break;
+        }
         lines.remove(0);
     }
 
@@ -137,11 +309,11 @@ fn strip_leading_wrapped_echo_noise(output: &str, sent_command: &str) -> String 
 }
 
 fn extract_command_content(all: &str, sent_command: &str, prompt: Option<&str>) -> String {
-    let normalized_all = normalize_runtime_output(all);
+    let raw_without_echo = strip_leading_command_echo_lines(all, sent_command);
+    let normalized_all = normalize_runtime_output(&raw_without_echo);
     let normalized_command = normalize_runtime_output(sent_command);
     let stripped = strip_sent_command_prefix(&normalized_all, &normalized_command);
-    let without_wrapped_echo = strip_leading_wrapped_echo_noise(&stripped, &normalized_command);
-    let trimmed = without_wrapped_echo.trim_end_matches(['\n', '\r']);
+    let trimmed = stripped.trim_end_matches(['\n', '\r']);
 
     if let Some(prompt_text) = prompt {
         let normalized_prompt = normalize_runtime_output(prompt_text);
@@ -483,6 +655,7 @@ impl SharedSshClient {
         let mut line_buffer = String::new();
         let mut line = String::new();
         let mut pending_prompt_lines = Vec::new();
+        let mut echo_filter = StreamCommandEchoFilter::new(&sent_command);
 
         let result = tokio::time::timeout(timeout, async {
             let mut is_error = false;
@@ -497,6 +670,9 @@ impl SharedSshClient {
                         line.clear();
                         line.extend(line_buffer.drain(..=newline_pos));
                         let trim_start = IGNORE_START_LINE.replace(&line, "");
+                        if echo_filter.should_drop_line(trim_start.as_ref()) {
+                            continue;
+                        }
                         let normalized_fragment = normalize_runtime_output(&trim_start);
 
                         if terminal_fragment_has_pua(&normalized_fragment) {
@@ -994,6 +1170,154 @@ mod tests {
             content,
             "Removing object-group (OG_SVC_WEB) not allowed, it is being used."
         );
+    }
+
+    #[test]
+    fn extract_command_content_strips_wrapped_network_object_group_echo_noise() {
+        let sent_command = "no object-group network OG_DST_DB";
+        let raw_output = concat!(
+            "no object-group network OG_DST_DB\n",
+            "no object-group net$p netw            ork OG_DST_D$DST_DB            no object-group ne$ \n",
+            "Removing object-group (OG_DST_DB) not allowed, it is being used.\n",
+            "ciscoasa-3# "
+        );
+
+        let content = extract_command_content(raw_output, sent_command, Some("ciscoasa-3# "));
+        assert_eq!(
+            content,
+            "Removing object-group (OG_DST_DB) not allowed, it is being used."
+        );
+    }
+
+    #[test]
+    fn extract_command_content_strips_wrapped_echo_before_full_normalization() {
+        let sent_command = "no object-group network OG_DST_DB";
+        let raw_output = concat!(
+            "no object-group network OG_DST_DB\n",
+            "\u{1b}[31mno object-group net$p netw            ork OG_DST_D$DST_DB            no object-group ne$ \u{1b}[0m\n",
+            "Removing object-group (OG_DST_DB) not allowed, it is being used.\n",
+            "ciscoasa-3# "
+        );
+
+        let content = extract_command_content(raw_output, sent_command, Some("ciscoasa-3# "));
+        assert_eq!(
+            content,
+            "Removing object-group (OG_DST_DB) not allowed, it is being used."
+        );
+    }
+
+    #[test]
+    fn terminal_render_line_applies_carriage_return_and_erase_line() {
+        let rendered = terminal_render_line("abcdef\r\u{1b}[Kxy");
+
+        assert_eq!(rendered, "xy");
+    }
+
+    #[test]
+    fn terminal_render_line_overwrites_after_carriage_return() {
+        let rendered = terminal_render_line("abcdef\rxy");
+
+        assert_eq!(rendered, "xycdef");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_backspace() {
+        let rendered = terminal_render_line("abc\x08D");
+
+        assert_eq!(rendered, "abD");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_csi_cursor_forward() {
+        let rendered = terminal_render_line("ab\u{1b}[3CX");
+
+        assert_eq!(rendered, "ab   X");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_csi_cursor_backward() {
+        let rendered = terminal_render_line("abcdef\u{1b}[3DX");
+
+        assert_eq!(rendered, "abcXef");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_csi_cursor_horizontal_absolute() {
+        let rendered = terminal_render_line("abcdef\u{1b}[2GX");
+
+        assert_eq!(rendered, "aXcdef");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_csi_erase_to_line_start() {
+        let rendered = terminal_render_line("abcdef\u{1b}[1KX");
+
+        assert_eq!(rendered, "      X");
+    }
+
+    #[test]
+    fn terminal_render_line_applies_csi_erase_entire_line() {
+        let rendered = terminal_render_line("abcdef\u{1b}[2Kxy");
+
+        assert_eq!(rendered, "xy");
+    }
+
+    #[test]
+    fn terminal_render_line_ignores_color_sequences() {
+        let rendered = terminal_render_line("ab\u{1b}[31mcd\u{1b}[0mef");
+
+        assert_eq!(rendered, "abcdef");
+    }
+
+    #[test]
+    fn terminal_render_line_skips_osc_and_dcs_sequences() {
+        let rendered = terminal_render_line(concat!(
+            "ab",
+            "\u{1b}]0;ignored title\u{7}",
+            "cd",
+            "\u{1b}Pignored payload\u{1b}\\",
+            "ef"
+        ));
+
+        assert_eq!(rendered, "abcdef");
+    }
+
+    #[test]
+    fn terminal_render_line_expands_tabs_to_next_four_column_stop() {
+        let rendered = terminal_render_line("ab\tX");
+
+        assert_eq!(rendered, "ab  X");
+    }
+
+    #[test]
+    fn rendered_line_is_command_echo_matches_terminal_redraw_output() {
+        let sent_command = "no object-group network OG_DST_DB";
+        let rendered = terminal_render_line(
+            "\r\u{1b}[Kno object-group net$p netw            ork OG_DST_D$DST_DB            no object-group ne$ ",
+        );
+
+        assert!(rendered_line_is_command_echo(&rendered, sent_command));
+    }
+
+    #[test]
+    fn rendered_line_is_command_echo_rejects_real_output_after_echo_phase() {
+        let sent_command = "show running-config object-group service OG_SVC_WEB";
+        let rendered = "object-group service OG_SVC_WEB tcp";
+
+        assert!(!rendered_line_is_command_echo(rendered, sent_command));
+    }
+
+    #[test]
+    fn stream_echo_filter_drops_rendered_command_echo_before_prompt_matching() {
+        let sent_command = "no object-group network OG_DST_DB";
+        let mut filter = StreamCommandEchoFilter::new(sent_command);
+
+        assert!(filter.should_drop_line(
+            "\r\u{1b}[Kno object-group net$p netw            ork OG_DST_D$DST_DB            no object-group ne$ \n"
+        ));
+        assert!(!filter.should_drop_line(
+            "Removing object-group (OG_DST_DB) not allowed, it is being used.\n"
+        ));
     }
 
     #[test]

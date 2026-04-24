@@ -125,9 +125,7 @@ impl DeviceHandler {
                 let available_keys: Vec<_> = self.dyn_param.keys().cloned().collect();
                 trace!(
                     "Input rule matched but dynamic response is missing: state='{}', key='{}', available_dyn_keys={:?}",
-                    input,
-                    s,
-                    available_keys
+                    input, s, available_keys
                 );
                 return None;
             }
@@ -141,8 +139,7 @@ impl DeviceHandler {
         }
         trace!(
             "No input rule matched: derived_state='{}', prompt_fragment={:?}",
-            input,
-            prompt_line
+            input, prompt_line
         );
         None
     }
