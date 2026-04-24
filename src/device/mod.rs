@@ -79,6 +79,12 @@ pub struct DeviceHandler {
     /// Prompt regex patterns grouped by state (for diagnostics).
     prompt_patterns: Vec<(String, String)>,
 
+    /// Regex patterns for complete lines that should be joined with a following prompt.
+    prompt_prefix_regex: Option<RegexSet>,
+
+    /// Prompt prefix regex patterns kept for handler equivalence checks.
+    prompt_prefix_patterns: Vec<String>,
+
     /// Strategy used to determine command success for this handler.
     command_execution: CommandExecutionStrategy,
 }

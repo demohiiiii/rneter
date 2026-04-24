@@ -813,7 +813,9 @@ impl SharedSshClient {
                         }
                         let normalized_fragment = normalize_runtime_output(&trim_start);
 
-                        if terminal_fragment_has_pua(&normalized_fragment) {
+                        if terminal_fragment_has_pua(&normalized_fragment)
+                            || handler.read_prompt_prefix(&trim_start)
+                        {
                             pending_prompt_lines.push(trim_start.to_string());
                             continue;
                         }

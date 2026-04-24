@@ -94,6 +94,18 @@ impl DeviceHandler {
         self.match_prompt(index)
     }
 
+    /// Checks if a complete line should be held and matched with a following prompt.
+    pub fn read_prompt_prefix(&self, line: &str) -> bool {
+        let Some(prompt_prefix_regex) = self.prompt_prefix_regex.as_ref() else {
+            return false;
+        };
+
+        let sanitized_line = sanitize_terminal_text(line);
+        let prompt_line = latest_terminal_fragment(&sanitized_line).trim_end();
+        trace!("Checking if line is a prompt prefix: '{:?}'", prompt_line);
+        prompt_prefix_regex.is_match(prompt_line)
+    }
+
     /// Checks if a line matches a system-specific prompt pattern.
     pub fn read_sys_prompt(&mut self, line: &str) -> bool {
         let sanitized_line = sanitize_terminal_text(line);

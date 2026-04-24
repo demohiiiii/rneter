@@ -72,6 +72,8 @@ pub struct DeviceTransitionRule {
 pub struct DeviceHandlerConfig {
     pub prompt: Vec<DevicePromptRule>,
     pub prompt_with_sys: Vec<DevicePromptWithSysRule>,
+    #[serde(default)]
+    pub prompt_prefix: Vec<String>,
     pub write: Vec<DeviceInputRule>,
     pub more_regex: Vec<String>,
     pub error_regex: Vec<String>,
@@ -179,6 +181,7 @@ mod tests {
         let config = DeviceHandlerConfig {
             prompt: vec![prompt_rule("Root", &[r"^root#\s*$"])],
             prompt_with_sys: Vec::new(),
+            prompt_prefix: Vec::new(),
             write: Vec::new(),
             more_regex: Vec::new(),
             error_regex: Vec::new(),

@@ -50,6 +50,10 @@ impl DeviceHandler {
             return false;
         }
 
+        if self.prompt_prefix_patterns != other.prompt_prefix_patterns {
+            return false;
+        }
+
         true
     }
 
@@ -58,6 +62,7 @@ impl DeviceHandler {
         let DeviceHandlerConfig {
             prompt,
             prompt_with_sys,
+            prompt_prefix,
             write,
             more_regex,
             error_regex,
@@ -166,6 +171,19 @@ impl DeviceHandler {
             ))
         })?;
 
+        let prompt_prefix_patterns = prompt_prefix;
+        let mut prompt_prefix_iter = prompt_prefix_patterns.iter().cloned().peekable();
+        let prompt_prefix_regex = if prompt_prefix_iter.peek().is_none() {
+            None
+        } else {
+            Some(RegexSet::new(prompt_prefix_iter).map_err(|err| {
+                ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "invalid prompt_prefix regex set: {}",
+                    err
+                ))
+            })?)
+        };
+
         let mut ignore_iter = ignore_errors.into_iter().peekable();
         let ignore_errors = if ignore_iter.peek().is_none() {
             None
@@ -206,6 +224,8 @@ impl DeviceHandler {
             sys: None,
             current_prompt: None,
             prompt_patterns,
+            prompt_prefix_regex,
+            prompt_prefix_patterns,
             command_execution: match command_execution {
                 super::DeviceCommandExecutionConfig::PromptDriven => {
                     CommandExecutionStrategy::PromptDriven

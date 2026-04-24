@@ -209,7 +209,7 @@ impl SharedSshClient {
 
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer.drain(..=newline_pos).collect::<String>();
-                        if terminal_fragment_has_pua(&line) {
+                        if terminal_fragment_has_pua(&line) || handler.read_prompt_prefix(&line) {
                             pending_prompt_lines.push(line);
                             continue;
                         }

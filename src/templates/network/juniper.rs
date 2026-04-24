@@ -8,9 +8,10 @@ use std::collections::HashMap;
 pub fn juniper_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^\S+@\S+#\s*$"]),
+            prompt_rule("Config", &[r"^(?:\[edit\]\s+)?\S+@\S+#\s*$"]),
             prompt_rule("Enable", &[r"^\S+@\S+>\s*$"]),
         ],
+        prompt_prefix: vec![r"^\[edit\]\s*$".to_string()],
         write: vec![input_rule(
             "Save",
             false,
@@ -43,4 +44,35 @@ pub fn juniper_config() -> DeviceHandlerConfig {
 /// Returns a `DeviceHandler` configured for Juniper JunOS devices.
 pub fn juniper() -> Result<DeviceHandler, ConnectError> {
     juniper_config().build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enable_to_config_transition_uses_configure() {
+        let handler = juniper().expect("create juniper device handler");
+        assert!(handler.edges().contains(&(
+            "enable".to_string(),
+            "configure".to_string(),
+            "config".to_string(),
+            false,
+            false,
+        )));
+    }
+
+    #[test]
+    fn config_prompt_matches_edit_context_line_with_prompt() {
+        let mut handler = juniper().expect("create juniper device handler");
+
+        assert!(handler.read_prompt("[edit] admin@dyadd-srx# "));
+    }
+
+    #[test]
+    fn edit_context_line_is_held_as_prompt_prefix() {
+        let handler = juniper().expect("create juniper device handler");
+
+        assert!(handler.read_prompt_prefix("[edit]\n"));
+    }
 }

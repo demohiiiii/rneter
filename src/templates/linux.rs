@@ -185,6 +185,7 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
             prompt_rule("User", &user_prompts),
         ],
         prompt_with_sys: Vec::new(),
+        prompt_prefix: Vec::new(),
         write: vec![input_rule(
             "SudoPassword",
             true,
