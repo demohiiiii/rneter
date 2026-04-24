@@ -262,6 +262,45 @@ fn rendered_line_is_command_echo(rendered_line: &str, sent_command: &str) -> boo
     common * 100 / sent_echo.len().min(rendered_echo.len()) >= 70
 }
 
+fn rendered_line_is_command_echo_fragment(rendered_line: &str, sent_command: &str) -> bool {
+    if rendered_line_is_command_echo(rendered_line, sent_command) {
+        return true;
+    }
+
+    let first_word = normalized_command_first_word(sent_command);
+    if first_word.len() < 2 {
+        return false;
+    }
+
+    let rendered = rendered_line.trim();
+    if rendered.is_empty() {
+        return false;
+    }
+
+    let rendered_lower = rendered.to_ascii_lowercase();
+    if !(rendered_lower.starts_with(&first_word) || first_word.starts_with(&rendered_lower)) {
+        return false;
+    }
+
+    let normalized_rendered = normalize_whitespace(rendered);
+    let normalized_sent = normalize_whitespace(sent_command);
+    if normalized_sent.starts_with(&normalized_rendered) {
+        return true;
+    }
+
+    let rendered_echo = normalize_echo_text(rendered);
+    let sent_echo = normalize_echo_text(sent_command);
+    if rendered_echo.is_empty() || sent_echo.len() < 8 {
+        return false;
+    }
+    if sent_echo.starts_with(&rendered_echo) {
+        return true;
+    }
+
+    let common = common_subsequence_len(&rendered_echo, &sent_echo);
+    common * 100 / rendered_echo.len() >= 70
+}
+
 #[derive(Debug)]
 struct StreamCommandEchoFilter {
     sent_command: String,
@@ -291,6 +330,19 @@ impl StreamCommandEchoFilter {
             self.active = false;
         }
         false
+    }
+
+    fn should_suppress_fragment(&self, raw_fragment: &str) -> bool {
+        if !self.active {
+            return false;
+        }
+
+        let rendered = terminal_render_line(raw_fragment);
+        let should_suppress = rendered_line_is_command_echo_fragment(&rendered, &self.sent_command);
+        if should_suppress {
+            trace!("Suppressing command echo fragment from stream: rendered={rendered:?}");
+        }
+        should_suppress
     }
 }
 
@@ -695,6 +747,11 @@ impl SharedSshClient {
                         }
 
                         clean_output.push_str(&trim_start);
+                    }
+
+                    if !line_buffer.is_empty() && echo_filter.should_suppress_fragment(&line_buffer)
+                    {
+                        continue;
                     }
 
                     if let Some(prompt_candidate) =
@@ -1300,6 +1357,31 @@ mod tests {
     }
 
     #[test]
+    fn rendered_line_is_command_echo_fragment_matches_incremental_echo() {
+        let sent_command = "no object-group network OG_SRC_APP";
+
+        assert!(rendered_line_is_command_echo_fragment("n", sent_command));
+        assert!(rendered_line_is_command_echo_fragment(
+            "no object-group net",
+            sent_command
+        ));
+        assert!(rendered_line_is_command_echo_fragment(
+            "no object-group net$p netw            ork OG_SRC_A$SRC_AP            P",
+            sent_command
+        ));
+    }
+
+    #[test]
+    fn rendered_line_is_command_echo_fragment_rejects_real_output() {
+        let sent_command = "no object-group network OG_SRC_APP";
+
+        assert!(!rendered_line_is_command_echo_fragment(
+            "Removing object-group (OG_SRC_APP) not allowed, it is being used.",
+            sent_command
+        ));
+    }
+
+    #[test]
     fn rendered_line_is_command_echo_rejects_real_output_after_echo_phase() {
         let sent_command = "show running-config object-group service OG_SVC_WEB";
         let rendered = "object-group service OG_SVC_WEB tcp";
@@ -1317,6 +1399,20 @@ mod tests {
         ));
         assert!(!filter.should_drop_line(
             "Removing object-group (OG_DST_DB) not allowed, it is being used.\n"
+        ));
+    }
+
+    #[test]
+    fn stream_echo_filter_suppresses_incremental_echo_fragments() {
+        let sent_command = "no object-group network OG_SRC_APP";
+        let filter = StreamCommandEchoFilter::new(sent_command);
+
+        assert!(filter.should_suppress_fragment("no object-group net"));
+        assert!(filter.should_suppress_fragment(
+            "no object-group net$p netw            ork OG_SRC_A$SRC_AP            P"
+        ));
+        assert!(!filter.should_suppress_fragment(
+            "Removing object-group (OG_SRC_APP) not allowed, it is being used."
         ));
     }
 
