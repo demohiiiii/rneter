@@ -32,7 +32,7 @@ pub fn juniper_config() -> DeviceHandlerConfig {
             r"\s+\^$".to_string(),
         ],
         edges: vec![
-            transition_rule("Enable", "system-view", "Config", false, false),
+            transition_rule("Enable", "configure", "Config", false, false),
             transition_rule("Config", "exit", "Enable", true, false),
         ],
         dyn_param: HashMap::new(),
