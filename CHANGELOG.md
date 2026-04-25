@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.4] - 2026-04-25
+
+### New Features
+- Added stream-level prompt-prefix buffering through `DeviceHandlerConfig.prompt_prefix` and `DeviceHandler::read_prompt_prefix(...)`, enabling multiline prompt handling for CLIs like JunOS `[edit]` + `user@host#`.
+- Added shared prompt-prefix merge handling in both connection initialization and command execution loops, so prefix lines are joined with trailing prompt fragments before state matching.
+- Added Juniper template coverage for `[edit]` context prompts with regression tests for merged prompt matching and prefix-line buffering.
+
+### Optimizations
+- Unified pending prompt-line handling so private-use (`<PUA>`) themed prompt fragments and vendor prompt-prefix fragments follow the same buffering and merge path.
+- Reduced prompt-context leakage into `Output.content` by keeping detected prompt-prefix lines in prompt matching flow instead of treating them as normal command output.
+- Extended handler equivalence checks to include prompt-prefix patterns, preventing cached-session reuse across mismatched prompt-prefix configurations.
+
+### API Changes
+- `DeviceHandlerConfig` now includes `prompt_prefix: Vec<String>` (with `serde(default)`), allowing templates and callers to declare prompt-context prefix regexes.
+- `DeviceHandler` now exposes `read_prompt_prefix(&self, line: &str) -> bool` for runtime prompt-prefix detection.
+- Built-in `juniper` template defaults now include optional `[edit]` context matching and a default `prompt_prefix` rule (`^\[edit\]\s*$`); custom JunOS templates should keep equivalent rules when using context prompts.
+
+### Risks
+- Overly broad prompt-prefix regexes can temporarily hold real output lines in pending buffers; custom templates should keep prefix patterns narrowly scoped.
+- Output cleanup and prompt detection remain heuristic-driven for highly customized CLI themes, so edge prompts may still need template-specific regex adjustments.
+- Coverage includes full test-suite validation, but device-side verification across mixed firmware prompt variants is still recommended before broad rollout.
+
 ## [0.4.3] - 2026-04-13
 
 ### New Features
