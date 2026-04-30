@@ -6,7 +6,22 @@
 
 [English Documentation](README.md)
 
-`rneter` 是一个用于管理网络设备 SSH 连接的 Rust 库，具有智能状态机处理功能。它提供了高级 API 用于连接网络设备（路由器、交换机等）、执行命令以及管理设备状态，并具备自动提示符检测和模式切换功能。
+`rneter` 是一个用于管理网络设备和 Linux 主机 SSH 连接的 Rust 库，采用显式的 Prompt 状态机执行模型。它的设计思路参考了 [Netmiko](https://github.com/ktbyers/netmiko) 和 [Scrapli](https://github.com/carlmontanari/scrapli)，解决的问题域与它们类似，但更强调正式的状态切换、可复用交互流程、事务回滚以及可回放的自动化工作流。
+
+## 目录
+
+- [特性](#特性)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [架构](#架构)
+- [与 Netmiko 和 Scrapli 的对比](#与-netmiko-和-scrapli-的对比)
+- [支持的设备类型](#支持的设备类型)
+- [配置](#配置)
+- [错误处理](#错误处理)
+- [文档](#文档)
+- [许可证](#许可证)
+- [贡献](#贡献)
+- [作者](#作者)
 
 ## 特性
 
@@ -18,7 +33,7 @@
 - **内置 Copy Flow 模板**：可复用结构化模板来驱动 Cisco-like 设备上的交互式 `copy` 流程
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
 - **异步/等待**：基于 Tokio 构建，提供高性能异步操作
-- **错误处理**：全面的错误类型with详细上下文信息
+- **错误处理**：全面的错误类型和详细的上下文信息
 
 ## 安装
 
@@ -26,7 +41,7 @@
 
 ```toml
 [dependencies]
-rneter = "0.3"
+rneter = "0.4"
 ```
 
 ## 快速开始
@@ -778,15 +793,92 @@ flowchart TD
 3. 执行命令并等待提示符
 4. 返回带有成功状态的输出
 
+## 与 Netmiko 和 Scrapli 的对比
+
+如果你之前主要使用 [Netmiko](https://github.com/ktbyers/netmiko) 或
+[Scrapli](https://github.com/carlmontanari/scrapli)，最需要先建立的认知是：
+`rneter` 的抽象边界和它们不完全一样。
+
+- `Netmiko` 更像一个围绕 prompt 驱动命令执行的设备会话工具库。
+- `Scrapli` 更像一个围绕 transport/channel/driver 和 privilege level 的设备连接工具库。
+- `rneter` 更像一个围绕显式状态、状态边和可复用操作构建的 Prompt 状态机执行引擎。
+
+从底层机制上说：
+
+- 在 `Netmiko` 里，prompt 主要用于判断一条命令什么时候执行结束。
+- 在 `Scrapli` 里，prompt 和 privilege level 主要用于维持 channel 与预期模式对齐。
+- 在 `rneter` 里，prompt 不仅用于判断命令结束，还会驱动正式状态机更新当前状态。
+
+### 机制对照
+
+| 维度 | `rneter` | `Netmiko` | `Scrapli` | 说明 |
+| --- | --- | --- | --- | --- |
+| 核心抽象 | `DeviceHandler` 是正式有限状态机，包含 prompt 规则、输入规则和状态迁移边 | `BaseConnection` 是 prompt 驱动的设备会话对象 | `Driver + Channel + Transport`，并配合平台 privilege level | `rneter` 对设备行为建模更显式，另外两者先强调会话交互 |
+| Prompt 的角色 | Prompt 既是状态事件，也是命令结束信号 | Prompt 主要是命令结束信号 | Prompt 主要用于 channel 对齐和结束判定 | `rneter` 把 prompt 当作控制面数据，而不仅是输出分隔符 |
+| 模式切换 | 基于显式 `edges` 做 BFS 自动寻路 | 常见是 `enable()`、`config_mode()`、`exit_config_mode()` 这类专用 helper | 常见是切换到目标 privilege level | `rneter` 更容易泛化复杂模式图 |
+| 交互输入 | 输入提示也是状态机规则的一部分，还能按 command flow 扩展 | 常通过 `send_command_timing()`、`send_multiline()` 等方式处理 | 常通过交互式 channel 操作和显式 prompt 期望处理 | `rneter` 更适合复用设备向导式交互 |
+| 多行 / 脏 Prompt 处理 | 统一做流式清洗、prompt prefix 缓冲、片段合并再匹配 | 常见是 ANSI/backspace 清洗后直接读 prompt | 常见是 channel prompt pattern 搜索和显式读取 | `rneter` 在复杂 prompt 场景下投入了更多底层机制 |
+| 错误处理 | 错误行可映射为状态机 `error` 状态，也可通过 `ignore_errors` 忽略 | 主要是方法级或输出模式级判断 | 主要是 response 失败条件或上层逻辑判断 | `rneter` 更容易把错误语义收敛到统一执行流程中 |
+| 输出模型 | `Output.success`、`content`、`all`、`prompt`、可选 `exit_code`、录制事件 | 以处理后的字符串输出为主，外加辅助解析手段 | 以 response 对象为主，包含原始/处理后输出和 channel 元信息 | `rneter` 更偏编排和回放，而不仅是交互式使用 |
+| Linux 支持 | Linux 复用同一套状态执行引擎，并支持 shell exit-status 捕获 | 不是主要设计中心 | 支持，但仍偏 channel/prompt 视角 | `rneter` 更容易统一网络设备和 Linux 主机的执行语义 |
+| 事务 / 回滚 | 内置 `TxBlock`、`TxWorkflow`、回滚策略和子步骤结果 | 需要调用方自行组织 | 需要调用方自行组织 | 这是 `rneter` 与另外两者最明显的架构差异之一 |
+| 回放 / 固件测试 | 内置 session recording / replay | 不是核心架构能力 | 不是核心架构能力 | `rneter` 更适合作为 CLI 自动化平台底层内核 |
+
+### 同一任务下的不同心智模型
+
+| 任务 | `Netmiko` 的常见思路 | `Scrapli` 的常见思路 | `rneter` 的常见思路 |
+| --- | --- | --- | --- |
+| 执行 `show version` | 发命令并一直读到 prompt | 通过 channel 发命令并一直读到 prompt pattern | 先收敛到目标 mode，再执行命令，并用返回 prompt 更新 FSM |
+| 下发配置命令 | 进入 config mode，发命令，必要时退出 | 切换到 config privilege，发送配置，再视情况切回 | 把 config 视为一个状态节点，并通过状态边自动路由过去 |
+| 处理 `copy scp:` 交互 | 用 timing / multiline helper 加预期 prompt 逐步处理 | 用交互式 send/read 操作配合显式 prompt 期望处理 | 建模成可复用 `CommandFlow` 或 `CommandFlowTemplate` |
+| 处理 `[edit]` + `user@host#` | 调整平台 prompt 逻辑 | 调整 prompt pattern / channel 行为 | 将 `[edit]` 建模为 prompt prefix，并在匹配前与后续 prompt 合并 |
+
+### 为什么这很重要
+
+对 `Netmiko` 用户来说，`rneter` 更不像“另一个更强的 `send_command`”，而更像
+“一个知道设备当前状态、并能围绕状态执行自动化编排的执行引擎”。
+
+对 `Scrapli` 用户来说，`rneter` 更不像“另一个 driver/channel 栈”，而更像
+“在 prompt 解析之上再往上一层，正式构建状态图和执行模型的系统”。
+
+这也是为什么 `rneter` 在下面这些场景里会特别有优势：
+
+- 多步骤命令工作流
+- 厂商特定的交互式向导
+- 事务化下发与回滚
+- 基于 prompt 的可回放测试
+- 同时覆盖网络设备和 Linux 主机的统一编排层
+
+对应的代价是：相比 `Netmiko` 和 `Scrapli`，`rneter` 会更频繁地要求调用方从
+“状态、迁移和执行模型”的角度思考问题。
+
 ## 支持的设备类型
 
-该库旨在与任何支持 SSH 的网络设备配合使用。特别适合：
+该库旨在与任何支持 SSH 的网络设备和 Linux 主机配合使用。特别适合：
 
+**网络设备：**
 - Cisco IOS/IOS-XE/IOS-XR 设备
 - Juniper JunOS 设备
 - Arista EOS 设备
 - 华为 VRP 设备
-- 通过 SSH 访问的通用 Linux/Unix 系统
+- H3C Comware 设备
+- Hillstone SG 设备
+- Array Networks APV 设备
+- Fortinet FortiGate 防火墙
+- Palo Alto Networks PA 防火墙
+- Check Point Security Gateway
+- Topsec NGFW 防火墙
+- 启明星辰 Venustech USG 设备
+- 迪普 DPTech 防火墙设备
+- 长亭 Chaitin SafeLine 网关
+- 奇安信 QiAnXin NSG 网关
+- 迈普通信 Maipu 网络设备
+
+**Linux 主机：**
+- 通用 Linux 发行版（Ubuntu、Debian、CentOS、RHEL 等）
+- 支持多种提权方式（`sudo -i`、`sudo -s`、`su`、直接 root）
+- 支持带自定义 pattern 的智能 prompt 检测
+- 支持带回滚策略的事务式配置管理
 
 ## 配置
 

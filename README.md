@@ -6,7 +6,22 @@
 
 [中文文档](README_zh.md)
 
-`rneter` is a Rust library for managing SSH connections to network devices with intelligent state machine handling. It provides a high-level API for connecting to network devices (routers, switches, etc.), executing commands, and managing device states with automatic prompt detection and mode switching.
+`rneter` is a Rust library for managing SSH connections to network devices and Linux hosts with an explicit prompt-state-machine execution model. Its design is inspired by libraries such as [Netmiko](https://github.com/ktbyers/netmiko) and [Scrapli](https://github.com/carlmontanari/scrapli), and it serves a similar problem space, while focusing more heavily on formal state transitions, reusable interactive flows, transactions, and replayable automation workflows.
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Comparison With Netmiko And Scrapli](#comparison-with-netmiko-and-scrapli)
+- [Supported Device Types](#supported-device-types)
+- [Configuration](#configuration)
+- [Error Handling](#error-handling)
+- [Documentation](#documentation)
+- [License](#license)
+- [Contributing](#contributing)
+- [Author](#author)
 
 ## Features
 
@@ -26,7 +41,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.3"
+rneter = "0.4"
 ```
 
 ## Quick Start
@@ -67,10 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys: None,
         responder: tx,
     };
-    
+
     sender.send(cmd).await?;
     let output = rx.await??;
-    
+
     println!("Command successful: {}", output.success);
     println!("Output: {}", output.content);
     Ok(())
@@ -828,6 +843,7 @@ Example transaction lifecycle event shape:
 ### Connection Management
 
 The `SshConnectionManager` provides a singleton connection pool accessible via the `MANAGER` constant. It automatically:
+
 - Caches connections for 5 minutes of inactivity
 - Reconnects on connection failure
 - Manages up to 100 concurrent connections
@@ -835,6 +851,7 @@ The `SshConnectionManager` provides a singleton connection pool accessible via t
 ### State Machine
 
 The `DeviceHandler` implements a finite state machine that:
+
 - Tracks the current device state using regex patterns
 - Finds optimal paths between states using BFS
 - Handles automatic state transitions
@@ -843,10 +860,12 @@ The `DeviceHandler` implements a finite state machine that:
 #### Design Rationale
 
 The state machine is designed around two stable facts in network-device automation:
+
 1. Prompts are more reliable than command text for identifying current mode.
 2. Transition paths vary by vendor/model, so pathfinding must be data-driven.
 
 Core design choices:
+
 - Normalize states to lowercase and map prompt regex matches to state indexes for fast lookups.
 - Separate prompt detection (`read_prompt`) from state update (`read`) to keep command loops predictable.
 - Model transitions as a directed graph (`edges`) and use BFS to find shortest valid mode switch path.
@@ -854,6 +873,7 @@ Core design choices:
 - Track both CLI prompt text and FSM prompt (state name) to support online diagnostics and offline replay assertions.
 
 Benefits:
+
 - Better portability: vendor-specific behavior is mostly data configuration, not hard-coded branches.
 - Better resilience: command execution relies on prompt/state convergence instead of fixed output formats.
 - Better testability: record/replay can validate state transitions and prompt evolution without real SSH sessions.
@@ -889,16 +909,77 @@ flowchart TD
 ### Command Execution
 
 Commands are executed through an async channel-based architecture:
+
 1. Submit a `CmdJob` to the connection sender
 2. The library automatically transitions to the target state if needed
 3. Executes the command and waits for the prompt
 4. Returns the output with success status
+
+## Comparison With Netmiko And Scrapli
+
+If you are coming from [Netmiko](https://github.com/ktbyers/netmiko) or
+[Scrapli](https://github.com/carlmontanari/scrapli), the biggest difference is
+where `rneter` puts its abstraction boundary.
+
+- `Netmiko` is primarily a device session toolkit built around prompt-driven command execution.
+- `Scrapli` is primarily a transport/channel/driver toolkit built around prompt patterns and privilege levels.
+- `rneter` is primarily a prompt-state-machine execution engine built around explicit states, transitions, and reusable operations.
+
+At a high level:
+
+- In `Netmiko`, prompt detection is mainly used to know when command output is complete.
+- In `Scrapli`, prompt detection and privilege levels are used to keep the channel aligned with the expected operating mode.
+- In `rneter`, prompt detection is used to update a formal state machine, and command execution is a state-convergence process.
+
+### Mechanism Comparison
+
+| Dimension                          | `rneter`                                                                                         | `Netmiko`                                                                                            | `Scrapli`                                                                               | What This Means                                                                                    |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Core abstraction                   | `DeviceHandler` as a finite state machine with prompt rules, input rules, and transition edges   | `BaseConnection` as a prompt-driven session object                                                   | `Driver + Channel + Transport` with platform privilege levels                           | `rneter` models device behavior more explicitly; the others emphasize session interaction first    |
+| Prompt role                        | Prompt is a state event and command completion signal                                            | Prompt is mainly a command completion signal                                                         | Prompt is mainly a channel alignment and completion signal                              | `rneter` treats prompt text as control-plane data, not just output framing                         |
+| Mode switching                     | Automatic BFS pathfinding over explicit `edges`                                                  | Usually explicit helper methods such as `enable()` / `config_mode()` / `exit_config_mode()`          | Privilege-level acquisition/transition in the driver                                    | `rneter` can generalize arbitrary mode graphs more naturally                                       |
+| Interactive input                  | Prompt/input rules are part of the runtime FSM and can be extended per command flow              | Usually handled through timing/expect workflows such as `send_command_timing()` / `send_multiline()` | Usually handled through interactive channel operations and explicit prompt expectations | `rneter` is better suited to reusable interactive device wizards                                   |
+| Multi-line / noisy prompt handling | Shared stream normalization, prompt prefix buffering, fragment merge, and prompt matching        | ANSI/backspace stripping plus prompt reads                                                           | Prompt pattern search depth and explicit prompt reads in channel operations             | `rneter` spends more machinery on difficult prompts such as themed shells or JunOS context prompts |
+| Error handling                     | Error lines can map into FSM error state and can also be selectively ignored                     | Mostly command-method or output-pattern based                                                        | Mostly response / failed-when / parser-layer handling                                   | `rneter` can fold error semantics into execution flow more directly                                |
+| Output model                       | `Output.success`, `content`, `all`, `prompt`, optional exit code, recorder events                | Primarily processed string output, plus helper parsing paths                                         | Response objects with raw/processed output and driver/channel metadata                  | `rneter` is oriented toward orchestration and replay, not only interactive use                     |
+| Linux support                      | Linux is handled through the same stateful execution engine, including shell exit-status capture | Not a primary design center                                                                          | Supported, but still channel/prompt-centric                                             | `rneter` can treat network devices and Linux hosts more uniformly                                  |
+| Transactions / rollback            | Built-in `TxBlock`, `TxWorkflow`, rollback policies, recorded child-step results                 | Caller-managed                                                                                       | Caller-managed                                                                          | This is one of the biggest architectural differences in favor of `rneter` for automation platforms |
+| Replay / fixture testing           | Built-in session recording and replay                                                            | Not a core architectural feature                                                                     | Not a core architectural feature                                                        | `rneter` is designed to support offline testing of CLI automation behavior                         |
+
+### Same Task, Different Mental Model
+
+| Task                           | `Netmiko` mental model                                         | `Scrapli` mental model                                                          | `rneter` mental model                                                            |
+| ------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Run `show version`             | Send a command and read until prompt                           | Send a command through the channel and read until prompt pattern                | Converge to target mode, execute command, and update FSM from returned prompt    |
+| Send config commands           | Enter config mode, send commands, optionally exit              | Acquire config privilege level, send configs, later return to desired privilege | Treat config as a named state and route execution there through transition edges |
+| Handle `copy scp:` prompts     | Use timing / multiline helpers with expected follow-up prompts | Use interactive send/read operations with explicit prompt expectations          | Model the interaction as a reusable `CommandFlow` or `CommandFlowTemplate`       |
+| Handle `[edit]` + `user@host#` | Tune prompt logic for this platform                            | Tune prompt pattern / channel read behavior                                     | Model `[edit]` as a prompt prefix and merge it into the next prompt candidate    |
+
+### Why This Matters
+
+For a `Netmiko` user, `rneter` will feel less like “a better `send_command`” and
+more like “a reusable execution engine that knows what state the device is in”.
+
+For a `Scrapli` user, `rneter` will feel less like “a better driver/channel stack”
+and more like “a higher-level state graph built on prompt parsing”.
+
+That is why `rneter` is especially strong when you need:
+
+- multi-step command workflows,
+- vendor-specific interactive wizards,
+- transaction-style rollback,
+- prompt-aware replayable tests,
+- or one orchestration layer that spans both network devices and Linux servers.
+
+The tradeoff is that `rneter` asks the caller to think in terms of states,
+transitions, and execution models more often than `Netmiko` or `Scrapli`.
 
 ## Supported Device Types
 
 The library is designed to work with any SSH-enabled network device and Linux servers. It's particularly well-suited for:
 
 **Network Devices:**
+
 - Cisco IOS/IOS-XE/IOS-XR devices
 - Juniper JunOS devices
 - Arista EOS devices
@@ -917,6 +998,7 @@ The library is designed to work with any SSH-enabled network device and Linux se
 - Maipu network devices
 
 **Linux Servers:**
+
 - Generic Linux distributions (Ubuntu, Debian, CentOS, RHEL, etc.)
 - Supports multiple privilege escalation methods (sudo -i, sudo -s, su, direct root)
 - Intelligent prompt detection with customizable patterns
@@ -927,6 +1009,7 @@ The library is designed to work with any SSH-enabled network device and Linux se
 ### SSH Algorithm Support
 
 `rneter` includes comprehensive SSH algorithm support in the `config` module:
+
 - Key exchange: Curve25519, DH groups, ECDH
 - Ciphers: AES (CTR/CBC/GCM), ChaCha20-Poly1305
 - MAC: HMAC-SHA1/256/512 with ETM variants
