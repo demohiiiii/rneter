@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn huawei_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^(HRP_M|HRP_S){0,1}\[.+]+\s*$"]),
             prompt_rule("Enable", &[r"^(HRP_M|HRP_S){0,1}<.+>\s*$"]),
+            prompt_rule("Config", &[r"^(HRP_M|HRP_S){0,1}\[.+]+\s*$"]),
         ],
         write: vec![input_rule(
             "Save",

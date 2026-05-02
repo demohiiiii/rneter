@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn h3c_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^(RBM_P|RBM_S)?\[.+\]\s*$"]),
             prompt_rule("Enable", &[r"^(RBM_P|RBM_S)?<.+>\s*$"]),
+            prompt_rule("Config", &[r"^(RBM_P|RBM_S)?\[.+\]\s*$"]),
         ],
         more_regex: vec![r"\s*---- More ----\s*".to_string()],
         error_regex: vec![

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn paloalto_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^\r{0,1}\S+@\S+#\s*$"]),
             prompt_rule("Enable", &[r"^\r{0,1}\S+@\S+>\s*$"]),
+            prompt_rule("Config", &[r"^\r{0,1}\S+@\S+#\s*$"]),
         ],
         more_regex: vec![r"(--more--)|(lines \d+-\d+ )".to_string()],
         error_regex: vec![

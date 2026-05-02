@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn juniper_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^(?:\[edit\]\s+)?\S+@\S+#\s*$"]),
             prompt_rule("Enable", &[r"^\S+@\S+>\s*$"]),
+            prompt_rule("Config", &[r"^(?:\[edit\]\s+)?\S+@\S+#\s*$"]),
         ],
         prompt_prefix: vec![r"^\[edit\]\s*$".to_string()],
         write: vec![input_rule(

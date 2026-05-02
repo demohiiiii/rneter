@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn qianxin_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^\S+-config.*]\s*$"]),
             prompt_rule("Enable", &[r"^\S+>\s*$"]),
+            prompt_rule("Config", &[r"^\S+-config.*]\s*$"]),
         ],
         more_regex: vec![r"--More--".to_string()],
         error_regex: vec![

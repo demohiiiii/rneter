@@ -16,9 +16,9 @@ pub fn cisco_config() -> DeviceHandlerConfig {
 
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
-            prompt_rule("Enable", &[r"^[^\s#]+#\s*$"]),
             prompt_rule("Login", &[r"^[^\s<]+>\s*$"]),
+            prompt_rule("Enable", &[r"^[^\s#]+#\s*$"]),
+            prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
         ],
         write,
         more_regex: vec![r"\s*<--- More --->\s*".to_string()],

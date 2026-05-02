@@ -8,8 +8,8 @@ use std::collections::HashMap;
 pub fn dptech_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Config", &[r"^\r{0,1}\[.+\]\s*$"]),
             prompt_rule("Enable", &[r"^\r{0,1}<.+>\s*$"]),
+            prompt_rule("Config", &[r"^\r{0,1}\[.+\]\s*$"]),
         ],
         more_regex: vec![r" --More\(CTRL\+C break\)-- ".to_string()],
         error_regex: vec![

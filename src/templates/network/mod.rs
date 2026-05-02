@@ -55,9 +55,22 @@ pub use venustech::venustech_config;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{DeviceHandler, DeviceHandlerConfig};
+    use crate::device::{DeviceHandler, DeviceHandlerConfig, DevicePromptRule};
     use crate::error::ConnectError;
     use crate::templates::{TemplateCapability, available_templates, by_name, template_metadata};
+
+    fn prompt_state_order(prompts: &[DevicePromptRule]) -> Vec<&str> {
+        prompts.iter().map(|rule| rule.state.as_str()).collect()
+    }
+
+    fn assert_prompt_order(prompts: &[DevicePromptRule], expected: &[&str], name: &str) {
+        let actual = prompt_state_order(prompts);
+        assert_eq!(
+            actual, expected,
+            "prompt order mismatch for {name}; actual prompt states: {:?}",
+            actual
+        );
+    }
 
     struct NetworkTemplateCase {
         name: &'static str,
@@ -65,6 +78,7 @@ mod tests {
         config_builder: fn() -> DeviceHandlerConfig,
         expected_states: &'static [&'static str],
         expected_capabilities: &'static [TemplateCapability],
+        expected_prompt_order: &'static [&'static str],
     }
 
     fn network_cases() -> Vec<NetworkTemplateCase> {
@@ -74,6 +88,7 @@ mod tests {
                 builder: arista,
                 config_builder: arista_config,
                 expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -86,6 +101,7 @@ mod tests {
                 builder: array,
                 config_builder: array_config,
                 expected_states: &["login", "enable", "config", "vsiteenable", "vsiteconfig"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -99,6 +115,7 @@ mod tests {
                 builder: chaitin,
                 config_builder: chaitin_config,
                 expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -111,6 +128,7 @@ mod tests {
                 builder: checkpoint,
                 config_builder: checkpoint_config,
                 expected_states: &["enable"],
+                expected_prompt_order: &["Enable"],
                 expected_capabilities: &[TemplateCapability::EnableMode],
             },
             NetworkTemplateCase {
@@ -118,6 +136,7 @@ mod tests {
                 builder: cisco,
                 config_builder: cisco_config,
                 expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -130,6 +149,7 @@ mod tests {
                 builder: dptech,
                 config_builder: dptech_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -140,6 +160,7 @@ mod tests {
                 builder: fortinet,
                 config_builder: fortinet_config,
                 expected_states: &["enable", "vdomenable"],
+                expected_prompt_order: &["Enable"],
                 expected_capabilities: &[TemplateCapability::EnableMode],
             },
             NetworkTemplateCase {
@@ -147,6 +168,7 @@ mod tests {
                 builder: h3c,
                 config_builder: h3c_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -157,6 +179,7 @@ mod tests {
                 builder: hillstone,
                 config_builder: hillstone_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -168,6 +191,7 @@ mod tests {
                 builder: huawei,
                 config_builder: huawei_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -179,6 +203,7 @@ mod tests {
                 builder: juniper,
                 config_builder: juniper_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -190,6 +215,7 @@ mod tests {
                 builder: maipu,
                 config_builder: maipu_config,
                 expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -202,6 +228,7 @@ mod tests {
                 builder: paloalto,
                 config_builder: paloalto_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -212,6 +239,7 @@ mod tests {
                 builder: qianxin,
                 config_builder: qianxin_config,
                 expected_states: &["enable", "config"],
+                expected_prompt_order: &["Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
@@ -222,6 +250,7 @@ mod tests {
                 builder: topsec,
                 config_builder: topsec_config,
                 expected_states: &["enable"],
+                expected_prompt_order: &["Enable"],
                 expected_capabilities: &[TemplateCapability::EnableMode],
             },
             NetworkTemplateCase {
@@ -229,6 +258,7 @@ mod tests {
                 builder: venustech,
                 config_builder: venustech_config,
                 expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
                     TemplateCapability::LoginMode,
                     TemplateCapability::EnableMode,
@@ -332,6 +362,14 @@ mod tests {
                     metadata.capabilities
                 );
             }
+        }
+    }
+
+    #[test]
+    fn network_template_prompts_follow_default_privilege_order() {
+        for case in network_cases() {
+            let config = (case.config_builder)();
+            assert_prompt_order(&config.prompt, case.expected_prompt_order, case.name);
         }
     }
 }

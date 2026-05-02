@@ -181,8 +181,8 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
 
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Root", &root_prompts),
             prompt_rule("User", &user_prompts),
+            prompt_rule("Root", &root_prompts),
         ],
         prompt_with_sys: Vec::new(),
         prompt_prefix: Vec::new(),
@@ -298,6 +298,18 @@ mod tests {
             .expect("linux config");
 
         assert!(handler.is_equivalent(&rebuilt));
+    }
+
+    #[test]
+    fn linux_template_prompts_follow_default_privilege_order() {
+        let config = linux_handler_config(LinuxTemplateConfig::default());
+        let prompt_states = config
+            .prompt
+            .iter()
+            .map(|rule| rule.state.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(prompt_states, vec!["User", "Root"]);
     }
 
     #[test]
