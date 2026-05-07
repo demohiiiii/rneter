@@ -222,6 +222,7 @@ pub fn linux_handler_config(config: LinuxTemplateConfig) -> DeviceHandlerConfig 
         edges,
         ignore_errors: Vec::new(),
         dyn_param,
+        hooks: Default::default(),
         command_execution: DeviceCommandExecutionConfig::ShellExitStatus {
             marker: LINUX_EXIT_CODE_MARKER.to_string(),
             shell_flavor: config.shell_flavor,

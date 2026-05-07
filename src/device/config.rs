@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::DeviceHandler;
 use crate::error::ConnectError;
+use crate::session::SessionHooks;
 
 /// Public command execution strategy used by handler configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -82,6 +83,8 @@ pub struct DeviceHandlerConfig {
     pub ignore_errors: Vec<String>,
     #[serde(default)]
     pub dyn_param: HashMap<String, String>,
+    #[serde(default)]
+    pub hooks: SessionHooks,
     #[serde(default)]
     pub command_execution: DeviceCommandExecutionConfig,
 }
@@ -188,6 +191,7 @@ mod tests {
             edges: Vec::new(),
             ignore_errors: Vec::new(),
             dyn_param: HashMap::new(),
+            hooks: SessionHooks::default(),
             command_execution: DeviceCommandExecutionConfig::ShellExitStatus {
                 marker: "__MARK__".to_string(),
                 shell_flavor: DeviceShellFlavor::Posix,
@@ -197,5 +201,44 @@ mod tests {
         let handler = config.build().expect("build handler");
         let wrapped = handler.prepare_command_for_execution("echo hi", true);
         assert!(wrapped.contains("__MARK__"));
+    }
+
+    #[test]
+    fn config_build_retains_hooks_on_handler_and_affects_equivalence() {
+        let hook = crate::session::HookAction::new(
+            "prepare-root",
+            crate::session::SessionOperation::from(crate::session::Command {
+                mode: "Root".to_string(),
+                command: "stty -echo".to_string(),
+                ..crate::session::Command::default()
+            }),
+        );
+        let config = DeviceHandlerConfig {
+            prompt: vec![prompt_rule("Root", &[r"^root#\s*$"])],
+            prompt_with_sys: Vec::new(),
+            prompt_prefix: Vec::new(),
+            write: Vec::new(),
+            more_regex: Vec::new(),
+            error_regex: Vec::new(),
+            edges: Vec::new(),
+            ignore_errors: Vec::new(),
+            dyn_param: HashMap::new(),
+            hooks: SessionHooks {
+                after_enter_state: HashMap::from([("Root".to_string(), vec![hook])]),
+                ..SessionHooks::default()
+            },
+            command_execution: DeviceCommandExecutionConfig::PromptDriven,
+        };
+        let handler = config.build().expect("build handler");
+        let without_hooks = DeviceHandlerConfig {
+            hooks: SessionHooks::default(),
+            ..config.clone()
+        }
+        .build()
+        .expect("build handler without hooks");
+
+        assert_eq!(handler.hooks().after_enter_state("root").len(), 1);
+        assert_eq!(handler.hooks().after_enter_state("Root").len(), 1);
+        assert!(!handler.is_equivalent(&without_hooks));
     }
 }

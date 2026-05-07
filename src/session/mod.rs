@@ -40,7 +40,9 @@ pub use recording::{
     NormalizeOptions, ReplayContext, SessionEvent, SessionRecordEntry, SessionRecordLevel,
     SessionRecorder, SessionReplayer,
 };
+pub(crate) use hooks::HookTrigger;
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
+pub use hooks::{HookAction, HookFailurePolicy, SessionHooks};
 pub use transaction::{
     RollbackPolicy, TxBlock, TxOperationStepResult, TxResult, TxStep, TxStepExecutionState,
     TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult, failed_block_rollback_summary,
@@ -121,6 +123,8 @@ pub struct SharedSshClient {
     recv: Receiver<String>,
     handler: DeviceHandler,
     prompt: String,
+    hooks: SessionHooks,
+    in_hook: bool,
 
     /// SHA-256 hash of the password, used for connection parameter comparison
     password_hash: [u8; 32],
@@ -675,6 +679,7 @@ pub struct SshConnectionManager {
 }
 
 mod client;
+mod hooks;
 mod manager;
 mod recording;
 mod security;

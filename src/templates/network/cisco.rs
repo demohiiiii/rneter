@@ -2,6 +2,7 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::session::{Command, HookAction, SessionHooks, SessionOperation};
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for Cisco IOS/IOS-XE devices.
@@ -43,6 +44,17 @@ pub fn cisco_config() -> DeviceHandlerConfig {
             transition_rule("Enable", "disable", "Login", true, false),
         ],
         dyn_param: HashMap::new(),
+        hooks: SessionHooks {
+            after_connect: vec![HookAction::new(
+                "disable-paging",
+                SessionOperation::from(Command {
+                    mode: "Enable".to_string(),
+                    command: "terminal pager 0".to_string(),
+                    ..Command::default()
+                }),
+            )],
+            ..SessionHooks::default()
+        },
         ..Default::default()
     }
 }
@@ -82,5 +94,12 @@ mod tests {
             true,
             false,
         )));
+    }
+
+    #[test]
+    fn cisco_template_disables_paging_after_connect() {
+        let config = cisco_config();
+        assert_eq!(config.hooks.after_connect.len(), 1);
+        assert_eq!(config.hooks.after_connect[0].name, "disable-paging");
     }
 }

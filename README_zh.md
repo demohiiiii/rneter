@@ -14,6 +14,7 @@
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [架构](#架构)
+- [生命周期 Hook](#生命周期-hook)
 - [与 Netmiko 和 Scrapli 的对比](#与-netmiko-和-scrapli-的对比)
 - [支持的设备类型](#支持的设备类型)
 - [配置](#配置)
@@ -29,6 +30,7 @@
 - **状态机管理**：智能设备状态跟踪和自动状态转换
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
+- **生命周期 Hook**：支持在连接后、断开前以及状态切换前后声明式执行准备/清理操作
 - **SFTP 文件上传**：可向开启 SSH `sftp` 子系统的远端主机上传本地文件
 - **内置 Copy Flow 模板**：可复用结构化模板来驱动 Cisco-like 设备上的交互式 `copy` 流程
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
@@ -82,10 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys: None,
         responder: tx,
     };
-    
+
     sender.send(cmd).await?;
     let output = rx.await??;
-    
+
     println!("命令执行成功: {}", output.success);
     println!("输出: {}", output.content);
     Ok(())
@@ -727,6 +729,7 @@ let handler = linux_with_config(LinuxTemplateConfig {
 ### 连接管理
 
 `SshConnectionManager` 提供了通过 `MANAGER` 常量访问的单例连接池。它可以自动：
+
 - 缓存连接 5 分钟的不活动时间
 - 在连接失败时重新连接
 - 管理最多 100 个并发连接
@@ -734,6 +737,7 @@ let handler = linux_with_config(LinuxTemplateConfig {
 ### 状态机
 
 `DeviceHandler` 实现了一个有限状态机：
+
 - 使用正则表达式模式跟踪当前设备状态
 - 使用 BFS 算法查找状态之间的最优路径
 - 处理自动状态转换
@@ -742,10 +746,12 @@ let handler = linux_with_config(LinuxTemplateConfig {
 #### 设计思路
 
 这个状态机的设计基于网络设备自动化里的两个稳定事实：
+
 1. 相比命令文本，Prompt 更适合判断当前模式。
 2. 不同厂商/型号的模式切换路径不同，路径搜索必须数据驱动。
 
 核心设计选择：
+
 - 状态统一小写，并将 prompt 正则匹配结果映射到状态索引，保证快速定位。
 - 将 prompt 检测（`read_prompt`）与状态更新（`read`）拆开，保证命令循环行为可预测。
 - 将状态转换建模为有向图（`edges`），通过 BFS 找到最短可行切换路径。
@@ -753,6 +759,7 @@ let handler = linux_with_config(LinuxTemplateConfig {
 - 同时记录 CLI prompt 文本与 FSM prompt（状态名），便于在线诊断和离线回放断言。
 
 这样设计的好处：
+
 - 可移植性更好：设备差异主要通过配置表达，而不是硬编码分支。
 - 稳定性更好：执行依赖 prompt/状态收敛，而不是脆弱的输出格式假设。
 - 可测试性更好：可通过 record/replay 离线验证状态切换与 prompt 演化，不依赖真实 SSH。
@@ -788,10 +795,29 @@ flowchart TD
 ### 命令执行
 
 命令通过基于异步通道的架构执行：
+
 1. 向连接发送器提交一个 `CmdJob`
 2. 库会在需要时自动转换到目标状态
 3. 执行命令并等待提示符
 4. 返回带有成功状态的输出
+
+## 生命周期 Hook
+
+`rneter` 现在可以通过 `DeviceHandlerConfig.hooks` 声明生命周期 Hook：
+
+- `after_connect`
+- `before_disconnect`
+- `after_enter_state`
+- `before_exit_state`
+
+Hook 复用了 `SessionOperation`，因此既可以执行单条命令，也可以执行命令流。在 `0.4.4` 中，连接级 Hook 先限定为模板级能力，这样就不会和连接缓存复用产生行为歧义；状态级 Hook 则会自动按内部小写 FSM 状态名做归一化匹配。
+
+内置模板也可以提供默认行为，例如：
+
+- Cisco 会在连接后执行 `terminal length 0`
+- Juniper 会在连接后执行 `set cli screen-length 0`
+
+Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件会进入 session recorder。
 
 ## 与 Netmiko 和 Scrapli 的对比
 
@@ -811,27 +837,27 @@ flowchart TD
 
 ### 机制对照
 
-| 维度 | `rneter` | `Netmiko` | `Scrapli` | 说明 |
-| --- | --- | --- | --- | --- |
-| 核心抽象 | `DeviceHandler` 是正式有限状态机，包含 prompt 规则、输入规则和状态迁移边 | `BaseConnection` 是 prompt 驱动的设备会话对象 | `Driver + Channel + Transport`，并配合平台 privilege level | `rneter` 对设备行为建模更显式，另外两者先强调会话交互 |
-| Prompt 的角色 | Prompt 既是状态事件，也是命令结束信号 | Prompt 主要是命令结束信号 | Prompt 主要用于 channel 对齐和结束判定 | `rneter` 把 prompt 当作控制面数据，而不仅是输出分隔符 |
-| 模式切换 | 基于显式 `edges` 做 BFS 自动寻路 | 常见是 `enable()`、`config_mode()`、`exit_config_mode()` 这类专用 helper | 常见是切换到目标 privilege level | `rneter` 更容易泛化复杂模式图 |
-| 交互输入 | 输入提示也是状态机规则的一部分，还能按 command flow 扩展 | 常通过 `send_command_timing()`、`send_multiline()` 等方式处理 | 常通过交互式 channel 操作和显式 prompt 期望处理 | `rneter` 更适合复用设备向导式交互 |
-| 多行 / 脏 Prompt 处理 | 统一做流式清洗、prompt prefix 缓冲、片段合并再匹配 | 常见是 ANSI/backspace 清洗后直接读 prompt | 常见是 channel prompt pattern 搜索和显式读取 | `rneter` 在复杂 prompt 场景下投入了更多底层机制 |
-| 错误处理 | 错误行可映射为状态机 `error` 状态，也可通过 `ignore_errors` 忽略 | 主要是方法级或输出模式级判断 | 主要是 response 失败条件或上层逻辑判断 | `rneter` 更容易把错误语义收敛到统一执行流程中 |
-| 输出模型 | `Output.success`、`content`、`all`、`prompt`、可选 `exit_code`、录制事件 | 以处理后的字符串输出为主，外加辅助解析手段 | 以 response 对象为主，包含原始/处理后输出和 channel 元信息 | `rneter` 更偏编排和回放，而不仅是交互式使用 |
-| Linux 支持 | Linux 复用同一套状态执行引擎，并支持 shell exit-status 捕获 | 不是主要设计中心 | 支持，但仍偏 channel/prompt 视角 | `rneter` 更容易统一网络设备和 Linux 主机的执行语义 |
-| 事务 / 回滚 | 内置 `TxBlock`、`TxWorkflow`、回滚策略和子步骤结果 | 需要调用方自行组织 | 需要调用方自行组织 | 这是 `rneter` 与另外两者最明显的架构差异之一 |
-| 回放 / 固件测试 | 内置 session recording / replay | 不是核心架构能力 | 不是核心架构能力 | `rneter` 更适合作为 CLI 自动化平台底层内核 |
+| 维度                  | `rneter`                                                                 | `Netmiko`                                                                | `Scrapli`                                                  | 说明                                                  |
+| --------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------- |
+| 核心抽象              | `DeviceHandler` 是正式有限状态机，包含 prompt 规则、输入规则和状态迁移边 | `BaseConnection` 是 prompt 驱动的设备会话对象                            | `Driver + Channel + Transport`，并配合平台 privilege level | `rneter` 对设备行为建模更显式，另外两者先强调会话交互 |
+| Prompt 的角色         | Prompt 既是状态事件，也是命令结束信号                                    | Prompt 主要是命令结束信号                                                | Prompt 主要用于 channel 对齐和结束判定                     | `rneter` 把 prompt 当作控制面数据，而不仅是输出分隔符 |
+| 模式切换              | 基于显式 `edges` 做 BFS 自动寻路                                         | 常见是 `enable()`、`config_mode()`、`exit_config_mode()` 这类专用 helper | 常见是切换到目标 privilege level                           | `rneter` 更容易泛化复杂模式图                         |
+| 交互输入              | 输入提示也是状态机规则的一部分，还能按 command flow 扩展                 | 常通过 `send_command_timing()`、`send_multiline()` 等方式处理            | 常通过交互式 channel 操作和显式 prompt 期望处理            | `rneter` 更适合复用设备向导式交互                     |
+| 多行 / 脏 Prompt 处理 | 统一做流式清洗、prompt prefix 缓冲、片段合并再匹配                       | 常见是 ANSI/backspace 清洗后直接读 prompt                                | 常见是 channel prompt pattern 搜索和显式读取               | `rneter` 在复杂 prompt 场景下投入了更多底层机制       |
+| 错误处理              | 错误行可映射为状态机 `error` 状态，也可通过 `ignore_errors` 忽略         | 主要是方法级或输出模式级判断                                             | 主要是 response 失败条件或上层逻辑判断                     | `rneter` 更容易把错误语义收敛到统一执行流程中         |
+| 输出模型              | `Output.success`、`content`、`all`、`prompt`、可选 `exit_code`、录制事件 | 以处理后的字符串输出为主，外加辅助解析手段                               | 以 response 对象为主，包含原始/处理后输出和 channel 元信息 | `rneter` 更偏编排和回放，而不仅是交互式使用           |
+| Linux 支持            | Linux 复用同一套状态执行引擎，并支持 shell exit-status 捕获              | 不是主要设计中心                                                         | 支持，但仍偏 channel/prompt 视角                           | `rneter` 更容易统一网络设备和 Linux 主机的执行语义    |
+| 事务 / 回滚           | 内置 `TxBlock`、`TxWorkflow`、回滚策略和子步骤结果                       | 需要调用方自行组织                                                       | 需要调用方自行组织                                         | 这是 `rneter` 与另外两者最明显的架构差异之一          |
+| 回放 / 固件测试       | 内置 session recording / replay                                          | 不是核心架构能力                                                         | 不是核心架构能力                                           | `rneter` 更适合作为 CLI 自动化平台底层内核            |
 
 ### 同一任务下的不同心智模型
 
-| 任务 | `Netmiko` 的常见思路 | `Scrapli` 的常见思路 | `rneter` 的常见思路 |
-| --- | --- | --- | --- |
-| 执行 `show version` | 发命令并一直读到 prompt | 通过 channel 发命令并一直读到 prompt pattern | 先收敛到目标 mode，再执行命令，并用返回 prompt 更新 FSM |
-| 下发配置命令 | 进入 config mode，发命令，必要时退出 | 切换到 config privilege，发送配置，再视情况切回 | 把 config 视为一个状态节点，并通过状态边自动路由过去 |
-| 处理 `copy scp:` 交互 | 用 timing / multiline helper 加预期 prompt 逐步处理 | 用交互式 send/read 操作配合显式 prompt 期望处理 | 建模成可复用 `CommandFlow` 或 `CommandFlowTemplate` |
-| 处理 `[edit]` + `user@host#` | 调整平台 prompt 逻辑 | 调整 prompt pattern / channel 行为 | 将 `[edit]` 建模为 prompt prefix，并在匹配前与后续 prompt 合并 |
+| 任务                         | `Netmiko` 的常见思路                                | `Scrapli` 的常见思路                            | `rneter` 的常见思路                                            |
+| ---------------------------- | --------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
+| 执行 `show version`          | 发命令并一直读到 prompt                             | 通过 channel 发命令并一直读到 prompt pattern    | 先收敛到目标 mode，再执行命令，并用返回 prompt 更新 FSM        |
+| 下发配置命令                 | 进入 config mode，发命令，必要时退出                | 切换到 config privilege，发送配置，再视情况切回 | 把 config 视为一个状态节点，并通过状态边自动路由过去           |
+| 处理 `copy scp:` 交互        | 用 timing / multiline helper 加预期 prompt 逐步处理 | 用交互式 send/read 操作配合显式 prompt 期望处理 | 建模成可复用 `CommandFlow` 或 `CommandFlowTemplate`            |
+| 处理 `[edit]` + `user@host#` | 调整平台 prompt 逻辑                                | 调整 prompt pattern / channel 行为              | 将 `[edit]` 建模为 prompt prefix，并在匹配前与后续 prompt 合并 |
 
 ### 为什么这很重要
 
@@ -857,6 +883,7 @@ flowchart TD
 该库旨在与任何支持 SSH 的网络设备和 Linux 主机配合使用。特别适合：
 
 **网络设备：**
+
 - Cisco IOS/IOS-XE/IOS-XR 设备
 - Juniper JunOS 设备
 - Arista EOS 设备
@@ -875,6 +902,7 @@ flowchart TD
 - 迈普通信 Maipu 网络设备
 
 **Linux 主机：**
+
 - 通用 Linux 发行版（Ubuntu、Debian、CentOS、RHEL 等）
 - 支持多种提权方式（`sudo -i`、`sudo -s`、`su`、直接 root）
 - 支持带自定义 pattern 的智能 prompt 检测
@@ -885,6 +913,7 @@ flowchart TD
 ### SSH 算法支持
 
 `rneter` 在 `config` 模块中包含全面的 SSH 算法支持：
+
 - 密钥交换：Curve25519、DH 组、ECDH
 - 加密：AES（CTR/CBC/GCM）、ChaCha20-Poly1305
 - MAC：HMAC-SHA1/256/512 及 ETM 变体

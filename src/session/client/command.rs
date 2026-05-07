@@ -1108,6 +1108,19 @@ impl SharedSshClient {
         let mut all = self.prompt.clone();
 
         for (t_cmd, target_state) in trans_cmds {
+            let state_before_transition = self.handler.current_state().to_string();
+            let before_exit_hooks = self
+                .handler
+                .hooks()
+                .before_exit_state(&state_before_transition)
+                .to_vec();
+            self.run_hook_actions(
+                HookTrigger::BeforeExitState(&state_before_transition),
+                &before_exit_hooks,
+                sys,
+            )
+            .await?;
+
             debug!("Trans state command: {}", t_cmd);
             let mut mode_output = self
                 .write_with_timeout_internal(&t_cmd, timeout, false, &CommandInteraction::default())
@@ -1125,12 +1138,21 @@ impl SharedSshClient {
             }
 
             let current_state = self.handler.current_state().to_string();
-            if let Some(recorder) = self.recorder.as_ref()
-                && current_state != last_state
-            {
-                let _ = recorder.record_event(SessionEvent::StateChanged {
-                    state: current_state.clone(),
-                });
+            if current_state != last_state {
+                let after_enter_hooks =
+                    self.handler.hooks().after_enter_state(&current_state).to_vec();
+                self.run_hook_actions(
+                    HookTrigger::AfterEnterState(&current_state),
+                    &after_enter_hooks,
+                    sys,
+                )
+                .await?;
+
+                if let Some(recorder) = self.recorder.as_ref() {
+                    let _ = recorder.record_event(SessionEvent::StateChanged {
+                        state: current_state.clone(),
+                    });
+                }
             }
             last_state = current_state;
         }

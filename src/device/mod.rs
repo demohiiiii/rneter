@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use crate::session::SessionHooks;
 use once_cell::sync::Lazy;
 use regex::{Regex, RegexSet};
 
@@ -87,6 +88,9 @@ pub struct DeviceHandler {
 
     /// Strategy used to determine command success for this handler.
     command_execution: CommandExecutionStrategy,
+
+    /// Declarative lifecycle hooks retained from configuration for later runtime use.
+    hooks: SessionHooks,
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;

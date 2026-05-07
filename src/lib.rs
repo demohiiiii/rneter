@@ -77,3 +77,5 @@ pub mod device;
 pub mod error;
 pub mod session;
 pub mod templates;
+
+pub use session::{HookAction, HookFailurePolicy, SessionHooks};

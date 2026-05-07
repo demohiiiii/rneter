@@ -14,6 +14,7 @@
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
+- [Lifecycle Hooks](#lifecycle-hooks)
 - [Comparison With Netmiko And Scrapli](#comparison-with-netmiko-and-scrapli)
 - [Supported Device Types](#supported-device-types)
 - [Configuration](#configuration)
@@ -29,6 +30,7 @@
 - **State Machine Management**: Intelligent device state tracking and automatic transitions
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
+- **Lifecycle Hooks**: Declarative setup and cleanup operations after connect, before disconnect, and around state transitions
 - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
 - **Built-in Copy Flow Templates**: Reuse structured templates for Cisco-like interactive `copy` workflows
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
@@ -914,6 +916,24 @@ Commands are executed through an async channel-based architecture:
 2. The library automatically transitions to the target state if needed
 3. Executes the command and waits for the prompt
 4. Returns the output with success status
+
+## Lifecycle Hooks
+
+`rneter` now supports declarative lifecycle hooks through `DeviceHandlerConfig.hooks`:
+
+- `after_connect`
+- `before_disconnect`
+- `after_enter_state`
+- `before_exit_state`
+
+Hooks reuse `SessionOperation`, so they can run either a single command or a command flow. In `0.4.4`, connection-level hooks are template-scoped so they remain stable under connection caching, while state-scoped hooks are normalized against the internal lowercase FSM state names.
+
+Built-in templates can ship sensible defaults. For example:
+
+- Cisco runs `terminal length 0` after connect
+- Juniper runs `set cli screen-length 0` after connect
+
+Hook output does not get merged into the parent command result, but hook lifecycle events are recorded by the session recorder.
 
 ## Comparison With Netmiko And Scrapli
 

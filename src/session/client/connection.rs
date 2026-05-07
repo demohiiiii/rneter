@@ -11,6 +11,36 @@ fn build_init_timeout_message(initial_output: &str) -> String {
     normalized_output
 }
 
+fn should_run_hook_actions(in_hook: bool, actions: &[HookAction]) -> bool {
+    !in_hook && !actions.is_empty()
+}
+
+fn should_propagate_hook_failure(policy: &HookFailurePolicy) -> bool {
+    matches!(policy, HookFailurePolicy::Required)
+}
+
+fn hook_output_summary(output: &SessionOperationOutput) -> Option<String> {
+    let summary = output
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let trimmed = step.content.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
 impl SharedSshClient {
     /// Calculates SHA-256 hash of the password.
     fn calculate_password_hash(password: &str) -> [u8; 32] {
@@ -64,6 +94,14 @@ impl SharedSshClient {
     /// Safely closes the connection.
     pub async fn close(&mut self) -> Result<(), ConnectError> {
         debug!("Safely closing SSH connection...");
+
+        let before_disconnect_hooks = self.hooks.before_disconnect.clone();
+        if let Err(error) = self
+            .run_hook_actions(HookTrigger::BeforeDisconnect, &before_disconnect_hooks, None)
+            .await
+        {
+            debug!("before_disconnect hook failure: {error}");
+        }
 
         if let Some(recorder) = self.recorder.as_ref() {
             let _ = recorder.record_event(SessionEvent::ConnectionClosed {
@@ -284,37 +322,154 @@ impl SharedSshClient {
 
         let password_hash = Self::calculate_password_hash(&password);
         let enable_password_hash = Self::calculate_enable_password_hash(&enable_password);
-        if let Some(session_recorder) = recorder.as_ref() {
-            let _ = session_recorder.record_event(SessionEvent::ConnectionEstablished {
-                device_addr: device_addr.clone(),
-                prompt_after: prompt.clone(),
-                fsm_prompt_after: handler.current_state().to_string(),
-            });
-        }
-
-        Ok(Self {
+        let mut shared = Self {
             client,
             sender: sender_to_shell,
             recv: receiver_from_shell,
+            hooks: handler.hooks().clone(),
+            in_hook: false,
             handler,
             prompt,
             password_hash,
             enable_password_hash,
             security_options,
             recorder,
-        })
+        };
+
+        if let Some(session_recorder) = shared.recorder.as_ref() {
+            let _ = session_recorder.record_event(SessionEvent::ConnectionEstablished {
+                device_addr: device_addr.clone(),
+                prompt_after: shared.prompt.clone(),
+                fsm_prompt_after: shared.handler.current_state().to_string(),
+            });
+        }
+
+        let after_connect_hooks = shared.hooks.after_connect.clone();
+        shared
+            .run_hook_actions(HookTrigger::AfterConnect, &after_connect_hooks, None)
+            .await?;
+
+        Ok(shared)
     }
 
     /// Checks if the underlying SSH connection is still active.
     pub fn is_connected(&self) -> bool {
         !self.client.is_closed()
     }
+
+    pub(crate) async fn run_hook_actions(
+        &mut self,
+        trigger: HookTrigger<'_>,
+        actions: &[HookAction],
+        sys: Option<&String>,
+    ) -> Result<(), ConnectError> {
+        if !should_run_hook_actions(self.in_hook, actions) {
+            return Ok(());
+        }
+
+        self.in_hook = true;
+        let result = async {
+            for action in actions {
+                if let Err(error) = self.run_single_hook(trigger, action, sys).await {
+                    if should_propagate_hook_failure(&action.failure_policy) {
+                        return Err(error);
+                    }
+                    debug!(
+                        "best-effort hook '{}' failed during {}: {}",
+                        action.name,
+                        trigger.label(),
+                        error
+                    );
+                }
+            }
+            Ok(())
+        }
+        .await;
+        self.in_hook = false;
+        result
+    }
+
+    async fn run_single_hook(
+        &mut self,
+        trigger: HookTrigger<'_>,
+        action: &HookAction,
+        sys: Option<&String>,
+    ) -> Result<(), ConnectError> {
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::HookStarted {
+                trigger: trigger.label().to_string(),
+                hook_name: action.name.clone(),
+                state: trigger.state().map(str::to_string),
+            });
+        }
+
+        let output = Box::pin(self.execute_operation_detailed(&action.operation, sys))
+            .await
+            .map_err(|error| {
+                let (error, _partial_output) = error.into_parts();
+                let error = ConnectError::InternalServerError(format!(
+                    "hook '{}' failed during {}: {}",
+                    action.name,
+                    trigger.label(),
+                    error
+                ));
+                if let Some(recorder) = self.recorder.as_ref() {
+                    let _ = recorder.record_event(SessionEvent::HookFailed {
+                        trigger: trigger.label().to_string(),
+                        hook_name: action.name.clone(),
+                        state: trigger.state().map(str::to_string),
+                        error: error.to_string(),
+                    });
+                }
+                error
+            })?;
+
+        if !output.success {
+            let error = ConnectError::InternalServerError(format!(
+                "hook '{}' failed during {}: operation returned unsuccessful result",
+                action.name,
+                trigger.label()
+            ));
+            if let Some(recorder) = self.recorder.as_ref() {
+                let _ = recorder.record_event(SessionEvent::HookFailed {
+                    trigger: trigger.label().to_string(),
+                    hook_name: action.name.clone(),
+                    state: trigger.state().map(str::to_string),
+                    error: error.to_string(),
+                });
+            }
+            return Err(error);
+        }
+
+        if let Some(recorder) = self.recorder.as_ref() {
+            let _ = recorder.record_event(SessionEvent::HookSucceeded {
+                trigger: trigger.label().to_string(),
+                hook_name: action.name.clone(),
+                state: trigger.state().map(str::to_string),
+                output_summary: action.record_output.then(|| hook_output_summary(&output)).flatten(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_init_timeout_message;
+    use super::{build_init_timeout_message, should_run_hook_actions};
     use crate::device::normalize_terminal_output;
+    use crate::session::{Command, HookAction, HookFailurePolicy, SessionOperation};
+
+    fn sample_hook_action() -> HookAction {
+        HookAction::new(
+            "disable-paging",
+            SessionOperation::from(Command {
+                mode: "Enable".to_string(),
+                command: "terminal length 0".to_string(),
+                ..Command::default()
+            }),
+        )
+    }
 
     #[test]
     fn normalize_initial_output_uses_shared_pua_placeholder_logic() {
@@ -336,5 +491,24 @@ mod tests {
 
         let message = build_init_timeout_message(raw);
         assert_eq!(message, "Welcome\n<PUA> adam-work  ~   10:38  ");
+    }
+
+    #[test]
+    fn hook_execution_requires_non_empty_actions_and_no_active_hook_scope() {
+        let actions = vec![sample_hook_action()];
+
+        assert!(should_run_hook_actions(false, &actions));
+        assert!(!should_run_hook_actions(true, &actions));
+        assert!(!should_run_hook_actions(false, &[]));
+    }
+
+    #[test]
+    fn only_required_hooks_abort_the_parent_flow() {
+        assert!(super::should_propagate_hook_failure(
+            &HookFailurePolicy::Required
+        ));
+        assert!(!super::should_propagate_hook_failure(
+            &HookFailurePolicy::BestEffort
+        ));
     }
 }

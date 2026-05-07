@@ -54,6 +54,10 @@ impl DeviceHandler {
             return false;
         }
 
+        if self.hooks != other.hooks {
+            return false;
+        }
+
         true
     }
 
@@ -69,8 +73,11 @@ impl DeviceHandler {
             edges,
             ignore_errors,
             dyn_param,
+            hooks,
             command_execution,
         } = config;
+
+        let hooks = hooks.normalized();
 
         let mut all_states: Vec<String> = PRE_STATE
             .iter()
@@ -238,6 +245,7 @@ impl DeviceHandler {
                     shell_flavor,
                 },
             },
+            hooks,
         })
     }
 }

@@ -184,6 +184,11 @@ impl DeviceHandler {
         self.edges.clone()
     }
 
+    /// Returns the normalized hook configuration retained on this handler.
+    pub fn hooks(&self) -> &crate::session::SessionHooks {
+        &self.hooks
+    }
+
     /// Checks if the current state is an error state.
     pub fn error(&self) -> bool {
         self.current_state().eq("error")

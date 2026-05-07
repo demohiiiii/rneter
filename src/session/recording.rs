@@ -86,6 +86,27 @@ pub enum SessionEvent {
     StateChanged {
         state: String,
     },
+    HookStarted {
+        trigger: String,
+        hook_name: String,
+        #[serde(default)]
+        state: Option<String>,
+    },
+    HookSucceeded {
+        trigger: String,
+        hook_name: String,
+        #[serde(default)]
+        state: Option<String>,
+        #[serde(default)]
+        output_summary: Option<String>,
+    },
+    HookFailed {
+        trigger: String,
+        hook_name: String,
+        #[serde(default)]
+        state: Option<String>,
+        error: String,
+    },
     FileUploadStarted {
         local_path: String,
         remote_path: String,
@@ -823,6 +844,29 @@ mod tests {
         let restored = SessionRecorder::from_jsonl(&normalized).expect("restore normalized");
         let entries = restored.entries().expect("entries");
         assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn normalize_keeps_hook_events_by_default() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Full);
+        recorder
+            .record_event(SessionEvent::HookStarted {
+                trigger: "after_connect".to_string(),
+                hook_name: "disable-paging".to_string(),
+                state: Some("enable".to_string()),
+            })
+            .expect("record hook started");
+
+        let normalized = SessionRecorder::normalize_jsonl(
+            &recorder.to_jsonl().expect("to jsonl"),
+            NormalizeOptions::default(),
+        )
+        .expect("normalize");
+        let restored = SessionRecorder::from_jsonl(&normalized).expect("restore normalized");
+        let entries = restored.entries().expect("entries");
+
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].event, SessionEvent::HookStarted { .. }));
     }
 
     #[test]
