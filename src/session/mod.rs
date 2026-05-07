@@ -52,6 +52,32 @@ pub use transaction::{
 /// Global singleton SSH connection manager.
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
 
+/// Lightweight request used by template autodetection before a concrete handler is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectRequest {
+    pub user: String,
+    pub addr: String,
+    pub port: u16,
+    pub password: String,
+}
+
+impl DetectRequest {
+    /// Build a new autodetect request.
+    pub fn new(user: String, addr: String, port: u16, password: String) -> Self {
+        Self {
+            user,
+            addr,
+            port,
+            password,
+        }
+    }
+
+    /// Stable textual device address used for diagnostics.
+    pub fn device_addr(&self) -> String {
+        format!("{}@{}:{}", self.user, self.addr, self.port)
+    }
+}
+
 /// Connection request describing how to reach a device and which handler to use.
 pub struct ConnectionRequest {
     pub user: String,

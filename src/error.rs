@@ -69,6 +69,14 @@ pub enum ConnectError {
     #[error("template not found: {0}")]
     TemplateNotFound(String),
 
+    /// Autodetect did not produce any ranked candidate.
+    #[error("autodetect found no matching template: {0}")]
+    AutodetectNoMatch(String),
+
+    /// Autodetect found a candidate, but its confidence was below policy.
+    #[error("autodetect confidence too low: {0}")]
+    AutodetectConfidenceTooLow(String),
+
     /// Replay data does not match expected command/mode flow.
     #[error("replay mismatch: {0}")]
     ReplayMismatchError(String),

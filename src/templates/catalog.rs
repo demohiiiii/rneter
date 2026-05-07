@@ -1,4 +1,5 @@
 use crate::error::ConnectError;
+use super::detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,144 @@ pub struct TemplateMetadata {
     pub family: String,
     pub template_version: String,
     pub capabilities: Vec<TemplateCapability>,
+    pub detect_profile: Option<TemplateDetectProfile>,
+}
+
+fn rule(pattern: &str, weight: u32) -> TemplateProbeRule {
+    TemplateProbeRule {
+        pattern: pattern.to_string(),
+        weight,
+    }
+}
+
+fn probe_with_errors(
+    command: &str,
+    rules: Vec<TemplateProbeRule>,
+    error_patterns: Vec<&str>,
+) -> TemplateProbe {
+    TemplateProbe {
+        command: command.to_string(),
+        rules,
+        error_patterns: error_patterns.into_iter().map(str::to_string).collect(),
+    }
+}
+
+fn cisco_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(
+                r"Cisco IOS Software|Cisco Internetwork Operating System Software|Cisco IOS XE Software|Cisco Adaptive Security Appliance|Cisco ASA",
+                95,
+            )],
+            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+        )],
+    }
+}
+
+fn juniper_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^\S+@\S+[>#]\s*$", 20)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(
+                r"JUNOS Software Release|JUNOS .+ Software|JUNOS OS Kernel|JUNOS Base Version",
+                99,
+            )],
+            vec![r"unknown command", r"syntax error", r"Invalid input"],
+        )],
+    }
+}
+
+fn huawei_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^<[^>]+>\s*$", 15), rule(r"^\[[^\]]+\]\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "display version",
+            vec![rule(
+                r"Huawei Technologies|Huawei Versatile Routing Platform Software|Huawei Versatile Routing Platform|VRP \(R\)",
+                99,
+            )],
+            vec![r"Unrecognized command", r"Invalid input", r"Error:"],
+        )],
+    }
+}
+
+fn h3c_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^<[^>]+>\s*$", 15), rule(r"^\[[^\]]+\]\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "display version",
+            vec![rule(r"H3C Comware Software|HPE Comware|HP Comware|Comware Software", 99)],
+            vec![r"Unrecognized command", r"Invalid input", r"Error:"],
+        )],
+    }
+}
+
+fn linux_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![
+            rule(r"^[^\n]*[$#]\s*$", 10),
+            rule(r"^\S+@\S+:[^\n]*[$#]\s*$", 20),
+        ],
+        probes: vec![
+            probe_with_errors(
+                "uname -a",
+                vec![rule(r"Linux", 70)],
+                vec![r"command not found", r"not recognized", r"Unknown command"],
+            ),
+            probe_with_errors(
+                "echo $SHELL",
+                vec![rule(r"/(?:ba|z|fi|da)?sh", 20)],
+                vec![r"command not found", r"not recognized", r"Unknown command"],
+            ),
+        ],
+    }
+}
+
+fn arista_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Arista|EOS", 90)],
+            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+        )],
+    }
+}
+
+fn fortinet_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[\w.-]+\s*[#$]\s*$", 10)],
+        probes: vec![probe_with_errors(
+            "get system status",
+            vec![rule(r"FortiGate|FortiOS", 90)],
+            vec![r"Command fail", r"Unknown action", r"Unknown command"],
+        )],
+    }
+}
+
+fn paloalto_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 10), rule(r"^[^\s#]+#\s*$", 10)],
+        probes: vec![probe_with_errors(
+            "show system info",
+            vec![rule(r"PAN-OS|sw-version|model:\s+PA-", 90)],
+            vec![r"Invalid syntax", r"Unknown command", r"command not found"],
+        )],
+    }
+}
+
+fn checkpoint_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 10), rule(r"^[^\s#]+#\s*$", 10)],
+        probes: vec![probe_with_errors(
+            "show version all",
+            vec![rule(r"Check Point|Gaia", 90)],
+            vec![r"Invalid command", r"command not found", r"Unknown command"],
+        )],
+    }
 }
 
 pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
@@ -57,6 +196,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: Some(cisco_detect_profile()),
         },
         "huawei" => TemplateMetadata {
             name: "huawei".to_string(),
@@ -68,6 +208,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: Some(huawei_detect_profile()),
         },
         "h3c" => TemplateMetadata {
             name: "h3c".to_string(),
@@ -78,6 +219,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
+            detect_profile: Some(h3c_detect_profile()),
         },
         "hillstone" => TemplateMetadata {
             name: "hillstone".to_string(),
@@ -89,6 +231,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: None,
         },
         "juniper" => TemplateMetadata {
             name: "juniper".to_string(),
@@ -100,6 +243,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: Some(juniper_detect_profile()),
         },
         "array" => TemplateMetadata {
             name: "array".to_string(),
@@ -113,6 +257,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::SysContext,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: None,
         },
         "linux" => TemplateMetadata {
             name: "linux".to_string(),
@@ -124,6 +269,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: Some(linux_detect_profile()),
         },
         "arista" => TemplateMetadata {
             name: "arista".to_string(),
@@ -136,6 +282,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: Some(arista_detect_profile()),
         },
         "fortinet" => TemplateMetadata {
             name: "fortinet".to_string(),
@@ -143,6 +290,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             family: "FortiGate".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![TemplateCapability::EnableMode],
+            detect_profile: Some(fortinet_detect_profile()),
         },
         "paloalto" => TemplateMetadata {
             name: "paloalto".to_string(),
@@ -153,6 +301,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
+            detect_profile: Some(paloalto_detect_profile()),
         },
         "topsec" => TemplateMetadata {
             name: "topsec".to_string(),
@@ -160,6 +309,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             family: "NGFW".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![TemplateCapability::EnableMode],
+            detect_profile: None,
         },
         "venustech" => TemplateMetadata {
             name: "venustech".to_string(),
@@ -172,6 +322,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: None,
         },
         "dptech" => TemplateMetadata {
             name: "dptech".to_string(),
@@ -182,6 +333,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
+            detect_profile: None,
         },
         "chaitin" => TemplateMetadata {
             name: "chaitin".to_string(),
@@ -194,6 +346,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: None,
         },
         "qianxin" => TemplateMetadata {
             name: "qianxin".to_string(),
@@ -204,6 +357,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
+            detect_profile: None,
         },
         "maipu" => TemplateMetadata {
             name: "maipu".to_string(),
@@ -216,6 +370,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
+            detect_profile: None,
         },
         "checkpoint" => TemplateMetadata {
             name: "checkpoint".to_string(),
@@ -223,6 +378,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             family: "Security Gateway".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![TemplateCapability::EnableMode],
+            detect_profile: Some(checkpoint_detect_profile()),
         },
         _ => return None,
     };
@@ -251,6 +407,7 @@ pub fn template_metadata(name: &str) -> Result<TemplateMetadata, ConnectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::templates::detect_profile_by_name;
 
     #[test]
     fn available_templates_contains_expected_names() {
@@ -276,5 +433,40 @@ mod tests {
         let meta = template_metadata("JuNiPeR").expect("metadata should resolve");
         assert_eq!(meta.name, "juniper");
         assert_eq!(meta.vendor, "Juniper");
+    }
+
+    #[test]
+    fn cisco_metadata_includes_detect_profile() {
+        let meta = template_metadata("cisco").expect("cisco metadata");
+        assert!(meta.detect_profile.is_some());
+    }
+
+    #[test]
+    fn builtin_detect_profiles_exist_for_extended_builtin_templates() {
+        for name in [
+            "cisco",
+            "juniper",
+            "huawei",
+            "h3c",
+            "linux",
+            "arista",
+            "fortinet",
+            "paloalto",
+            "checkpoint",
+        ] {
+            assert!(
+                detect_profile_by_name(name).is_some(),
+                "missing detect profile for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_detect_profiles_include_error_patterns_for_probe_commands() {
+        let cisco = detect_profile_by_name("cisco").expect("cisco detect profile");
+        assert!(cisco
+            .probes
+            .iter()
+            .any(|probe| !probe.error_patterns.is_empty()));
     }
 }

@@ -15,6 +15,7 @@
 - [快速开始](#快速开始)
 - [架构](#架构)
 - [生命周期 Hook](#生命周期-hook)
+- [模板自动识别](#模板自动识别)
 - [与 Netmiko 和 Scrapli 的对比](#与-netmiko-和-scrapli-的对比)
 - [支持的设备类型](#支持的设备类型)
 - [配置](#配置)
@@ -31,6 +32,7 @@
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
 - **生命周期 Hook**：支持在连接后、断开前以及状态切换前后声明式执行准备/清理操作
+- **模板自动识别**：在创建完整状态机会话前，先对内置模板做探测打分和候选排序
 - **SFTP 文件上传**：可向开启 SSH `sftp` 子系统的远端主机上传本地文件
 - **内置 Copy Flow 模板**：可复用结构化模板来驱动 Cisco-like 设备上的交互式 `copy` 流程
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
@@ -43,7 +45,7 @@
 
 ```toml
 [dependencies]
-rneter = "0.4"
+rneter = "0.4.4"
 ```
 
 ## 快速开始
@@ -818,6 +820,87 @@ Hook 复用了 `SessionOperation`，因此既可以执行单条命令，也可�
 - Juniper 会在连接后执行 `set cli screen-length 0`
 
 Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件会进入 session recorder。
+
+## 模板自动识别
+
+`rneter` 现在可以在真正创建 `DeviceHandler` 之前，先对内置模板做自动识别和排序。
+
+自动识别返回的是一份候选报告，而不是一个不可解释的单值结果，核心字段包括：
+
+- `best_match`
+- `candidates`
+- `raw_facts`
+
+这样在现场环境里更容易理解“为什么它更像 Cisco / Juniper / Huawei / H3C / Linux / Arista / Fortinet / Palo Alto / Check Point”，也更方便排查误判。
+
+当前范围：
+
+- 仅支持 SSH
+- 当前已覆盖的内置模板：`cisco`、`juniper`、`huawei`、`h3c`、`linux`、`arista`、`fortinet`、`paloalto`、`checkpoint`
+- 基于初始 prompt/输出和只读 probe 命令做缓存式打分
+
+如何理解诊断结果：
+
+- `raw_facts` 现在同时包含“正向命中”和“probe 错误命中”两类事实。
+- 正向事实表示某条 prompt 或 probe 输出命中了加分正则，因此会贡献分数。
+- 错误事实表示这条 probe 输出命中了 `Invalid input`、`Unrecognized command`、`command not found` 之类的错误模式；此时该 probe 会像 Netmiko 的 autodetect 一样，被视为无效而不参与加分。
+- 这样更容易区分“这台设备不像 Cisco”和“Cisco 的探测命令在这里根本不成立”这两种情况。
+
+示例：
+
+```rust
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::autodetect_with_context;
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let report = autodetect_with_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+)
+.await?;
+
+if let Some(best) = &report.best_match {
+    println!("最佳模板: {} ({:?}, score={})", best.template_name, best.confidence, best.score);
+}
+
+for candidate in &report.candidates {
+    println!("候选模板: {} score={}", candidate.template_name, candidate.score);
+}
+# Ok(())
+# }
+```
+
+如果最佳候选满足最小置信度阈值，也可以直接继续建立正式连接：
+
+```rust
+use rneter::session::{ExecutionContext, DetectRequest};
+use rneter::templates::{
+    autodetect_and_connect_with_context, DetectConnectPolicy,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let connected = autodetect_and_connect_with_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    None,
+    ExecutionContext::default(),
+    DetectConnectPolicy::default(), // 默认最小置信度 = Medium
+)
+.await?;
+
+println!("连接使用模板: {}", connected.template_name);
+# Ok(())
+# }
+```
 
 ## 与 Netmiko 和 Scrapli 的对比
 

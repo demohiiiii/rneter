@@ -15,6 +15,7 @@
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Lifecycle Hooks](#lifecycle-hooks)
+- [Template Autodetect](#template-autodetect)
 - [Comparison With Netmiko And Scrapli](#comparison-with-netmiko-and-scrapli)
 - [Supported Device Types](#supported-device-types)
 - [Configuration](#configuration)
@@ -31,6 +32,7 @@
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
 - **Lifecycle Hooks**: Declarative setup and cleanup operations after connect, before disconnect, and around state transitions
+- **Template Autodetect**: Rank built-in templates by scored probe matches before creating a full state-machine session
 - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
 - **Built-in Copy Flow Templates**: Reuse structured templates for Cisco-like interactive `copy` workflows
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
@@ -43,7 +45,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.4"
+rneter = "0.4.4"
 ```
 
 ## Quick Start
@@ -934,6 +936,88 @@ Built-in templates can ship sensible defaults. For example:
 - Juniper runs `set cli screen-length 0` after connect
 
 Hook output does not get merged into the parent command result, but hook lifecycle events are recorded by the session recorder.
+
+## Template Autodetect
+
+`rneter` can now score built-in templates before you commit to a concrete `DeviceHandler`.
+
+The autodetect result is a ranked report, not a single opaque answer:
+
+- `best_match`
+- `candidates`
+- `raw_facts`
+
+This makes it easier to understand why a device looks like Cisco, Juniper, Huawei, H3C, Linux, Arista, Fortinet, Palo Alto, or Check Point, and to debug ambiguous results in mixed environments.
+
+Current scope:
+
+- SSH only
+- built-in templates currently covered: `cisco`, `juniper`, `huawei`, `h3c`, `linux`, `arista`, `fortinet`, `paloalto`, `checkpoint`
+- probe-driven scoring using initial prompt/output plus cached read-only probe commands
+
+How to read the diagnostics:
+
+- `raw_facts` now includes both positive matches and probe-level error matches.
+- A positive fact means a prompt or probe output matched a scoring regex and contributed weight.
+- An error fact means the probe output matched an invalid-command pattern such as `Invalid input`, `Unrecognized command`, or `command not found`; that probe is then ignored for scoring, similar to Netmiko's autodetect behavior.
+- This makes it easier to tell the difference between "this device does not look like Cisco" and "the Cisco probe command was not accepted here".
+
+Example shape:
+
+```rust
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::autodetect_with_context;
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let report = autodetect_with_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+)
+.await?;
+
+if let Some(best) = &report.best_match {
+    println!("best template: {} ({:?}, score={})", best.template_name, best.confidence, best.score);
+}
+
+for candidate in &report.candidates {
+    println!("candidate: {} score={}", candidate.template_name, candidate.score);
+}
+# Ok(())
+# }
+```
+
+You can also continue directly into a live connection when the best candidate
+meets a minimum confidence threshold:
+
+```rust
+use rneter::session::{ExecutionContext, DetectRequest};
+use rneter::templates::{
+    autodetect_and_connect_with_context, DetectConnectPolicy,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let connected = autodetect_and_connect_with_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    None,
+    ExecutionContext::default(),
+    DetectConnectPolicy::default(), // default minimum confidence = Medium
+)
+.await?;
+
+println!("connected with template: {}", connected.template_name);
+# Ok(())
+# }
+```
 
 ## Comparison With Netmiko And Scrapli
 

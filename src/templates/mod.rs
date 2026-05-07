@@ -5,6 +5,8 @@
 
 mod catalog;
 mod command_flow_template;
+mod detect;
+mod detect_profile;
 mod linux;
 mod network;
 mod registry;
@@ -20,6 +22,13 @@ pub use command_flow_template::{
     CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
     CommandFlowTemplateVarKind,
 };
+pub use detect::{
+    AutodetectedConnection, DetectConfidence, DetectConnectPolicy, DetectFactSource,
+    DetectFactKind, DetectSnapshot, TemplateDetectCandidate, TemplateDetectFact, TemplateDetectReport,
+    autodetect_and_connect_with_context, autodetect_with_context, score_builtin_templates,
+    score_detect_profiles,
+};
+pub use detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 pub use linux::{
     CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,
     linux_handler_config, linux_with_config,
@@ -32,7 +41,8 @@ pub use network::{
     venustech, venustech_config,
 };
 pub use registry::{
-    by_name, by_name_config, diagnose_all_templates_json, diagnose_template, diagnose_template_json,
+    available_detect_profiles, by_name, by_name_config, detect_profile_by_name,
+    diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::build_tx_block;
 pub use transfer::cisco_like_copy_template;

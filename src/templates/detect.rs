@@ -1,0 +1,678 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+
+use regex::Regex;
+
+use super::detect_profile::TemplateDetectProfile;
+use super::{available_detect_profiles, by_name};
+use crate::error::ConnectError;
+use crate::session::{CmdJob, ConnectionRequest, DetectRequest, ExecutionContext, MANAGER};
+
+/// Confidence bucket derived from the total autodetect score.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl DetectConfidence {
+    pub fn from_score(score: u32) -> Self {
+        if score >= 90 {
+            Self::High
+        } else if score >= 50 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+
+    pub fn satisfies_minimum(self, minimum: Self) -> bool {
+        self.rank() >= minimum.rank()
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+}
+
+/// Policy controlling whether autodetect may continue into a live connection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DetectConnectPolicy {
+    pub minimum_confidence: DetectConfidence,
+}
+
+impl Default for DetectConnectPolicy {
+    fn default() -> Self {
+        Self {
+            minimum_confidence: DetectConfidence::Medium,
+        }
+    }
+}
+
+/// Origin of one matched autodetect fact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectFactSource {
+    InitialPrompt,
+    ProbeOutput,
+}
+
+/// Meaning of one autodetect fact inside scoring or diagnostics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectFactKind {
+    PositiveMatch,
+    ErrorPattern,
+}
+
+/// One scoring fact collected during template autodetection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TemplateDetectFact {
+    pub kind: DetectFactKind,
+    pub source: DetectFactSource,
+    pub command: String,
+    pub pattern: String,
+    pub sample: String,
+    pub weight: u32,
+}
+
+/// One ranked candidate in an autodetect report.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TemplateDetectCandidate {
+    pub template_name: String,
+    pub score: u32,
+    pub confidence: DetectConfidence,
+    #[serde(default)]
+    pub matched_facts: Vec<TemplateDetectFact>,
+}
+
+impl TemplateDetectCandidate {
+    pub fn new(
+        template_name: impl Into<String>,
+        score: u32,
+        matched_facts: Vec<TemplateDetectFact>,
+    ) -> Self {
+        Self {
+            template_name: template_name.into(),
+            score,
+            confidence: DetectConfidence::from_score(score),
+            matched_facts,
+        }
+    }
+}
+
+/// Ranked autodetect result including all candidates and raw matched facts.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TemplateDetectReport {
+    pub best_match: Option<TemplateDetectCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<TemplateDetectCandidate>,
+    #[serde(default)]
+    pub raw_facts: Vec<TemplateDetectFact>,
+}
+
+/// Result of a successful autodetect-then-connect flow.
+pub struct AutodetectedConnection {
+    pub template_name: String,
+    pub report: TemplateDetectReport,
+    pub sender: mpsc::Sender<CmdJob>,
+}
+
+impl AutodetectedConnection {
+    pub fn new(
+        sender: mpsc::Sender<CmdJob>,
+        report: TemplateDetectReport,
+    ) -> Result<Self, ConnectError> {
+        let template_name = report
+            .best_match
+            .as_ref()
+            .map(|candidate| candidate.template_name.clone())
+            .ok_or_else(|| {
+                ConnectError::AutodetectNoMatch("report contained no best_match".to_string())
+            })?;
+
+        Ok(Self {
+            template_name,
+            report,
+            sender,
+        })
+    }
+}
+
+impl TemplateDetectReport {
+    pub fn from_candidates(candidates: Vec<TemplateDetectCandidate>) -> Self {
+        let raw_facts = candidates
+            .iter()
+            .flat_map(|candidate| candidate.matched_facts.iter().cloned())
+            .collect();
+        Self::from_parts(candidates, raw_facts)
+    }
+
+    pub fn from_parts(
+        mut candidates: Vec<TemplateDetectCandidate>,
+        raw_facts: Vec<TemplateDetectFact>,
+    ) -> Self {
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.template_name.cmp(&right.template_name))
+        });
+        let best_match = candidates.first().cloned();
+
+        Self {
+            best_match,
+            candidates,
+            raw_facts,
+        }
+    }
+}
+
+/// Raw detect snapshot collected before scoring profiles.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+pub struct DetectSnapshot {
+    pub initial_output: String,
+    pub initial_prompt: String,
+    #[serde(default)]
+    pub probe_outputs: HashMap<String, String>,
+}
+
+/// Score one set of detect profiles against a collected snapshot.
+pub fn score_detect_profiles(
+    snapshot: &DetectSnapshot,
+    profiles: Vec<(String, TemplateDetectProfile)>,
+) -> TemplateDetectReport {
+    let mut candidates = Vec::new();
+    let mut raw_facts = Vec::new();
+
+    for (template_name, profile) in profiles {
+        let mut facts = Vec::new();
+
+        for rule in &profile.initial_rules {
+            if regex_matches(&rule.pattern, &snapshot.initial_prompt)
+                || regex_matches(&rule.pattern, &snapshot.initial_output)
+            {
+                facts.push(TemplateDetectFact {
+                    kind: DetectFactKind::PositiveMatch,
+                    source: DetectFactSource::InitialPrompt,
+                    command: "__initial__".to_string(),
+                    pattern: rule.pattern.clone(),
+                    sample: if !snapshot.initial_prompt.is_empty() {
+                        snapshot.initial_prompt.clone()
+                    } else {
+                        snapshot.initial_output.clone()
+                    },
+                    weight: rule.weight,
+                });
+            }
+        }
+
+        for probe in &profile.probes {
+            let Some(output) = snapshot.probe_outputs.get(&probe.command) else {
+                continue;
+            };
+
+            let matched_error_pattern = default_probe_error_patterns()
+                .iter()
+                .copied()
+                .chain(probe.error_patterns.iter().map(String::as_str))
+                .find(|pattern| regex_matches(pattern, output));
+            if let Some(pattern) = matched_error_pattern {
+                facts.push(TemplateDetectFact {
+                    kind: DetectFactKind::ErrorPattern,
+                    source: DetectFactSource::ProbeOutput,
+                    command: probe.command.clone(),
+                    pattern: pattern.to_string(),
+                    sample: output.clone(),
+                    weight: 0,
+                });
+                continue;
+            }
+
+            for rule in &probe.rules {
+                if regex_matches(&rule.pattern, output) {
+                    facts.push(TemplateDetectFact {
+                        kind: DetectFactKind::PositiveMatch,
+                        source: DetectFactSource::ProbeOutput,
+                        command: probe.command.clone(),
+                        pattern: rule.pattern.clone(),
+                        sample: output.clone(),
+                        weight: rule.weight,
+                    });
+                }
+            }
+        }
+
+        raw_facts.extend(facts.iter().cloned());
+
+        let score: u32 = facts
+            .iter()
+            .filter(|fact| fact.kind == DetectFactKind::PositiveMatch)
+            .map(|fact| fact.weight)
+            .sum();
+        if score > 0 {
+            candidates.push(TemplateDetectCandidate::new(template_name, score, facts));
+        }
+    }
+
+    TemplateDetectReport::from_parts(candidates, raw_facts)
+}
+
+/// Score the built-in detect profiles against one collected snapshot.
+pub fn score_builtin_templates(snapshot: &DetectSnapshot) -> TemplateDetectReport {
+    score_detect_profiles(snapshot, available_detect_profiles())
+}
+
+/// Run SSH-based autodetect and return ranked built-in template candidates.
+pub async fn autodetect_with_context(
+    request: DetectRequest,
+    context: ExecutionContext,
+) -> Result<TemplateDetectReport, ConnectError> {
+    let profiles = available_detect_profiles();
+    let probe_commands = profiles
+        .iter()
+        .flat_map(|(_, profile)| profile.probes.iter().map(|probe| probe.command.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let snapshot = MANAGER
+        .collect_detect_snapshot(&request, &context, &probe_commands)
+        .await?;
+
+    Ok(score_detect_profiles(&snapshot, profiles))
+}
+
+/// Run autodetect, enforce a minimum confidence policy, then connect using the best template.
+pub async fn autodetect_and_connect_with_context(
+    request: DetectRequest,
+    enable_password: Option<String>,
+    context: ExecutionContext,
+    policy: DetectConnectPolicy,
+) -> Result<AutodetectedConnection, ConnectError> {
+    let report = autodetect_with_context(request.clone(), context.clone()).await?;
+    let best = select_best_detected_template(&report, policy)?;
+    let connection_request = build_detected_connection_request(request, enable_password, &best)?;
+    let sender = MANAGER.get_with_context(connection_request, context).await?;
+
+    AutodetectedConnection::new(sender, report)
+}
+
+fn select_best_detected_template(
+    report: &TemplateDetectReport,
+    policy: DetectConnectPolicy,
+) -> Result<TemplateDetectCandidate, ConnectError> {
+    let best = report.best_match.clone().ok_or_else(|| {
+        ConnectError::AutodetectNoMatch(format!(
+            "device produced no scored candidates; facts={}",
+            report.raw_facts.len()
+        ))
+    })?;
+
+    if best.confidence.satisfies_minimum(policy.minimum_confidence) {
+        Ok(best)
+    } else {
+        Err(ConnectError::AutodetectConfidenceTooLow(format!(
+            "best_match={} confidence={:?} score={} minimum={:?}",
+            best.template_name, best.confidence, best.score, policy.minimum_confidence
+        )))
+    }
+}
+
+fn build_detected_connection_request(
+    request: DetectRequest,
+    enable_password: Option<String>,
+    best: &TemplateDetectCandidate,
+) -> Result<ConnectionRequest, ConnectError> {
+    let handler = by_name(&best.template_name)?;
+    Ok(ConnectionRequest::new(
+        request.user,
+        request.addr,
+        request.port,
+        request.password,
+        enable_password,
+        handler,
+    ))
+}
+
+fn regex_matches(pattern: &str, text: &str) -> bool {
+    Regex::new(pattern)
+        .map(|regex| regex.is_match(text))
+        .unwrap_or(false)
+}
+
+fn default_probe_error_patterns() -> &'static [&'static str] {
+    &[
+        r"% Invalid input detected",
+        r"syntax error, expecting",
+        r"Error: Unrecognized command",
+        r"%Error",
+        r"command not found",
+        r"Syntax Error: unexpected argument",
+        r"% Unrecognized command found at",
+        r"% Unknown command, the error locates at",
+        r"Invalid input",
+        r"Unknown command",
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::templates::by_name as template_by_name;
+    use crate::templates::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
+
+    #[test]
+    fn detect_confidence_maps_expected_score_ranges() {
+        assert_eq!(DetectConfidence::from_score(95), DetectConfidence::High);
+        assert_eq!(DetectConfidence::from_score(60), DetectConfidence::Medium);
+        assert_eq!(DetectConfidence::from_score(10), DetectConfidence::Low);
+    }
+
+    #[test]
+    fn detect_report_picks_highest_scored_candidate_as_best_match() {
+        let report = TemplateDetectReport::from_candidates(vec![
+            TemplateDetectCandidate::new("linux", 20, Vec::new()),
+            TemplateDetectCandidate::new("cisco", 90, Vec::new()),
+        ]);
+
+        assert_eq!(
+            report
+                .best_match
+                .as_ref()
+                .map(|candidate| candidate.template_name.as_str()),
+            Some("cisco")
+        );
+    }
+
+    #[test]
+    fn scoring_ranks_higher_weight_template_first() {
+        let snapshot = DetectSnapshot {
+            initial_output: "router>".to_string(),
+            initial_prompt: "router>".to_string(),
+            probe_outputs: HashMap::from([(
+                "show version".to_string(),
+                "Cisco IOS XE Software".to_string(),
+            )]),
+        };
+
+        let report = score_detect_profiles(
+            &snapshot,
+            vec![
+                (
+                    "cisco".to_string(),
+                    TemplateDetectProfile {
+                        initial_rules: vec![TemplateProbeRule {
+                            pattern: r"router>".to_string(),
+                            weight: 10,
+                        }],
+                        probes: vec![TemplateProbe {
+                            command: "show version".to_string(),
+                            rules: vec![TemplateProbeRule {
+                                pattern: r"Cisco IOS XE Software".to_string(),
+                                weight: 90,
+                            }],
+                            error_patterns: Vec::new(),
+                        }],
+                    },
+                ),
+                (
+                    "linux".to_string(),
+                    TemplateDetectProfile {
+                        initial_rules: Vec::new(),
+                        probes: vec![TemplateProbe {
+                            command: "show version".to_string(),
+                            rules: vec![TemplateProbeRule {
+                                pattern: r"Linux".to_string(),
+                                weight: 10,
+                            }],
+                            error_patterns: Vec::new(),
+                        }],
+                    },
+                ),
+            ],
+        );
+
+        assert_eq!(
+            report
+                .best_match
+                .as_ref()
+                .map(|candidate| candidate.template_name.as_str()),
+            Some("cisco")
+        );
+        assert_eq!(report.candidates.len(), 1);
+    }
+
+    #[test]
+    fn detect_report_returns_none_when_no_profile_matches() {
+        let snapshot = DetectSnapshot {
+            initial_output: "unknown prompt".to_string(),
+            initial_prompt: "unknown prompt".to_string(),
+            probe_outputs: HashMap::new(),
+        };
+
+        let report = score_builtin_templates(&snapshot);
+        assert!(report.best_match.is_none());
+        assert!(report.candidates.is_empty());
+    }
+
+    #[test]
+    fn detect_connect_policy_defaults_to_medium() {
+        assert_eq!(
+            DetectConnectPolicy::default().minimum_confidence,
+            DetectConfidence::Medium
+        );
+    }
+
+    #[test]
+    fn select_best_detected_template_rejects_missing_match() {
+        let report = TemplateDetectReport::from_candidates(Vec::new());
+
+        let err = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect_err("missing match should fail");
+
+        assert!(matches!(err, ConnectError::AutodetectNoMatch(_)));
+    }
+
+    #[test]
+    fn select_best_detected_template_rejects_low_confidence_match() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "linux",
+            20,
+            Vec::new(),
+        )]);
+
+        let err = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect_err("low confidence match should fail");
+
+        assert!(matches!(err, ConnectError::AutodetectConfidenceTooLow(_)));
+    }
+
+    #[test]
+    fn select_best_detected_template_accepts_medium_or_higher_match() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "cisco",
+            90,
+            Vec::new(),
+        )]);
+
+        let best = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect("high confidence match should pass");
+
+        assert_eq!(best.template_name, "cisco");
+    }
+
+    #[test]
+    fn autodetected_connection_exposes_selected_template_name() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "juniper",
+            90,
+            Vec::new(),
+        )]);
+        let (sender, _recv) = mpsc::channel(1);
+        let connection = AutodetectedConnection::new(sender, report).expect("connection");
+
+        assert_eq!(connection.template_name, "juniper");
+    }
+
+    #[test]
+    fn build_detected_connection_request_uses_selected_template() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "linux",
+            90,
+            Vec::new(),
+        )]);
+        let request = DetectRequest::new(
+            "adam".to_string(),
+            "127.0.0.1".to_string(),
+            22,
+            "secret".to_string(),
+        );
+
+        let best = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect("best candidate");
+        let built = build_detected_connection_request(
+            request,
+            None,
+            &best,
+        )
+        .expect("connection request should build");
+
+        let ConnectionRequest {
+            user,
+            addr,
+            port,
+            password,
+            enable_password,
+            handler,
+        } = built;
+
+        assert_eq!(user, "adam");
+        assert_eq!(addr, "127.0.0.1");
+        assert_eq!(port, 22);
+        assert_eq!(password, "secret");
+        assert_eq!(enable_password, None);
+        let expected = template_by_name("linux").expect("linux template");
+        assert!(handler.is_equivalent(&expected));
+    }
+
+    #[test]
+    fn probe_error_pattern_prevents_positive_score_for_that_probe() {
+        let snapshot = DetectSnapshot {
+            initial_output: String::new(),
+            initial_prompt: "device>".to_string(),
+            probe_outputs: HashMap::from([(
+                "show version".to_string(),
+                "% Invalid input detected at '^' marker.".to_string(),
+            )]),
+        };
+
+        let report = score_detect_profiles(
+            &snapshot,
+            vec![(
+                "cisco".to_string(),
+                TemplateDetectProfile {
+                    initial_rules: Vec::new(),
+                    probes: vec![TemplateProbe {
+                        command: "show version".to_string(),
+                        rules: vec![TemplateProbeRule {
+                            pattern: r"Cisco".to_string(),
+                            weight: 90,
+                        }],
+                        error_patterns: vec![r"Invalid input".to_string()],
+                    }],
+                },
+            )],
+        );
+
+        assert!(report.best_match.is_none());
+        assert!(report.candidates.is_empty());
+        assert_eq!(report.raw_facts.len(), 1);
+        assert_eq!(report.raw_facts[0].kind, DetectFactKind::ErrorPattern);
+    }
+
+    #[test]
+    fn default_probe_error_patterns_block_scoring_even_without_profile_specific_errors() {
+        let snapshot = DetectSnapshot {
+            initial_output: String::new(),
+            initial_prompt: "router#".to_string(),
+            probe_outputs: HashMap::from([(
+                "show version".to_string(),
+                "% Invalid input detected at '^' marker.".to_string(),
+            )]),
+        };
+
+        let report = score_detect_profiles(
+            &snapshot,
+            vec![(
+                "cisco".to_string(),
+                TemplateDetectProfile {
+                    initial_rules: Vec::new(),
+                    probes: vec![TemplateProbe {
+                        command: "show version".to_string(),
+                        rules: vec![TemplateProbeRule {
+                            pattern: r"Cisco IOS Software".to_string(),
+                            weight: 95,
+                        }],
+                        error_patterns: Vec::new(),
+                    }],
+                },
+            )],
+        );
+
+        assert!(report.best_match.is_none());
+        assert!(report
+            .raw_facts
+            .iter()
+            .any(|fact| fact.kind == DetectFactKind::ErrorPattern));
+    }
+
+    #[test]
+    fn probe_error_pattern_is_recorded_without_discarding_initial_rule_score() {
+        let snapshot = DetectSnapshot {
+            initial_output: String::new(),
+            initial_prompt: "<huawei>".to_string(),
+            probe_outputs: HashMap::from([(
+                "display version".to_string(),
+                "Error: Unrecognized command found at '^' position.".to_string(),
+            )]),
+        };
+
+        let report = score_detect_profiles(
+            &snapshot,
+            vec![(
+                "huawei".to_string(),
+                TemplateDetectProfile {
+                    initial_rules: vec![TemplateProbeRule {
+                        pattern: r"^<[^>]+>$".to_string(),
+                        weight: 15,
+                    }],
+                    probes: vec![TemplateProbe {
+                        command: "display version".to_string(),
+                        rules: vec![TemplateProbeRule {
+                            pattern: r"Huawei".to_string(),
+                            weight: 90,
+                        }],
+                        error_patterns: vec![r"Unrecognized command".to_string()],
+                    }],
+                },
+            )],
+        );
+
+        let best = report.best_match.expect("initial rule should still score");
+        assert_eq!(best.score, 15);
+        assert_eq!(best.matched_facts.len(), 2);
+        assert!(best
+            .matched_facts
+            .iter()
+            .any(|fact| fact.kind == DetectFactKind::ErrorPattern));
+    }
+}

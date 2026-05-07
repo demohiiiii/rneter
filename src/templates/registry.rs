@@ -1,5 +1,6 @@
 use crate::device::{DeviceHandler, DeviceHandlerConfig, StateMachineDiagnostics};
 use crate::error::ConnectError;
+use crate::templates::TemplateDetectProfile;
 
 use super::catalog::BUILTIN_TEMPLATES;
 use super::linux::{LinuxTemplateConfig, linux_handler_config};
@@ -36,6 +37,21 @@ pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
         "checkpoint" => Ok(checkpoint_config()),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
+}
+
+/// Returns one built-in detect profile by template name (case-insensitive).
+pub fn detect_profile_by_name(name: &str) -> Option<TemplateDetectProfile> {
+    super::catalog::template_metadata(name)
+        .ok()
+        .and_then(|metadata| metadata.detect_profile)
+}
+
+/// Returns all built-in detect profiles that are currently registered.
+pub fn available_detect_profiles() -> Vec<(String, TemplateDetectProfile)> {
+    BUILTIN_TEMPLATES
+        .iter()
+        .filter_map(|name| detect_profile_by_name(name).map(|profile| ((*name).to_string(), profile)))
+        .collect()
 }
 
 /// Builds a template by name and returns its state-machine diagnostics.
