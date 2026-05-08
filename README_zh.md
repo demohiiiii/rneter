@@ -230,10 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 如果你希望交互流程不要写死在 Rust 里，可以直接构建一个可复用的
 `CommandFlowTemplate`。它保留了之前 TOML 设计里的核心结构：`vars`、`steps`、
-`prompts`、`default_mode`。更简洁的方式是使用 `{{var}}` 内联模板，并把分支判断放到“命令输出”上，而不是在输入模板里堆条件分支。
+`prompts`、`default_mode`。现在这套模型是纯线性的：每一步只负责发送命令、
+回答预期 prompt，然后顺序进入下一步，不再额外维护输出分支。
 
 ```rust
-use rneter::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
     CommandFlowTemplateStep, CommandFlowTemplateVar,
@@ -250,32 +250,13 @@ let template = CommandFlowTemplate::new(
                     "{{server_addr}}",
                 )
                 .with_append_newline(true),
-            ])
-            .with_output_branches(vec![
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(copy complete|bytes copied)".to_string()],
-                    CommandBranchTarget::Jump { step_index: 1 },
+                CommandFlowTemplatePrompt::from_template(
+                    vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
+                    "{{remote_path}}",
                 )
-                .with_source(CommandOutputBranchSource::Content),
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(failed|error|denied)".to_string()],
-                    CommandBranchTarget::StopFailure,
-                )
-                .with_source(CommandOutputBranchSource::Content),
+                .with_append_newline(true),
             ]),
-        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}")
-            .with_output_branches(vec![
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(verified|ok)".to_string()],
-                    CommandBranchTarget::StopSuccess,
-                )
-                .with_source(CommandOutputBranchSource::Content),
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(mismatch|failed|error)".to_string()],
-                    CommandBranchTarget::StopFailure,
-                )
-                .with_source(CommandOutputBranchSource::Content),
-            ]),
+        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
     ],
 )
 .with_default_mode("Enable")
@@ -289,6 +270,10 @@ let template = CommandFlowTemplate::new(
         .with_label("Server Address")
         .with_description("SCP/TFTP server reachable from the target device.")
         .with_required(true),
+    CommandFlowTemplateVar::new("remote_path")
+        .with_label("Remote Path")
+        .with_description("Remote file path that the device should fetch.")
+        .with_required(true),
     CommandFlowTemplateVar::new("device_path")
         .with_label("Device Path")
         .with_description("Destination path on the target device.")
@@ -301,6 +286,7 @@ let flow = template.to_command_flow(
         .with_vars(json!({
             "protocol": "scp",
             "server_addr": "198.51.100.20",
+            "remote_path": "/pub/image.bin",
             "device_path": "flash:/image.bin",
         })),
 )?;
@@ -315,8 +301,8 @@ let flow = template.to_command_flow(
 
 ```rust
 use rneter::session::{
-    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
-    CommandOutputBranchSource, ConnectionRequest, ExecutionContext, MANAGER, PromptResponseRule,
+    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
+    PromptResponseRule,
 };
 use rneter::templates;
 
@@ -342,19 +328,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_record_input(true),
             ),
-        output_branches: vec![
-            CommandOutputBranchRule::new(
-                vec![r"(?i)(copy complete|bytes copied)".to_string()],
-                CommandBranchTarget::StopSuccess,
-            )
-            .with_source(CommandOutputBranchSource::Content),
-            CommandOutputBranchRule::new(
-                vec![r"(?i)(failed|error|denied)".to_string()],
-                CommandBranchTarget::StopFailure,
-            )
-            .with_source(CommandOutputBranchSource::Content),
-        ],
-        output_fallback: CommandBranchTarget::StopFailure,
+        ..Command::default()
+    },
+    Command {
+        mode: "Enable".to_string(),
+        command: "verify /md5 flash:/image.bin".to_string(),
+        timeout: Some(300),
         ..Command::default()
     }]);
 
@@ -381,7 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 运行时 prompt-response 规则会优先于模板里的静态输入规则生效，所以后续新增 `scp`、`tftp`、`http` 这类向导式 CLI 交互时，通常不需要再改底层模板定义。
-随后会按每一步的输出再做分支判断，因此流程可以根据设备真实返回来继续、跳转或提前结束，而不是只依赖输入参数判断。
+整个流程会按照声明顺序线性执行，这样设备复制类向导更容易阅读、调试和复用。
 
 ### 会话录制与回放
 

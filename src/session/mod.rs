@@ -263,67 +263,6 @@ impl CommandInteraction {
     }
 }
 
-/// Source field used for output-driven command flow branching.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandOutputBranchSource {
-    /// Match against full captured output (`Output.all`).
-    #[default]
-    All,
-    /// Match against normalized primary content (`Output.content`).
-    Content,
-    /// Match against trailing prompt captured after the command.
-    Prompt,
-}
-
-/// Next-step action selected by output branch evaluation.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommandBranchTarget {
-    /// Continue to the next step in sequence.
-    #[default]
-    Next,
-    /// Stop the flow and mark it successful.
-    StopSuccess,
-    /// Stop the flow and mark it failed.
-    StopFailure,
-    /// Jump to another step index in the same flow.
-    Jump {
-        /// Target step index in `CommandFlow.steps`.
-        step_index: usize,
-    },
-}
-
-/// One output-matching rule used to decide the next command-flow action.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CommandOutputBranchRule {
-    /// Regex patterns checked against the selected output source.
-    pub patterns: Vec<String>,
-    /// Output source used for matching.
-    #[serde(default)]
-    pub source: CommandOutputBranchSource,
-    /// Action applied when any pattern matches.
-    #[serde(default)]
-    pub target: CommandBranchTarget,
-}
-
-impl CommandOutputBranchRule {
-    /// Build a new output-branch rule from regex patterns and a branch target.
-    pub fn new(patterns: Vec<String>, target: CommandBranchTarget) -> Self {
-        Self {
-            patterns,
-            source: CommandOutputBranchSource::All,
-            target,
-        }
-    }
-
-    /// Override which output field should be matched.
-    pub fn with_source(mut self, source: CommandOutputBranchSource) -> Self {
-        self.source = source;
-        self
-    }
-}
-
 /// Configuration for a command to execute on a device.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Command {
@@ -361,16 +300,6 @@ pub struct Command {
     /// `copy tftp:`, or future HTTP-style wizards that should not require template edits.
     #[serde(default)]
     pub interaction: CommandInteraction,
-
-    /// Output-driven branch rules evaluated after this command finishes.
-    ///
-    /// The first matching rule selects the next action (`next`, `jump`, `stop_*`).
-    #[serde(default)]
-    pub output_branches: Vec<CommandOutputBranchRule>,
-
-    /// Fallback action when no `output_branches` rule matches.
-    #[serde(default)]
-    pub output_fallback: CommandBranchTarget,
 }
 
 /// Higher-level executable operation supported by the session layer.
@@ -505,7 +434,8 @@ pub struct CommandFlow {
     pub stop_on_error: bool,
     /// Maximum number of executed child steps before aborting as invalid flow.
     ///
-    /// This guards against accidental infinite loops when using `jump` branches.
+    /// This acts as a safety guard for unusually long or accidentally recursive
+    /// command flows assembled by callers.
     #[serde(default)]
     pub max_steps: Option<usize>,
 }
@@ -536,8 +466,6 @@ impl CommandFlow {
     }
 
     /// Override the flow-level maximum executed-step limit.
-    ///
-    /// Useful when branch rules intentionally revisit earlier steps.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps);
         self
@@ -793,8 +721,6 @@ mod tests {
         assert!(cmd.command.is_empty());
         assert!(cmd.dyn_params.is_empty());
         assert!(cmd.interaction.is_empty());
-        assert!(cmd.output_branches.is_empty());
-        assert_eq!(cmd.output_fallback, CommandBranchTarget::Next);
     }
 
     #[test]
@@ -829,19 +755,6 @@ mod tests {
         assert!(flow.steps.is_empty());
         assert!(flow.stop_on_error);
         assert_eq!(flow.max_steps, None);
-    }
-
-    #[test]
-    fn command_output_branch_rule_builder_sets_source() {
-        let rule = CommandOutputBranchRule::new(
-            vec![r"(?i)completed".to_string()],
-            CommandBranchTarget::StopSuccess,
-        )
-        .with_source(CommandOutputBranchSource::Content);
-
-        assert_eq!(rule.patterns, vec![r"(?i)completed".to_string()]);
-        assert_eq!(rule.source, CommandOutputBranchSource::Content);
-        assert_eq!(rule.target, CommandBranchTarget::StopSuccess);
     }
 
     #[test]

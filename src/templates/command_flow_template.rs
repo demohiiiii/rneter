@@ -1,8 +1,5 @@
 use crate::error::ConnectError;
-use crate::session::{
-    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
-    PromptResponseRule,
-};
+use crate::session::{Command, CommandFlow, CommandInteraction, PromptResponseRule};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -213,8 +210,6 @@ impl CommandFlowTemplate {
                 timeout: step.timeout_secs,
                 dyn_params: Default::default(),
                 interaction: CommandInteraction { prompts },
-                output_branches: step.output_branches.clone(),
-                output_fallback: step.output_fallback.clone(),
             });
         }
 
@@ -320,12 +315,6 @@ pub struct CommandFlowTemplateStep {
     /// Interactive prompt-response rules evaluated while this step runs.
     #[serde(default)]
     pub prompts: Vec<CommandFlowTemplatePrompt>,
-    /// Output-driven branch rules evaluated after this step finishes.
-    #[serde(default)]
-    pub output_branches: Vec<CommandOutputBranchRule>,
-    /// Fallback output branch action when no `output_branches` rule matches.
-    #[serde(default)]
-    pub output_fallback: CommandBranchTarget,
 }
 
 impl CommandFlowTemplateStep {
@@ -336,8 +325,6 @@ impl CommandFlowTemplateStep {
             mode: None,
             timeout_secs: None,
             prompts: Vec::new(),
-            output_branches: Vec::new(),
-            output_fallback: CommandBranchTarget::Next,
         }
     }
 
@@ -361,18 +348,6 @@ impl CommandFlowTemplateStep {
     /// Replace the step prompt list.
     pub fn with_prompts(mut self, prompts: Vec<CommandFlowTemplatePrompt>) -> Self {
         self.prompts = prompts;
-        self
-    }
-
-    /// Replace output-driven branch rules for this step.
-    pub fn with_output_branches(mut self, output_branches: Vec<CommandOutputBranchRule>) -> Self {
-        self.output_branches = output_branches;
-        self
-    }
-
-    /// Override fallback behavior when no output branch matches.
-    pub fn with_output_fallback(mut self, output_fallback: CommandBranchTarget) -> Self {
-        self.output_fallback = output_fallback;
         self
     }
 }
@@ -683,7 +658,6 @@ fn is_safe_var_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
     use serde_json::json;
 
     #[test]
@@ -774,38 +748,6 @@ mod tests {
             .expect("render flow");
 
         assert_eq!(flow.steps[0].command, "copy scp: flash:/image.bin");
-    }
-
-    #[test]
-    fn template_step_renders_output_branch_rules() {
-        let template = CommandFlowTemplate::new(
-            "branch-demo",
-            vec![
-                CommandFlowTemplateStep::new("show copy status")
-                    .with_output_branches(vec![
-                        CommandOutputBranchRule::new(
-                            vec![r"(?i)retry".to_string()],
-                            CommandBranchTarget::Jump { step_index: 0 },
-                        )
-                        .with_source(CommandOutputBranchSource::Content),
-                    ])
-                    .with_output_fallback(CommandBranchTarget::StopFailure),
-            ],
-        );
-
-        let flow = template
-            .to_command_flow(&CommandFlowTemplateRuntime::new())
-            .expect("render flow");
-        assert_eq!(flow.steps.len(), 1);
-        assert_eq!(flow.steps[0].output_branches.len(), 1);
-        assert_eq!(
-            flow.steps[0].output_branches[0].source,
-            CommandOutputBranchSource::Content
-        );
-        assert_eq!(
-            flow.steps[0].output_fallback,
-            CommandBranchTarget::StopFailure
-        );
     }
 
     #[test]

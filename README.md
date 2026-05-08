@@ -311,11 +311,10 @@ plus shared prompt vars (`server_addr`, `remote_path`, and optional credentials)
 ### Structured Command-Flow Templates
 
 If you want a less hard-coded workflow, build a reusable `CommandFlowTemplate` in Rust.
-The simpler path is to use inline `{{var}}` templates and output-driven branches,
-instead of embedding input-side conditional branches into template text.
+The current model is intentionally linear: each step sends one command, answers any expected
+prompts, and then continues to the next step. There is no output-side branching layer to maintain.
 
 ```rust
-use rneter::session::{CommandBranchTarget, CommandOutputBranchRule, CommandOutputBranchSource};
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
     CommandFlowTemplateStep, CommandFlowTemplateVar,
@@ -332,32 +331,13 @@ let template = CommandFlowTemplate::new(
                     "{{server_addr}}",
                 )
                 .with_append_newline(true),
-            ])
-            .with_output_branches(vec![
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(copy complete|bytes copied)".to_string()],
-                    CommandBranchTarget::Jump { step_index: 1 },
+                CommandFlowTemplatePrompt::from_template(
+                    vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
+                    "{{remote_path}}",
                 )
-                .with_source(CommandOutputBranchSource::Content),
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(failed|error|denied)".to_string()],
-                    CommandBranchTarget::StopFailure,
-                )
-                .with_source(CommandOutputBranchSource::Content),
+                .with_append_newline(true),
             ]),
-        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}")
-            .with_output_branches(vec![
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(verified|ok)".to_string()],
-                    CommandBranchTarget::StopSuccess,
-                )
-                .with_source(CommandOutputBranchSource::Content),
-                CommandOutputBranchRule::new(
-                    vec![r"(?i)(mismatch|failed|error)".to_string()],
-                    CommandBranchTarget::StopFailure,
-                )
-                .with_source(CommandOutputBranchSource::Content),
-            ]),
+        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
     ],
 )
 .with_default_mode("Enable")
@@ -371,6 +351,10 @@ let template = CommandFlowTemplate::new(
         .with_label("Server Address")
         .with_description("SCP/TFTP server reachable from the target device.")
         .with_required(true),
+    CommandFlowTemplateVar::new("remote_path")
+        .with_label("Remote Path")
+        .with_description("Remote file path that the device should fetch.")
+        .with_required(true),
     CommandFlowTemplateVar::new("device_path")
         .with_label("Device Path")
         .with_description("Destination path on the target device.")
@@ -383,14 +367,15 @@ let flow = template.to_command_flow(
         .with_vars(json!({
             "protocol": "scp",
             "server_addr": "198.51.100.20",
+            "remote_path": "/pub/image.bin",
             "device_path": "flash:/image.bin",
         })),
 )?;
 ```
 
-The built-in `cisco_like_copy_template()` is implemented with the same abstraction, so future
-`http`, `ftp`, or vendor-specific copy wizards can stay in one structured template layer instead
-of adding more one-off Rust structs.
+The built-in `cisco_like_copy_template()` uses the same abstraction, so future `http`, `ftp`,
+or vendor-specific copy wizards can stay in one structured template layer instead of adding more
+one-off Rust structs.
 
 ### Custom Interactive Command Flows
 
@@ -399,8 +384,8 @@ build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to each 
 
 ```rust
 use rneter::session::{
-    Command, CommandBranchTarget, CommandFlow, CommandInteraction, CommandOutputBranchRule,
-    CommandOutputBranchSource, ConnectionRequest, ExecutionContext, MANAGER, PromptResponseRule,
+    Command, CommandFlow, CommandInteraction, ConnectionRequest, ExecutionContext, MANAGER,
+    PromptResponseRule,
 };
 use rneter::templates;
 
@@ -426,19 +411,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_record_input(true),
             ),
-        output_branches: vec![
-            CommandOutputBranchRule::new(
-                vec![r"(?i)(copy complete|bytes copied)".to_string()],
-                CommandBranchTarget::StopSuccess,
-            )
-            .with_source(CommandOutputBranchSource::Content),
-            CommandOutputBranchRule::new(
-                vec![r"(?i)(failed|error|denied)".to_string()],
-                CommandBranchTarget::StopFailure,
-            )
-            .with_source(CommandOutputBranchSource::Content),
-        ],
-        output_fallback: CommandBranchTarget::StopFailure,
+        ..Command::default()
+    },
+    Command {
+        mode: "Enable".to_string(),
+        command: "verify /md5 flash:/image.bin".to_string(),
+        timeout: Some(300),
         ..Command::default()
     }]);
 
@@ -466,8 +444,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Runtime prompt-response rules are evaluated before template static input rules, so new SCP/TFTP/HTTP
 style wizards can usually be added without changing the underlying template definition.
-Output branches are then evaluated after each step, so workflows can continue/jump/stop based on
-what the device actually printed instead of only pre-supplied input vars.
+Each flow then continues step-by-step in declaration order, which keeps device copy workflows
+predictable and easier to review.
 
 ### Security Levels
 
