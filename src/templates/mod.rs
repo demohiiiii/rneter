@@ -28,6 +28,7 @@ pub use detect::{
     autodetect_and_connect_with_context, autodetect_with_context, score_builtin_templates,
     score_detect_profiles,
 };
+pub(crate) use detect::summarize_detect_log_text;
 pub use detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 pub use linux::{
     CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,

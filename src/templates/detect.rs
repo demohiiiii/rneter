@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+use log::{debug, trace};
 use regex::Regex;
 
 use super::detect_profile::TemplateDetectProfile;
@@ -185,6 +186,44 @@ pub struct DetectSnapshot {
     pub probe_outputs: HashMap<String, String>,
 }
 
+pub(crate) fn summarize_detect_log_text(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+
+    collapsed
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+        + "..."
+}
+
+fn summarize_detect_candidates(candidates: &[TemplateDetectCandidate]) -> String {
+    if candidates.is_empty() {
+        return "none".to_string();
+    }
+
+    candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{}:{}({})",
+                candidate.template_name,
+                candidate.score,
+                match candidate.confidence {
+                    DetectConfidence::High => "high",
+                    DetectConfidence::Medium => "medium",
+                    DetectConfidence::Low => "low",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Score one set of detect profiles against a collected snapshot.
 pub fn score_detect_profiles(
     snapshot: &DetectSnapshot,
@@ -193,13 +232,40 @@ pub fn score_detect_profiles(
     let mut candidates = Vec::new();
     let mut raw_facts = Vec::new();
 
+    debug!(
+        "autodetect scoring {} templates against prompt='{}' with {} probe outputs",
+        profiles.len(),
+        summarize_detect_log_text(&snapshot.initial_prompt, 80),
+        snapshot.probe_outputs.len()
+    );
+
     for (template_name, profile) in profiles {
         let mut facts = Vec::new();
+        trace!(
+            "autodetect scoring template='{}' initial_rules={} probes={}",
+            template_name,
+            profile.initial_rules.len(),
+            profile.probes.len()
+        );
 
         for rule in &profile.initial_rules {
             if regex_matches(&rule.pattern, &snapshot.initial_prompt)
                 || regex_matches(&rule.pattern, &snapshot.initial_output)
             {
+                trace!(
+                    "autodetect initial rule matched template='{}' pattern='{}' weight={} sample='{}'",
+                    template_name,
+                    rule.pattern,
+                    rule.weight,
+                    summarize_detect_log_text(
+                        if !snapshot.initial_prompt.is_empty() {
+                            &snapshot.initial_prompt
+                        } else {
+                            &snapshot.initial_output
+                        },
+                        120
+                    )
+                );
                 facts.push(TemplateDetectFact {
                     kind: DetectFactKind::PositiveMatch,
                     source: DetectFactSource::InitialPrompt,
@@ -217,6 +283,11 @@ pub fn score_detect_profiles(
 
         for probe in &profile.probes {
             let Some(output) = snapshot.probe_outputs.get(&probe.command) else {
+                trace!(
+                    "autodetect probe output missing template='{}' command='{}'",
+                    template_name,
+                    probe.command
+                );
                 continue;
             };
 
@@ -226,6 +297,13 @@ pub fn score_detect_profiles(
                 .chain(probe.error_patterns.iter().map(String::as_str))
                 .find(|pattern| regex_matches(pattern, output));
             if let Some(pattern) = matched_error_pattern {
+                trace!(
+                    "autodetect probe error matched template='{}' command='{}' pattern='{}' output='{}'",
+                    template_name,
+                    probe.command,
+                    pattern,
+                    summarize_detect_log_text(output, 120)
+                );
                 facts.push(TemplateDetectFact {
                     kind: DetectFactKind::ErrorPattern,
                     source: DetectFactSource::ProbeOutput,
@@ -239,6 +317,14 @@ pub fn score_detect_profiles(
 
             for rule in &probe.rules {
                 if regex_matches(&rule.pattern, output) {
+                    trace!(
+                        "autodetect probe rule matched template='{}' command='{}' pattern='{}' weight={} output='{}'",
+                        template_name,
+                        probe.command,
+                        rule.pattern,
+                        rule.weight,
+                        summarize_detect_log_text(output, 120)
+                    );
                     facts.push(TemplateDetectFact {
                         kind: DetectFactKind::PositiveMatch,
                         source: DetectFactSource::ProbeOutput,
@@ -258,12 +344,32 @@ pub fn score_detect_profiles(
             .filter(|fact| fact.kind == DetectFactKind::PositiveMatch)
             .map(|fact| fact.weight)
             .sum();
+        trace!(
+            "autodetect template='{}' score={} facts={}",
+            template_name,
+            score,
+            facts.len()
+        );
         if score > 0 {
             candidates.push(TemplateDetectCandidate::new(template_name, score, facts));
         }
     }
 
-    TemplateDetectReport::from_parts(candidates, raw_facts)
+    let report = TemplateDetectReport::from_parts(candidates, raw_facts);
+    debug!(
+        "autodetect scoring completed: best_match={} candidates=[{}] raw_facts={}",
+        report
+            .best_match
+            .as_ref()
+            .map(|candidate| format!(
+                "{}:{}({:?})",
+                candidate.template_name, candidate.score, candidate.confidence
+            ))
+            .unwrap_or_else(|| "none".to_string()),
+        summarize_detect_candidates(&report.candidates),
+        report.raw_facts.len()
+    );
+    report
 }
 
 /// Score the built-in detect profiles against one collected snapshot.
@@ -284,9 +390,24 @@ pub async fn autodetect_with_context(
         .into_iter()
         .collect::<Vec<_>>();
 
+    debug!(
+        "autodetect start target={} port={} templates={} probes={}",
+        request.addr,
+        request.port,
+        profiles.len(),
+        probe_commands.len()
+    );
+
     let snapshot = MANAGER
         .collect_detect_snapshot(&request, &context, &probe_commands)
         .await?;
+
+    debug!(
+        "autodetect snapshot collected prompt='{}' initial_output='{}' probes={}",
+        summarize_detect_log_text(&snapshot.initial_prompt, 80),
+        summarize_detect_log_text(&snapshot.initial_output, 120),
+        snapshot.probe_outputs.len()
+    );
 
     Ok(score_detect_profiles(&snapshot, profiles))
 }
@@ -300,6 +421,10 @@ pub async fn autodetect_and_connect_with_context(
 ) -> Result<AutodetectedConnection, ConnectError> {
     let report = autodetect_with_context(request.clone(), context.clone()).await?;
     let best = select_best_detected_template(&report, policy)?;
+    debug!(
+        "autodetect selected template='{}' score={} confidence={:?}; connecting",
+        best.template_name, best.score, best.confidence
+    );
     let connection_request = build_detected_connection_request(request, enable_password, &best)?;
     let sender = MANAGER.get_with_context(connection_request, context).await?;
 
@@ -318,8 +443,16 @@ fn select_best_detected_template(
     })?;
 
     if best.confidence.satisfies_minimum(policy.minimum_confidence) {
+        debug!(
+            "autodetect confidence accepted template='{}' confidence={:?} minimum={:?}",
+            best.template_name, best.confidence, policy.minimum_confidence
+        );
         Ok(best)
     } else {
+        debug!(
+            "autodetect confidence rejected template='{}' confidence={:?} minimum={:?}",
+            best.template_name, best.confidence, policy.minimum_confidence
+        );
         Err(ConnectError::AutodetectConfidenceTooLow(format!(
             "best_match={} confidence={:?} score={} minimum={:?}",
             best.template_name, best.confidence, best.score, policy.minimum_confidence
@@ -369,6 +502,23 @@ mod tests {
     use super::*;
     use crate::templates::by_name as template_by_name;
     use crate::templates::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
+
+    #[test]
+    fn log_text_summary_collapses_whitespace_and_truncates() {
+        let summary = summarize_detect_log_text("  line one\nline   two\tline three  ", 18);
+
+        assert_eq!(summary, "line one line two...");
+    }
+
+    #[test]
+    fn candidate_log_summary_lists_ranked_candidates() {
+        let summary = summarize_detect_candidates(&[
+            TemplateDetectCandidate::new("cisco", 95, Vec::new()),
+            TemplateDetectCandidate::new("linux", 20, Vec::new()),
+        ]);
+
+        assert_eq!(summary, "cisco:95(high), linux:20(low)");
+    }
 
     #[test]
     fn detect_confidence_maps_expected_score_ranges() {
@@ -449,6 +599,28 @@ mod tests {
             Some("cisco")
         );
         assert_eq!(report.candidates.len(), 1);
+    }
+
+    #[test]
+    fn hillstone_show_version_banner_scores_hillstone_first() {
+        let snapshot = DetectSnapshot {
+            initial_output: "SG-6000#".to_string(),
+            initial_prompt: "SG-6000#".to_string(),
+            probe_outputs: HashMap::from([(
+                "show version".to_string(),
+                "Hillstone Networks StoneOS software Version 5.5R1".to_string(),
+            )]),
+        };
+
+        let report = score_builtin_templates(&snapshot);
+
+        assert_eq!(
+            report
+                .best_match
+                .as_ref()
+                .map(|candidate| candidate.template_name.as_str()),
+            Some("hillstone")
+        );
     }
 
     #[test]

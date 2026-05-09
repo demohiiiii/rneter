@@ -139,6 +139,17 @@ fn linux_detect_profile() -> TemplateDetectProfile {
     }
 }
 
+fn hillstone_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[A-Za-z0-9._-]+#\s*$", 10)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Hillstone Networks StoneOS software|StoneOS software", 99)],
+            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+        )],
+    }
+}
+
 fn arista_detect_profile() -> TemplateDetectProfile {
     TemplateDetectProfile {
         initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
@@ -231,7 +242,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            detect_profile: None,
+            detect_profile: Some(hillstone_detect_profile()),
         },
         "juniper" => TemplateMetadata {
             name: "juniper".to_string(),
@@ -448,6 +459,7 @@ mod tests {
             "juniper",
             "huawei",
             "h3c",
+            "hillstone",
             "linux",
             "arista",
             "fortinet",
