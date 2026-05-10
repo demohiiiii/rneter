@@ -75,7 +75,12 @@ mod tests {
     use super::*;
     use crate::device::{DeviceHandler, DeviceHandlerConfig, DevicePromptRule};
     use crate::error::ConnectError;
-    use crate::templates::{TemplateCapability, available_templates, by_name, template_metadata};
+    use crate::session::SessionOperation;
+    use crate::templates::{
+        DetectSnapshot, TemplateCapability, available_templates, by_name, score_builtin_templates,
+        template_metadata,
+    };
+    use std::collections::HashMap;
 
     fn prompt_state_order(prompts: &[DevicePromptRule]) -> Vec<&str> {
         prompts.iter().map(|rule| rule.state.as_str()).collect()
@@ -87,6 +92,34 @@ mod tests {
             actual, expected,
             "prompt order mismatch for {name}; actual prompt states: {:?}",
             actual
+        );
+    }
+
+    fn after_connect_command_strings(config: &DeviceHandlerConfig) -> Vec<String> {
+        config
+            .hooks
+            .after_connect
+            .iter()
+            .filter_map(|action| match &action.operation {
+                SessionOperation::Command(command) => Some(command.command.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_best_match_from_show_version(template_name: &str, output: &str) {
+        let report = score_builtin_templates(&DetectSnapshot {
+            initial_output: String::new(),
+            initial_prompt: "device#".to_string(),
+            probe_outputs: HashMap::from([("show version".to_string(), output.to_string())]),
+        });
+        let best = report
+            .best_match
+            .unwrap_or_else(|| panic!("expected autodetect match for {template_name}"));
+        assert_eq!(
+            best.template_name, template_name,
+            "unexpected best match for show version output {output:?}; candidates: {:?}",
+            report.candidates
         );
     }
 
@@ -467,5 +500,54 @@ mod tests {
             let config = (case.config_builder)();
             assert_prompt_order(&config.prompt, case.expected_prompt_order, case.name);
         }
+    }
+
+    #[test]
+    fn netmiko_driver_session_preparation_is_reflected_in_new_templates() {
+        let aruba_hooks = after_connect_command_strings(&aruba_aoscx_config());
+        assert!(aruba_hooks.contains(&"no page".to_string()));
+        assert!(
+            aruba_aoscx_config()
+                .edges
+                .iter()
+                .any(|edge| edge.from_state == "Enable"
+                    && edge.command == "configure term"
+                    && edge.to_state == "Config")
+        );
+
+        let nxos_hooks = after_connect_command_strings(&cisco_nxos_config());
+        assert!(nxos_hooks.contains(&"terminal width 511".to_string()));
+        assert!(nxos_hooks.contains(&"terminal length 0".to_string()));
+
+        let dell_os10_hooks = after_connect_command_strings(&dell_os10_config());
+        assert!(dell_os10_hooks.contains(&"terminal length 0".to_string()));
+
+        let ruijie_hooks = after_connect_command_strings(&ruijie_config());
+        assert!(ruijie_hooks.contains(&"terminal width 256".to_string()));
+        assert!(ruijie_hooks.contains(&"terminal length 0".to_string()));
+
+        let zte_hooks = after_connect_command_strings(&zte_zxros_config());
+        assert!(zte_hooks.contains(&"terminal length 0".to_string()));
+    }
+
+    #[test]
+    fn netmiko_driver_ruijie_password_change_prompt_is_reflected() {
+        let mut handler = ruijie().expect("create ruijie handler");
+        assert_eq!(
+            handler.read_need_write("Do you want to change the password"),
+            Some(("n".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn netmiko_autodetect_markers_score_expected_new_templates() {
+        assert_best_match_from_show_version("aruba_aoscx", "ArubaOS-CX");
+        assert_best_match_from_show_version("aruba_aoscx", "AOS-CX");
+        assert_best_match_from_show_version("cisco_asa", "Cisco Adaptive Security Appliance");
+        assert_best_match_from_show_version("cisco_asa", "Cisco ASA");
+        assert_best_match_from_show_version("cisco_nxos", "Cisco Nexus Operating System");
+        assert_best_match_from_show_version("cisco_nxos", "NX-OS");
+        assert_best_match_from_show_version("dell_os10", "Dell EMC Networking OS10 Enterprise");
+        assert_best_match_from_show_version("dell_os10", "Dell SmartFabric OS10-Enterprise");
     }
 }

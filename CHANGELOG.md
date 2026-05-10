@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.5] - 2026-05-10
+
+### New Features
+- Added declarative session lifecycle hooks (`after_connect`, `before_disconnect`, `after_enter_state`, `before_exit_state`) with recorder events, enabling built-in and template-level session preparation such as automatic paging disable commands.
+- Added SSH-based template autodetect with ranked candidates, scored probe facts, confidence gating, and a direct `autodetect_and_connect_with_context(...)` entrypoint for built-in templates.
+- Added first-batch Netmiko-derived network templates for Aruba AOS-CX, Cisco ASA, Cisco NX-OS, Dell OS10, Ruijie RGOS, and ZTE ZXROS, and registered them across template exports, registry lookup, metadata, and autodetect coverage.
+
+### Optimizations
+- Simplified command flows to a linear prompt-driven execution model by removing output-branch control paths and executing flow steps strictly in declaration order with bounded step-count safety checks.
+- Improved autodetect observability and resilience with probe-level `debug`/`trace` logging, contextual timeout messages, automatic pager continuation for common `More` prompts, and stronger Hillstone/Maipu-adjacent prompt diagnostics.
+- Refined built-in template defaults and session preparation behavior by aligning more vendor hooks and prompt ordering with proven Netmiko patterns, including Hillstone automatic paging disable and expanded template consistency tests.
+
+### API Changes
+- Removed command-flow branching APIs from the public session/template model: `CommandBranchTarget`, `CommandOutputBranchRule`, `CommandOutputBranchSource`, `Command.output_branches`, and `Command.output_fallback` are no longer available.
+- `CommandFlowTemplateStep` now models only linear command attributes (`command`, `mode`, `timeout`, `prompts`), so existing flow templates that relied on branch targets must be rewritten as ordered step sequences.
+- Added autodetect-facing public models and entrypoints including `DetectRequest`, `TemplateDetectReport`, `TemplateDetectCandidate`, `DetectConnectPolicy`, and `autodetect_and_connect_with_context(...)`; built-in network template surface also now includes distinct names such as `cisco_asa`, `cisco_nxos`, `aruba_aoscx`, `dell_os10`, `ruijie`, and `zte_zxros`.
+
+### Risks
+- This release contains a breaking command-flow model simplification; downstream code using branch-based flow control must migrate to linear prompt-driven sequences before upgrading.
+- Autodetect still depends on heuristic prompt/probe matching and vendor-specific pagination behavior, so environments with customized prompts, banners, or CLI dialects may require additional template tuning.
+- The newly added network templates and autodetect profiles are backed by unit coverage and Netmiko-derived behavior, but they still need broader device-side validation across real firmware variants before being treated as universally reliable.
+
 ## [0.4.4] - 2026-04-25
 
 ### New Features

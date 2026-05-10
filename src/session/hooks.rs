@@ -159,9 +159,9 @@ mod tests {
             ..SessionHooks::default()
         };
 
-        assert_eq!(hooks.after_enter_state("config"), &[hook.clone()]);
-        assert_eq!(hooks.after_enter_state("CONFIG"), &[hook.clone()]);
-        assert_eq!(hooks.before_exit_state("enable"), &[hook.clone()]);
+        assert_eq!(hooks.after_enter_state("config"), std::slice::from_ref(&hook));
+        assert_eq!(hooks.after_enter_state("CONFIG"), std::slice::from_ref(&hook));
+        assert_eq!(hooks.before_exit_state("enable"), std::slice::from_ref(&hook));
         assert_eq!(hooks.before_exit_state("Enable"), &[hook]);
     }
 
@@ -185,7 +185,7 @@ mod tests {
         assert!(hooks.after_enter_state.contains_key("config"));
         assert!(!hooks.after_enter_state.contains_key("Config"));
         assert!(hooks.before_exit_state.contains_key("enable"));
-        assert_eq!(hooks.after_enter_state("CONFIG"), &[hook.clone()]);
+        assert_eq!(hooks.after_enter_state("CONFIG"), std::slice::from_ref(&hook));
         assert_eq!(hooks.before_exit_state("Enable"), &[hook]);
     }
 }
