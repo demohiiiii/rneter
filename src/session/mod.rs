@@ -36,13 +36,13 @@ use crate::error::ConnectError;
 
 use super::device::{DeviceHandler, IGNORE_START_LINE};
 
+pub(crate) use hooks::HookTrigger;
+pub use hooks::{HookAction, HookFailurePolicy, SessionHooks};
 pub use recording::{
     NormalizeOptions, ReplayContext, SessionEvent, SessionRecordEntry, SessionRecordLevel,
     SessionRecorder, SessionReplayer,
 };
-pub(crate) use hooks::HookTrigger;
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
-pub use hooks::{HookAction, HookFailurePolicy, SessionHooks};
 pub use transaction::{
     RollbackPolicy, TxBlock, TxOperationStepResult, TxResult, TxStep, TxStepExecutionState,
     TxStepResult, TxStepRollbackState, TxWorkflow, TxWorkflowResult, failed_block_rollback_summary,

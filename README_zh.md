@@ -96,6 +96,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Linux 主机管理
+
+`rneter` 支持 Linux 主机管理，并可按需配置提权方式：
+
+```rust
+use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
+use rneter::templates;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut handler = templates::linux()?;
+    handler
+        .dyn_param
+        .insert("SudoPassword".to_string(), "your_sudo_password".to_string());
+
+    let sender = MANAGER
+        .get_with_context(
+            ConnectionRequest::new(
+                "user".to_string(),
+                "192.168.1.100".to_string(),
+                22,
+                "ssh_password".to_string(),
+                None,
+                handler,
+            ),
+            ExecutionContext::default(),
+        )
+        .await?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(CmdJob {
+            data: Command {
+                mode: "User".to_string(),
+                command: "ls -la /home".to_string(),
+                timeout: Some(30),
+                ..Command::default()
+            },
+            sys: None,
+            responder: tx,
+        })
+        .await?;
+    let output = rx.await??;
+    println!("输出: {}", output.content);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(CmdJob {
+            data: Command {
+                mode: "Root".to_string(),
+                command: "systemctl restart nginx".to_string(),
+                timeout: Some(30),
+                ..Command::default()
+            },
+            sys: None,
+            responder: tx,
+        })
+        .await?;
+    let output = rx.await??;
+    println!("重启结果: {}", output.content);
+
+    Ok(())
+}
+```
+
+`LinuxTemplateConfig.shell_flavor` 默认使用 `DeviceShellFlavor::Posix`。如果远端登录 shell 是 `fish`，可以显式设置为 `DeviceShellFlavor::Fish`。
+
+**自定义配置：**
+
+```rust
+use rneter::device::DeviceShellFlavor;
+use rneter::templates::{linux_with_config, CustomPrompts, LinuxTemplateConfig, SudoMode};
+
+let config = LinuxTemplateConfig {
+    sudo_mode: SudoMode::SudoShell,
+    sudo_password: Some("password".to_string()),
+    custom_prompts: None,
+    ..LinuxTemplateConfig::default()
+};
+let handler = linux_with_config(config)?;
+
+let config = LinuxTemplateConfig {
+    sudo_mode: SudoMode::SudoInteractive,
+    sudo_password: Some("password".to_string()),
+    custom_prompts: Some(CustomPrompts {
+        user_prompts: vec![r"^myuser@myhost\$\s*$"],
+        root_prompts: vec![r"^root@myhost#\s*$"],
+    }),
+    ..LinuxTemplateConfig::default()
+};
+let handler = linux_with_config(config)?;
+
+let config = LinuxTemplateConfig {
+    shell_flavor: DeviceShellFlavor::Fish,
+    ..LinuxTemplateConfig::default()
+};
+let handler = linux_with_config(config)?;
+```
+
 ### 安全级别
 
 `rneter` 现在支持安全默认值，并可在连接时自定义 SSH 安全级别：
@@ -222,7 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-这个内置模板适配 `cisco`、`arista`、`chaitin`、`maipu` 和 `venustech` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
+这个内置模板适配 `cisco`、`cisco_asa`、`cisco_nxos`、`arista`、`aruba_aoscx`、`chaitin`、`dell_os10`、`maipu`、`ruijie`、`venustech` 和 `zte_zxros` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
 这个模板有意不在输入侧做条件分支：只需要传完整的 `command`，再配合通用的
 `server_addr`、`remote_path` 和可选凭据变量即可。
 
@@ -655,18 +754,6 @@ let handler = config.build()?;
 assert!(handler.states().iter().any(|state| state == "custommode"));
 ```
 
-如果目标 Linux 主机登录 shell 是 `fish`，可以显式指定 shell 类型：
-
-```rust
-use rneter::device::DeviceShellFlavor;
-use rneter::templates::{linux_with_config, LinuxTemplateConfig};
-
-let handler = linux_with_config(LinuxTemplateConfig {
-    shell_flavor: DeviceShellFlavor::Fish,
-    ..LinuxTemplateConfig::default()
-})?;
-```
-
 新增的录制/回放能力：
 
 - Prompt 前后态：每条 `command_output` 都记录 `prompt_before`/`prompt_after`
@@ -782,6 +869,8 @@ flowchart TD
 3. 执行命令并等待提示符
 4. 返回带有成功状态的输出
 
+调用方传入的 mode 名称会在内部统一转成小写匹配，因此 `"Enable"`、`"enable"`、`"ENABLE"` 都会指向同一个 FSM 状态。
+
 ## 生命周期 Hook
 
 `rneter` 现在可以通过 `DeviceHandlerConfig.hooks` 声明生命周期 Hook：
@@ -795,7 +884,7 @@ Hook 复用了 `SessionOperation`，因此既可以执行单条命令，也可�
 
 内置模板也可以提供默认行为，例如：
 
-- Cisco 会在连接后执行 `terminal length 0`
+- Cisco/ASA 会在连接后执行 `terminal pager 0`
 - Juniper 会在连接后执行 `set cli screen-length 0`
 
 Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件会进入 session recorder。
@@ -810,12 +899,13 @@ Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件
 - `candidates`
 - `raw_facts`
 
-这样在现场环境里更容易理解“为什么它更像 Cisco / Juniper / Huawei / H3C / Linux / Arista / Fortinet / Palo Alto / Check Point”，也更方便排查误判。
+这样在现场环境里更容易理解“为什么它更像 Cisco / Juniper / Huawei / H3C / Linux / Arista / Aruba AOS-CX / Cisco ASA/NX-OS / Dell OS10 / Ruijie / ZTE ZXROS / Fortinet / Palo Alto / Check Point”，也更方便排查误判。
 
 当前范围：
 
 - 仅支持 SSH
-- 当前已覆盖的内置模板：`cisco`、`juniper`、`huawei`、`h3c`、`linux`、`arista`、`fortinet`、`paloalto`、`checkpoint`
+- 当前已覆盖的内置模板：`cisco`、`juniper`、`huawei`、`h3c`、`linux`、`hillstone`、`arista`、`aruba_aoscx`、`cisco_asa`、`cisco_nxos`、`dell_os10`、`fortinet`、`paloalto`、`ruijie`、`zte_zxros`、`checkpoint`
+- `cisco_asa` 作为独立模板名和自动识别目标暴露，但当前复用已经验证过的 `cisco` handler 行为
 - 基于初始 prompt/输出和只读 probe 命令做缓存式打分
 
 如何理解诊断结果：
@@ -946,29 +1036,39 @@ println!("连接使用模板: {}", connected.template_name);
 
 **网络设备：**
 
-- Cisco IOS/IOS-XE/IOS-XR 设备
-- Juniper JunOS 设备
-- Arista EOS 设备
-- 华为 VRP 设备
-- H3C Comware 设备
-- Hillstone SG 设备
-- Array Networks APV 设备
-- Fortinet FortiGate 防火墙
-- Palo Alto Networks PA 防火墙
-- Check Point Security Gateway
-- Topsec NGFW 防火墙
-- 启明星辰 Venustech USG 设备
-- 迪普 DPTech 防火墙设备
-- 长亭 Chaitin SafeLine 网关
-- 奇安信 QiAnXin NSG 网关
-- 迈普通信 Maipu 网络设备
+| 模板名        | 厂商 / 平台               | 主要模式                                | 备注                                                |
+| ------------- | ------------------------- | --------------------------------------- | --------------------------------------------------- |
+| `cisco`       | Cisco IOS / IOS-XE        | `Login`、`Enable`、`Config`             | 也作为 `cisco_asa` 当前已验证的 handler 行为        |
+| `cisco_asa`   | Cisco ASA                 | `Login`、`Enable`、`Config`             | 独立模板名和自动识别目标；复用 `cisco` handler 行为 |
+| `cisco_nxos`  | Cisco NX-OS               | `Login`、`Enable`、`Config`             | Cisco-like 模式切换，包含 NX-OS 分页默认设置        |
+| `juniper`     | Juniper JunOS             | `Enable`、`Config`                      | 支持 JunOS edit prompt prefix 处理                  |
+| `arista`      | Arista EOS                | `Login`、`Enable`、`Config`             | 面向 EOS 的 Cisco-like 模板                         |
+| `aruba_aoscx` | Aruba AOS-CX              | `Login`、`Enable`、`Config`             | 使用 AOS-CX 分页默认设置                            |
+| `dell_os10`   | Dell OS10                 | `Login`、`Enable`、`Config`             | 面向 Dell OS10 的 Cisco-like 模板                   |
+| `ruijie`      | 锐捷 Ruijie RGOS          | `Login`、`Enable`、`Config`             | 包含拒绝修改密码提示的交互规则                      |
+| `zte_zxros`   | 中兴 ZTE ZXROS            | `Login`、`Enable`、`Config`             | 面向 ZTE ZXROS 的 Cisco-like 模板                   |
+| `huawei`      | 华为 Huawei VRP           | `Enable`、`Config`                      | 使用 `system-view` / `return` 模式切换              |
+| `h3c`         | H3C Comware               | `Enable`、`Config`                      | Comware 风格尖括号/方括号 prompt                    |
+| `hillstone`   | Hillstone SG / StoneOS    | `Enable`、`Config`                      | 包含保存确认提示                                    |
+| `array`       | Array Networks APV        | `Login`、`Enable`、`Config`、vsite 模式 | 支持系统/上下文模式变体                             |
+| `fortinet`    | Fortinet FortiGate        | `Enable`、vdom 模式                     | 基础 FortiGate / VDOM 状态模型                      |
+| `paloalto`    | Palo Alto Networks PAN-OS | `Enable`、`Config`                      | Operational 和 config prompt                        |
+| `checkpoint`  | Check Point Gaia          | `Enable`                                | 只读/操作类模板                                     |
+| `topsec`      | Topsec NGFW               | `Enable`                                | 基础操作类模板                                      |
+| `venustech`   | 启明星辰 Venustech USG    | `Login`、`Enable`、`Config`             | Cisco-like 防火墙模板                               |
+| `dptech`      | 迪普 DPTech 防火墙        | `Enable`、`Config`                      | H3C-like prompt 风格                                |
+| `chaitin`     | 长亭 Chaitin SafeLine     | `Login`、`Enable`、`Config`             | Cisco-like 网关模板                                 |
+| `qianxin`     | 奇安信 QiAnXin NSG        | `Enable`、`Config`                      | 安全网关模板                                        |
+| `maipu`       | 迈普通信 Maipu 网络设备   | `Login`、`Enable`、`Config`             | 面向 Maipu 设备的 Cisco-like 模板                   |
 
 **Linux 主机：**
 
-- 通用 Linux 发行版（Ubuntu、Debian、CentOS、RHEL 等）
-- 支持多种提权方式（`sudo -i`、`sudo -s`、`su`、直接 root）
-- 支持带自定义 pattern 的智能 prompt 检测
-- 支持带回滚策略的事务式配置管理
+| 模板名  | 范围              | 备注                                                          |
+| ------- | ----------------- | ------------------------------------------------------------- |
+| `linux` | 通用 Linux 发行版 | Ubuntu、Debian、CentOS、RHEL 以及其他基于 shell 的 Linux 主机 |
+| `linux` | 提权方式          | 支持 `sudo -i`、`sudo -s`、`su` 和直接 root 会话              |
+| `linux` | Prompt 处理       | 支持带自定义 pattern 的智能 prompt 检测                       |
+| `linux` | 事务能力          | 支持带回滚策略的事务式配置管理                                |
 
 ## 配置
 

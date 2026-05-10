@@ -285,8 +285,7 @@ pub fn score_detect_profiles(
             let Some(output) = snapshot.probe_outputs.get(&probe.command) else {
                 trace!(
                     "autodetect probe output missing template='{}' command='{}'",
-                    template_name,
-                    probe.command
+                    template_name, probe.command
                 );
                 continue;
             };
@@ -426,7 +425,9 @@ pub async fn autodetect_and_connect_with_context(
         best.template_name, best.score, best.confidence
     );
     let connection_request = build_detected_connection_request(request, enable_password, &best)?;
-    let sender = MANAGER.get_with_context(connection_request, context).await?;
+    let sender = MANAGER
+        .get_with_context(connection_request, context)
+        .await?;
 
     AutodetectedConnection::new(sender, report)
 }
@@ -711,12 +712,8 @@ mod tests {
 
         let best = select_best_detected_template(&report, DetectConnectPolicy::default())
             .expect("best candidate");
-        let built = build_detected_connection_request(
-            request,
-            None,
-            &best,
-        )
-        .expect("connection request should build");
+        let built = build_detected_connection_request(request, None, &best)
+            .expect("connection request should build");
 
         let ConnectionRequest {
             user,
@@ -801,10 +798,12 @@ mod tests {
         );
 
         assert!(report.best_match.is_none());
-        assert!(report
-            .raw_facts
-            .iter()
-            .any(|fact| fact.kind == DetectFactKind::ErrorPattern));
+        assert!(
+            report
+                .raw_facts
+                .iter()
+                .any(|fact| fact.kind == DetectFactKind::ErrorPattern)
+        );
     }
 
     #[test]
@@ -842,9 +841,10 @@ mod tests {
         let best = report.best_match.expect("initial rule should still score");
         assert_eq!(best.score, 15);
         assert_eq!(best.matched_facts.len(), 2);
-        assert!(best
-            .matched_facts
-            .iter()
-            .any(|fact| fact.kind == DetectFactKind::ErrorPattern));
+        assert!(
+            best.matched_facts
+                .iter()
+                .any(|fact| fact.kind == DetectFactKind::ErrorPattern)
+        );
     }
 }

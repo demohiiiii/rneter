@@ -19,10 +19,8 @@ fn looks_like_shell_prompt(fragment: &str) -> bool {
 
 fn looks_like_pager_prompt(fragment: &str) -> bool {
     static PAGER_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
-        Regex::new(
-            r"(?i)^\s*(?:<---\s*More\s*--->|--\s*More\s*--|----\s*More\s*----|More:?)\s*$",
-        )
-        .expect("valid detect pager regex")
+        Regex::new(r"(?i)^\s*(?:<---\s*More\s*--->|--\s*More\s*--|----\s*More\s*----|More:?)\s*$")
+            .expect("valid detect pager regex")
     });
     PAGER_RE.is_match(fragment.trim())
 }
@@ -138,7 +136,9 @@ async fn collect_detect_snapshot(
         }
     })
     .await
-    .map_err(|_| ConnectError::InitTimeout("autodetect waiting for initial prompt".to_string()))??;
+    .map_err(|_| {
+        ConnectError::InitTimeout("autodetect waiting for initial prompt".to_string())
+    })??;
 
     let mut cache = DetectProbeCache::default();
     for command in probe_commands {
@@ -307,7 +307,9 @@ mod tests {
 
     #[test]
     fn pager_prompt_heuristic_rejects_normal_output_lines() {
-        assert!(!looks_like_pager_prompt("Cisco Adaptive Security Appliance Software Version 9.8(1)"));
+        assert!(!looks_like_pager_prompt(
+            "Cisco Adaptive Security Appliance Software Version 9.8(1)"
+        ));
         assert!(!looks_like_pager_prompt("ciscoasa-3>"));
     }
 
@@ -330,7 +332,11 @@ mod tests {
 
         assert!(message.contains("autodetect probe timeout: show version"));
         assert!(message.contains("waiting_for_prompt='ciscoasa-3>'"));
-        assert!(message.contains("last_fragment='Type help or '?' for a list of available commands. ciscoasa-3#'"));
-        assert!(message.contains("output='show version Cisco Adaptive Security Appliance Software Version 9.18(4)'"));
+        assert!(message.contains(
+            "last_fragment='Type help or '?' for a list of available commands. ciscoasa-3#'"
+        ));
+        assert!(message.contains(
+            "output='show version Cisco Adaptive Security Appliance Software Version 9.18(4)'"
+        ));
     }
 }

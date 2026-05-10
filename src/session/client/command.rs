@@ -1048,8 +1048,11 @@ impl SharedSshClient {
 
             let current_state = self.handler.current_state().to_string();
             if current_state != last_state {
-                let after_enter_hooks =
-                    self.handler.hooks().after_enter_state(&current_state).to_vec();
+                let after_enter_hooks = self
+                    .handler
+                    .hooks()
+                    .after_enter_state(&current_state)
+                    .to_vec();
                 self.run_hook_actions(
                     HookTrigger::AfterEnterState(&current_state),
                     &after_enter_hooks,

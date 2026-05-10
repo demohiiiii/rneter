@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
-use rneter::templates::{linux_with_config, LinuxTemplateConfig, SudoMode};
+use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -302,9 +302,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This built-in template matches the prompt style used by `cisco`, `arista`, `chaitin`, `maipu`,
-and `venustech`. If a vendor wizard differs, build another `CommandFlowTemplate` on top of the
-same abstraction.
+This built-in template matches the prompt style used by `cisco`, `cisco_asa`, `cisco_nxos`,
+`arista`, `aruba_aoscx`, `chaitin`, `dell_os10`, `maipu`, `ruijie`, `venustech`, and `zte_zxros`.
+If a vendor wizard differs, build another `CommandFlowTemplate` on top of the same abstraction.
 The template intentionally avoids input-side conditional branches: pass the exact `command`
 plus shared prompt vars (`server_addr`, `remote_path`, and optional credentials).
 
@@ -897,6 +897,8 @@ Commands are executed through an async channel-based architecture:
 3. Executes the command and waits for the prompt
 4. Returns the output with success status
 
+Mode names supplied by callers are normalized to lowercase internally, so `"Enable"`, `"enable"`, and `"ENABLE"` target the same FSM state.
+
 ## Lifecycle Hooks
 
 `rneter` now supports declarative lifecycle hooks through `DeviceHandlerConfig.hooks`:
@@ -910,7 +912,7 @@ Hooks reuse `SessionOperation`, so they can run either a single command or a com
 
 Built-in templates can ship sensible defaults. For example:
 
-- Cisco runs `terminal length 0` after connect
+- Cisco/ASA runs `terminal pager 0` after connect
 - Juniper runs `set cli screen-length 0` after connect
 
 Hook output does not get merged into the parent command result, but hook lifecycle events are recorded by the session recorder.
@@ -925,12 +927,13 @@ The autodetect result is a ranked report, not a single opaque answer:
 - `candidates`
 - `raw_facts`
 
-This makes it easier to understand why a device looks like Cisco, Juniper, Huawei, H3C, Linux, Arista, Fortinet, Palo Alto, or Check Point, and to debug ambiguous results in mixed environments.
+This makes it easier to understand why a device looks like Cisco, Juniper, Huawei, H3C, Linux, Arista, Aruba AOS-CX, Cisco ASA/NX-OS, Dell OS10, Ruijie, ZTE ZXROS, Fortinet, Palo Alto, or Check Point, and to debug ambiguous results in mixed environments.
 
 Current scope:
 
 - SSH only
-- built-in templates currently covered: `cisco`, `juniper`, `huawei`, `h3c`, `linux`, `arista`, `fortinet`, `paloalto`, `checkpoint`
+- built-in templates currently covered: `cisco`, `juniper`, `huawei`, `h3c`, `linux`, `hillstone`, `arista`, `aruba_aoscx`, `cisco_asa`, `cisco_nxos`, `dell_os10`, `fortinet`, `paloalto`, `ruijie`, `zte_zxros`, `checkpoint`
+- `cisco_asa` is exposed as a distinct template name and autodetect target, but it currently reuses the proven `cisco` handler behavior
 - probe-driven scoring using initial prompt/output plus cached read-only probe commands
 
 How to read the diagnostics:
@@ -1062,29 +1065,39 @@ The library is designed to work with any SSH-enabled network device and Linux se
 
 **Network Devices:**
 
-- Cisco IOS/IOS-XE/IOS-XR devices
-- Juniper JunOS devices
-- Arista EOS devices
-- Huawei VRP devices
-- H3C Comware devices
-- Hillstone SG devices
-- Array Networks APV devices
-- Fortinet FortiGate firewalls
-- Palo Alto Networks PA firewalls
-- Check Point Security Gateway
-- Topsec NGFW firewalls
-- Venustech USG devices
-- DPTech firewall devices
-- Chaitin SafeLine gateways
-- QiAnXin NSG gateways
-- Maipu network devices
+| Template name | Vendor / platform         | Primary modes                            | Notes                                                                         |
+| ------------- | ------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
+| `cisco`       | Cisco IOS / IOS-XE        | `Login`, `Enable`, `Config`              | Also used as the proven handler behavior for `cisco_asa`                      |
+| `cisco_asa`   | Cisco ASA                 | `Login`, `Enable`, `Config`              | Distinct template name and autodetect target; reuses `cisco` handler behavior |
+| `cisco_nxos`  | Cisco NX-OS               | `Login`, `Enable`, `Config`              | Cisco-like mode transitions with NX-OS paging defaults                        |
+| `juniper`     | Juniper JunOS             | `Enable`, `Config`                       | Supports JunOS edit prompt prefix handling                                    |
+| `arista`      | Arista EOS                | `Login`, `Enable`, `Config`              | Cisco-like template for EOS                                                   |
+| `aruba_aoscx` | Aruba AOS-CX              | `Login`, `Enable`, `Config`              | Uses AOS-CX paging defaults                                                   |
+| `dell_os10`   | Dell OS10                 | `Login`, `Enable`, `Config`              | Cisco-like template for Dell OS10                                             |
+| `ruijie`      | Ruijie RGOS               | `Login`, `Enable`, `Config`              | Includes password-change decline prompt handling                              |
+| `zte_zxros`   | ZTE ZXROS                 | `Login`, `Enable`, `Config`              | Cisco-like template for ZTE ZXROS                                             |
+| `huawei`      | Huawei VRP                | `Enable`, `Config`                       | Uses `system-view` / `return` transitions                                     |
+| `h3c`         | H3C Comware               | `Enable`, `Config`                       | Comware-style angle/square-bracket prompts                                    |
+| `hillstone`   | Hillstone SG / StoneOS    | `Enable`, `Config`                       | Includes save confirmation prompts                                            |
+| `array`       | Array Networks APV        | `Login`, `Enable`, `Config`, vsite modes | Supports system/context mode variants                                         |
+| `fortinet`    | Fortinet FortiGate        | `Enable`, vdom modes                     | Basic FortiGate / VDOM-oriented state model                                   |
+| `paloalto`    | Palo Alto Networks PAN-OS | `Enable`, `Config`                       | Operational and config prompts                                                |
+| `checkpoint`  | Check Point Gaia          | `Enable`                                 | Read/operational template                                                     |
+| `topsec`      | Topsec NGFW               | `Enable`                                 | Basic operational template                                                    |
+| `venustech`   | Venustech USG             | `Login`, `Enable`, `Config`              | Cisco-like firewall template                                                  |
+| `dptech`      | DPTech firewall           | `Enable`, `Config`                       | H3C-like prompt style                                                         |
+| `chaitin`     | Chaitin SafeLine          | `Login`, `Enable`, `Config`              | Cisco-like gateway template                                                   |
+| `qianxin`     | QiAnXin NSG               | `Enable`, `Config`                       | Security gateway template                                                     |
+| `maipu`       | Maipu network devices     | `Login`, `Enable`, `Config`              | Cisco-like template for Maipu devices                                         |
 
 **Linux Servers:**
 
-- Generic Linux distributions (Ubuntu, Debian, CentOS, RHEL, etc.)
-- Supports multiple privilege escalation methods (sudo -i, sudo -s, su, direct root)
-- Intelligent prompt detection with customizable patterns
-- Transaction-based configuration management with rollback support
+| Template name | Scope                       | Notes                                                             |
+| ------------- | --------------------------- | ----------------------------------------------------------------- |
+| `linux`       | Generic Linux distributions | Ubuntu, Debian, CentOS, RHEL, and other shell-based Linux hosts   |
+| `linux`       | Privilege escalation        | Supports `sudo -i`, `sudo -s`, `su`, and direct root sessions     |
+| `linux`       | Prompt handling             | Supports intelligent prompt detection with customizable patterns  |
+| `linux`       | Transactions                | Supports transaction-based configuration management with rollback |
 
 ## Configuration
 

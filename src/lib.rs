@@ -80,8 +80,9 @@ pub mod templates;
 
 pub use session::{HookAction, HookFailurePolicy, SessionHooks};
 pub use templates::{
-    AutodetectedConnection, DetectConfidence, DetectConnectPolicy, DetectFactSource,
-    DetectFactKind, DetectSnapshot, TemplateDetectCandidate, TemplateDetectFact, TemplateDetectProfile,
-    TemplateDetectReport, TemplateProbe, TemplateProbeRule, autodetect_and_connect_with_context,
-    autodetect_with_context, score_builtin_templates, score_detect_profiles,
+    AutodetectedConnection, DetectConfidence, DetectConnectPolicy, DetectFactKind,
+    DetectFactSource, DetectSnapshot, TemplateDetectCandidate, TemplateDetectFact,
+    TemplateDetectProfile, TemplateDetectReport, TemplateProbe, TemplateProbeRule,
+    autodetect_and_connect_with_context, autodetect_with_context, score_builtin_templates,
+    score_detect_profiles,
 };

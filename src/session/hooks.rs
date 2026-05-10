@@ -104,10 +104,7 @@ fn normalize_state_hook_map(
     normalized
 }
 
-fn state_actions<'a>(
-    map: &'a HashMap<String, Vec<HookAction>>,
-    state: &str,
-) -> &'a [HookAction] {
+fn state_actions<'a>(map: &'a HashMap<String, Vec<HookAction>>, state: &str) -> &'a [HookAction] {
     map.get(state)
         .or_else(|| map.get(&state.to_ascii_lowercase()))
         .or_else(|| {

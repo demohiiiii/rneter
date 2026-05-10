@@ -4,9 +4,13 @@
 
 mod arista;
 mod array;
+mod aruba_aoscx;
 mod chaitin;
 mod checkpoint;
 mod cisco;
+mod cisco_asa;
+mod cisco_nxos;
+mod dell_os10;
 mod dptech;
 mod fortinet;
 mod h3c;
@@ -16,19 +20,29 @@ mod juniper;
 mod maipu;
 mod paloalto;
 mod qianxin;
+mod ruijie;
 mod topsec;
 mod venustech;
+mod zte_zxros;
 
 pub use arista::arista;
 pub use arista::arista_config;
 pub use array::array;
 pub use array::array_config;
+pub use aruba_aoscx::aruba_aoscx;
+pub use aruba_aoscx::aruba_aoscx_config;
 pub use chaitin::chaitin;
 pub use chaitin::chaitin_config;
 pub use checkpoint::checkpoint;
 pub use checkpoint::checkpoint_config;
 pub use cisco::cisco;
 pub use cisco::cisco_config;
+pub use cisco_asa::cisco_asa;
+pub use cisco_asa::cisco_asa_config;
+pub use cisco_nxos::cisco_nxos;
+pub use cisco_nxos::cisco_nxos_config;
+pub use dell_os10::dell_os10;
+pub use dell_os10::dell_os10_config;
 pub use dptech::dptech;
 pub use dptech::dptech_config;
 pub use fortinet::fortinet;
@@ -47,10 +61,14 @@ pub use paloalto::paloalto;
 pub use paloalto::paloalto_config;
 pub use qianxin::qianxin;
 pub use qianxin::qianxin_config;
+pub use ruijie::ruijie;
+pub use ruijie::ruijie_config;
 pub use topsec::topsec;
 pub use topsec::topsec_config;
 pub use venustech::venustech;
 pub use venustech::venustech_config;
+pub use zte_zxros::zte_zxros;
+pub use zte_zxros::zte_zxros_config;
 
 #[cfg(test)]
 mod tests {
@@ -111,6 +129,19 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
+                name: "aruba_aoscx",
+                builder: aruba_aoscx,
+                config_builder: aruba_aoscx_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
                 name: "chaitin",
                 builder: chaitin,
                 config_builder: chaitin_config,
@@ -135,6 +166,45 @@ mod tests {
                 name: "cisco",
                 builder: cisco,
                 config_builder: cisco_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
+                name: "cisco_asa",
+                builder: cisco_asa,
+                config_builder: cisco_asa_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
+                name: "cisco_nxos",
+                builder: cisco_nxos,
+                config_builder: cisco_nxos_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
+                name: "dell_os10",
+                builder: dell_os10,
+                config_builder: dell_os10_config,
                 expected_states: &["login", "enable", "config"],
                 expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[
@@ -246,6 +316,19 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
+                name: "ruijie",
+                builder: ruijie,
+                config_builder: ruijie_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
                 name: "topsec",
                 builder: topsec,
                 config_builder: topsec_config,
@@ -257,6 +340,19 @@ mod tests {
                 name: "venustech",
                 builder: venustech,
                 config_builder: venustech_config,
+                expected_states: &["login", "enable", "config"],
+                expected_prompt_order: &["Login", "Enable", "Config"],
+                expected_capabilities: &[
+                    TemplateCapability::LoginMode,
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
+                ],
+            },
+            NetworkTemplateCase {
+                name: "zte_zxros",
+                builder: zte_zxros,
+                config_builder: zte_zxros_config,
                 expected_states: &["login", "enable", "config"],
                 expected_prompt_order: &["Login", "Enable", "Config"],
                 expected_capabilities: &[

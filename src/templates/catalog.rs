@@ -1,5 +1,5 @@
-use crate::error::ConnectError;
 use super::detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
+use crate::error::ConnectError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,10 @@ pub const BUILTIN_TEMPLATES: &[&str] = &[
     "array",
     "linux",
     "arista",
+    "aruba_aoscx",
+    "cisco_asa",
+    "cisco_nxos",
+    "dell_os10",
     "fortinet",
     "paloalto",
     "topsec",
@@ -21,6 +25,8 @@ pub const BUILTIN_TEMPLATES: &[&str] = &[
     "chaitin",
     "qianxin",
     "maipu",
+    "ruijie",
+    "zte_zxros",
     "checkpoint",
 ];
 
@@ -74,7 +80,11 @@ fn cisco_detect_profile() -> TemplateDetectProfile {
                 r"Cisco IOS Software|Cisco Internetwork Operating System Software|Cisco IOS XE Software|Cisco Adaptive Security Appliance|Cisco ASA",
                 95,
             )],
-            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
         )],
     }
 }
@@ -112,7 +122,10 @@ fn h3c_detect_profile() -> TemplateDetectProfile {
         initial_rules: vec![rule(r"^<[^>]+>\s*$", 15), rule(r"^\[[^\]]+\]\s*$", 15)],
         probes: vec![probe_with_errors(
             "display version",
-            vec![rule(r"H3C Comware Software|HPE Comware|HP Comware|Comware Software", 99)],
+            vec![rule(
+                r"H3C Comware Software|HPE Comware|HP Comware|Comware Software",
+                99,
+            )],
             vec![r"Unrecognized command", r"Invalid input", r"Error:"],
         )],
     }
@@ -144,8 +157,15 @@ fn hillstone_detect_profile() -> TemplateDetectProfile {
         initial_rules: vec![rule(r"^[A-Za-z0-9._-]+#\s*$", 10)],
         probes: vec![probe_with_errors(
             "show version",
-            vec![rule(r"Hillstone Networks StoneOS software|StoneOS software", 99)],
-            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+            vec![rule(
+                r"Hillstone Networks StoneOS software|StoneOS software",
+                99,
+            )],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
         )],
     }
 }
@@ -156,7 +176,71 @@ fn arista_detect_profile() -> TemplateDetectProfile {
         probes: vec![probe_with_errors(
             "show version",
             vec![rule(r"Arista|EOS", 90)],
-            vec![r"Invalid input", r"Unknown command", r"Unrecognized command"],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn aruba_aoscx_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"ArubaOS-CX|AOS-CX|Aruba CX", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn cisco_asa_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Cisco Adaptive Security Appliance|Cisco ASA", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn cisco_nxos_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Cisco Nexus Operating System|Cisco NX-OS|NX-OS", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn dell_os10_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Dell EMC Networking OS10|SmartFabric OS10|OS10", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
         )],
     }
 }
@@ -179,6 +263,36 @@ fn paloalto_detect_profile() -> TemplateDetectProfile {
             "show system info",
             vec![rule(r"PAN-OS|sw-version|model:\s+PA-", 90)],
             vec![r"Invalid syntax", r"Unknown command", r"command not found"],
+        )],
+    }
+}
+
+fn ruijie_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Ruijie|RGOS", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn zte_zxros_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"ZTE|ZXROS|ZXR10", 99)],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
         )],
     }
 }
@@ -295,6 +409,58 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: Some(arista_detect_profile()),
         },
+        "aruba_aoscx" => TemplateMetadata {
+            name: "aruba_aoscx".to_string(),
+            vendor: "Aruba".to_string(),
+            family: "AOS-CX".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(aruba_aoscx_detect_profile()),
+        },
+        "cisco_asa" => TemplateMetadata {
+            name: "cisco_asa".to_string(),
+            vendor: "Cisco".to_string(),
+            family: "ASA".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(cisco_asa_detect_profile()),
+        },
+        "cisco_nxos" => TemplateMetadata {
+            name: "cisco_nxos".to_string(),
+            vendor: "Cisco".to_string(),
+            family: "NX-OS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(cisco_nxos_detect_profile()),
+        },
+        "dell_os10" => TemplateMetadata {
+            name: "dell_os10".to_string(),
+            vendor: "Dell".to_string(),
+            family: "OS10".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(dell_os10_detect_profile()),
+        },
         "fortinet" => TemplateMetadata {
             name: "fortinet".to_string(),
             vendor: "Fortinet".to_string(),
@@ -382,6 +548,32 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::InteractiveInput,
             ],
             detect_profile: None,
+        },
+        "ruijie" => TemplateMetadata {
+            name: "ruijie".to_string(),
+            vendor: "Ruijie".to_string(),
+            family: "RGOS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(ruijie_detect_profile()),
+        },
+        "zte_zxros" => TemplateMetadata {
+            name: "zte_zxros".to_string(),
+            vendor: "ZTE".to_string(),
+            family: "ZXROS".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(zte_zxros_detect_profile()),
         },
         "checkpoint" => TemplateMetadata {
             name: "checkpoint".to_string(),
@@ -476,9 +668,11 @@ mod tests {
     #[test]
     fn builtin_detect_profiles_include_error_patterns_for_probe_commands() {
         let cisco = detect_profile_by_name("cisco").expect("cisco detect profile");
-        assert!(cisco
-            .probes
-            .iter()
-            .any(|probe| !probe.error_patterns.is_empty()));
+        assert!(
+            cisco
+                .probes
+                .iter()
+                .any(|probe| !probe.error_patterns.is_empty())
+        );
     }
 }

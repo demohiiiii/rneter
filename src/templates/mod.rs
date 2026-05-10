@@ -22,24 +22,26 @@ pub use command_flow_template::{
     CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
     CommandFlowTemplateVarKind,
 };
-pub use detect::{
-    AutodetectedConnection, DetectConfidence, DetectConnectPolicy, DetectFactSource,
-    DetectFactKind, DetectSnapshot, TemplateDetectCandidate, TemplateDetectFact, TemplateDetectReport,
-    autodetect_and_connect_with_context, autodetect_with_context, score_builtin_templates,
-    score_detect_profiles,
-};
 pub(crate) use detect::summarize_detect_log_text;
+pub use detect::{
+    AutodetectedConnection, DetectConfidence, DetectConnectPolicy, DetectFactKind,
+    DetectFactSource, DetectSnapshot, TemplateDetectCandidate, TemplateDetectFact,
+    TemplateDetectReport, autodetect_and_connect_with_context, autodetect_with_context,
+    score_builtin_templates, score_detect_profiles,
+};
 pub use detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 pub use linux::{
     CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,
     linux_handler_config, linux_with_config,
 };
 pub use network::{
-    arista, arista_config, array, array_config, chaitin, chaitin_config, checkpoint,
-    checkpoint_config, cisco, cisco_config, dptech, dptech_config, fortinet, fortinet_config, h3c,
-    h3c_config, hillstone, hillstone_config, huawei, huawei_config, juniper, juniper_config, maipu,
-    maipu_config, paloalto, paloalto_config, qianxin, qianxin_config, topsec, topsec_config,
-    venustech, venustech_config,
+    arista, arista_config, array, array_config, aruba_aoscx, aruba_aoscx_config, chaitin,
+    chaitin_config, checkpoint, checkpoint_config, cisco, cisco_asa, cisco_asa_config,
+    cisco_config, cisco_nxos, cisco_nxos_config, dell_os10, dell_os10_config, dptech,
+    dptech_config, fortinet, fortinet_config, h3c, h3c_config, hillstone, hillstone_config, huawei,
+    huawei_config, juniper, juniper_config, maipu, maipu_config, paloalto, paloalto_config,
+    qianxin, qianxin_config, ruijie, ruijie_config, topsec, topsec_config, venustech,
+    venustech_config, zte_zxros, zte_zxros_config,
 };
 pub use registry::{
     available_detect_profiles, by_name, by_name_config, detect_profile_by_name,

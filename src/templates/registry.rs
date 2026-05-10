@@ -5,9 +5,11 @@ use crate::templates::TemplateDetectProfile;
 use super::catalog::BUILTIN_TEMPLATES;
 use super::linux::{LinuxTemplateConfig, linux_handler_config};
 use super::network::{
-    arista_config, array_config, chaitin_config, checkpoint_config, cisco_config, dptech_config,
+    arista_config, array_config, aruba_aoscx_config, chaitin_config, checkpoint_config,
+    cisco_asa_config, cisco_config, cisco_nxos_config, dell_os10_config, dptech_config,
     fortinet_config, h3c_config, hillstone_config, huawei_config, juniper_config, maipu_config,
-    paloalto_config, qianxin_config, topsec_config, venustech_config,
+    paloalto_config, qianxin_config, ruijie_config, topsec_config, venustech_config,
+    zte_zxros_config,
 };
 
 /// Creates a built-in template by name (case-insensitive).
@@ -26,6 +28,10 @@ pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
         "array" => Ok(array_config()),
         "linux" => Ok(linux_handler_config(LinuxTemplateConfig::default())),
         "arista" => Ok(arista_config()),
+        "aruba_aoscx" => Ok(aruba_aoscx_config()),
+        "cisco_asa" => Ok(cisco_asa_config()),
+        "cisco_nxos" => Ok(cisco_nxos_config()),
+        "dell_os10" => Ok(dell_os10_config()),
         "fortinet" => Ok(fortinet_config()),
         "paloalto" => Ok(paloalto_config()),
         "topsec" => Ok(topsec_config()),
@@ -34,6 +40,8 @@ pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
         "chaitin" => Ok(chaitin_config()),
         "qianxin" => Ok(qianxin_config()),
         "maipu" => Ok(maipu_config()),
+        "ruijie" => Ok(ruijie_config()),
+        "zte_zxros" => Ok(zte_zxros_config()),
         "checkpoint" => Ok(checkpoint_config()),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
@@ -50,7 +58,9 @@ pub fn detect_profile_by_name(name: &str) -> Option<TemplateDetectProfile> {
 pub fn available_detect_profiles() -> Vec<(String, TemplateDetectProfile)> {
     BUILTIN_TEMPLATES
         .iter()
-        .filter_map(|name| detect_profile_by_name(name).map(|profile| ((*name).to_string(), profile)))
+        .filter_map(|name| {
+            detect_profile_by_name(name).map(|profile| ((*name).to_string(), profile))
+        })
         .collect()
 }
 

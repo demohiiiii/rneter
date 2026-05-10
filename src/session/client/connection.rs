@@ -97,7 +97,11 @@ impl SharedSshClient {
 
         let before_disconnect_hooks = self.hooks.before_disconnect.clone();
         if let Err(error) = self
-            .run_hook_actions(HookTrigger::BeforeDisconnect, &before_disconnect_hooks, None)
+            .run_hook_actions(
+                HookTrigger::BeforeDisconnect,
+                &before_disconnect_hooks,
+                None,
+            )
             .await
         {
             debug!("before_disconnect hook failure: {error}");
@@ -446,7 +450,10 @@ impl SharedSshClient {
                 trigger: trigger.label().to_string(),
                 hook_name: action.name.clone(),
                 state: trigger.state().map(str::to_string),
-                output_summary: action.record_output.then(|| hook_output_summary(&output)).flatten(),
+                output_summary: action
+                    .record_output
+                    .then(|| hook_output_summary(&output))
+                    .flatten(),
             });
         }
 

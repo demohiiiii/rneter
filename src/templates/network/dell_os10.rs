@@ -1,0 +1,54 @@
+use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
+use crate::error::ConnectError;
+use crate::session::{Command, HookAction, SessionHooks, SessionOperation};
+use std::collections::HashMap;
+
+pub fn dell_os10_config() -> DeviceHandlerConfig {
+    let write = vec![input_rule(
+        "EnablePassword",
+        true,
+        "EnablePassword",
+        true,
+        &[r"(?i)^\r{0,1}(Enable )?Password:"],
+    )];
+
+    DeviceHandlerConfig {
+        prompt: vec![
+            prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
+            prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
+            prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+        ],
+        write,
+        more_regex: vec![r"\s*--More--\s*".to_string()],
+        error_regex: vec![
+            r"% Error".to_string(),
+            r"% Invalid".to_string(),
+            r"% Ambiguous".to_string(),
+            r"% Incomplete".to_string(),
+            r"^Error:.+".to_string(),
+        ],
+        edges: vec![
+            transition_rule("Login", "enable", "Enable", false, false),
+            transition_rule("Enable", "configure terminal", "Config", false, false),
+            transition_rule("Config", "exit", "Enable", true, false),
+            transition_rule("Enable", "disable", "Login", true, false),
+        ],
+        dyn_param: HashMap::new(),
+        hooks: SessionHooks {
+            after_connect: vec![HookAction::new(
+                "disable-paging",
+                SessionOperation::from(Command {
+                    mode: "Enable".to_string(),
+                    command: "terminal length 0".to_string(),
+                    ..Command::default()
+                }),
+            )],
+            ..SessionHooks::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn dell_os10() -> Result<DeviceHandler, ConnectError> {
+    dell_os10_config().build()
+}
