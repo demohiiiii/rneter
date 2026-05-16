@@ -6,8 +6,10 @@ use tokio::sync::mpsc;
 use log::{debug, trace};
 use regex::Regex;
 
+use super::catalog::BUILTIN_TEMPLATES;
 use super::detect_profile::TemplateDetectProfile;
-use super::{available_detect_profiles, by_name};
+use super::{by_name, by_name_config, detect_profile_by_name};
+use crate::device::DeviceHandlerConfig;
 use crate::error::ConnectError;
 use crate::session::{CmdJob, ConnectionRequest, DetectRequest, ExecutionContext, MANAGER};
 
@@ -145,6 +147,29 @@ impl AutodetectedConnection {
             report,
             sender,
         })
+    }
+}
+
+/// One autodetect-capable template definition supplied by the caller.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DetectTemplateDefinition {
+    pub template_name: String,
+    pub handler_config: DeviceHandlerConfig,
+    pub detect_profile: TemplateDetectProfile,
+}
+
+impl DetectTemplateDefinition {
+    /// Build one autodetect-capable template definition from a handler config and detect profile.
+    pub fn new(
+        template_name: impl Into<String>,
+        handler_config: DeviceHandlerConfig,
+        detect_profile: TemplateDetectProfile,
+    ) -> Self {
+        Self {
+            template_name: template_name.into(),
+            handler_config,
+            detect_profile,
+        }
     }
 }
 
@@ -373,27 +398,25 @@ pub fn score_detect_profiles(
 
 /// Score the built-in detect profiles against one collected snapshot.
 pub fn score_builtin_templates(snapshot: &DetectSnapshot) -> TemplateDetectReport {
-    score_detect_profiles(snapshot, available_detect_profiles())
+    score_detect_profiles(snapshot, builtin_detect_profiles())
 }
 
-/// Run SSH-based autodetect and return ranked built-in template candidates.
-pub async fn autodetect_with_context(
+/// Collect one raw detect snapshot with caller-supplied probe commands.
+pub async fn collect_detect_snapshot_with_context(
     request: DetectRequest,
     context: ExecutionContext,
-) -> Result<TemplateDetectReport, ConnectError> {
-    let profiles = available_detect_profiles();
-    let probe_commands = profiles
-        .iter()
-        .flat_map(|(_, profile)| profile.probes.iter().map(|probe| probe.command.clone()))
+    probe_commands: Vec<String>,
+) -> Result<DetectSnapshot, ConnectError> {
+    let probe_commands = probe_commands
+        .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
 
     debug!(
-        "autodetect start target={} port={} templates={} probes={}",
+        "autodetect snapshot collection start target={} port={} probes={}",
         request.addr,
         request.port,
-        profiles.len(),
         probe_commands.len()
     );
 
@@ -408,7 +431,115 @@ pub async fn autodetect_with_context(
         snapshot.probe_outputs.len()
     );
 
+    Ok(snapshot)
+}
+
+/// Run SSH-based autodetect against caller-supplied detect profiles.
+pub async fn autodetect_with_profiles_and_context(
+    request: DetectRequest,
+    context: ExecutionContext,
+    profiles: Vec<(String, TemplateDetectProfile)>,
+) -> Result<TemplateDetectReport, ConnectError> {
+    let probe_commands = collect_probe_commands(&profiles);
+
+    debug!(
+        "autodetect start target={} port={} templates={} probes={}",
+        request.addr,
+        request.port,
+        profiles.len(),
+        probe_commands.len()
+    );
+
+    let snapshot = collect_detect_snapshot_with_context(request, context, probe_commands).await?;
+
     Ok(score_detect_profiles(&snapshot, profiles))
+}
+
+/// Run SSH-based autodetect against caller-supplied template definitions.
+pub async fn autodetect_with_templates_and_context(
+    request: DetectRequest,
+    context: ExecutionContext,
+    templates: Vec<DetectTemplateDefinition>,
+) -> Result<TemplateDetectReport, ConnectError> {
+    autodetect_with_profiles_and_context(request, context, profiles_from_templates(&templates))
+        .await
+}
+
+/// Run SSH-based autodetect against built-in templates plus caller-supplied definitions.
+///
+/// Caller-supplied templates override built-in definitions when `template_name`
+/// matches case-insensitively.
+pub async fn autodetect_with_builtin_and_templates_and_context(
+    request: DetectRequest,
+    context: ExecutionContext,
+    templates: Vec<DetectTemplateDefinition>,
+) -> Result<TemplateDetectReport, ConnectError> {
+    autodetect_with_templates_and_context(
+        request,
+        context,
+        merge_with_builtin_detect_templates(templates),
+    )
+    .await
+}
+
+/// Run SSH-based autodetect and return ranked built-in template candidates.
+pub async fn autodetect_with_context(
+    request: DetectRequest,
+    context: ExecutionContext,
+) -> Result<TemplateDetectReport, ConnectError> {
+    autodetect_with_profiles_and_context(request, context, builtin_detect_profiles()).await
+}
+
+/// Run autodetect against caller-supplied templates, enforce a confidence policy,
+/// then connect using the winning handler config.
+pub async fn autodetect_and_connect_with_templates_and_context(
+    request: DetectRequest,
+    enable_password: Option<String>,
+    context: ExecutionContext,
+    policy: DetectConnectPolicy,
+    templates: Vec<DetectTemplateDefinition>,
+) -> Result<AutodetectedConnection, ConnectError> {
+    let report =
+        autodetect_with_templates_and_context(request.clone(), context.clone(), templates.clone())
+            .await?;
+    let best = select_best_detected_template(&report, policy)?;
+    debug!(
+        "autodetect selected template='{}' score={} confidence={:?}; connecting",
+        best.template_name, best.score, best.confidence
+    );
+    let connection_request = build_detected_connection_request_from_templates(
+        request,
+        enable_password,
+        &best,
+        &templates,
+    )?;
+    let sender = MANAGER
+        .get_with_context(connection_request, context)
+        .await?;
+
+    AutodetectedConnection::new(sender, report)
+}
+
+/// Run autodetect against built-in templates plus caller-supplied definitions,
+/// then connect using the winning handler config.
+///
+/// Caller-supplied templates override built-in definitions when `template_name`
+/// matches case-insensitively.
+pub async fn autodetect_and_connect_with_builtin_and_templates_and_context(
+    request: DetectRequest,
+    enable_password: Option<String>,
+    context: ExecutionContext,
+    policy: DetectConnectPolicy,
+    templates: Vec<DetectTemplateDefinition>,
+) -> Result<AutodetectedConnection, ConnectError> {
+    autodetect_and_connect_with_templates_and_context(
+        request,
+        enable_password,
+        context,
+        policy,
+        merge_with_builtin_detect_templates(templates),
+    )
+    .await
 }
 
 /// Run autodetect, enforce a minimum confidence policy, then connect using the best template.
@@ -418,18 +549,14 @@ pub async fn autodetect_and_connect_with_context(
     context: ExecutionContext,
     policy: DetectConnectPolicy,
 ) -> Result<AutodetectedConnection, ConnectError> {
-    let report = autodetect_with_context(request.clone(), context.clone()).await?;
-    let best = select_best_detected_template(&report, policy)?;
-    debug!(
-        "autodetect selected template='{}' score={} confidence={:?}; connecting",
-        best.template_name, best.score, best.confidence
-    );
-    let connection_request = build_detected_connection_request(request, enable_password, &best)?;
-    let sender = MANAGER
-        .get_with_context(connection_request, context)
-        .await?;
-
-    AutodetectedConnection::new(sender, report)
+    autodetect_and_connect_with_templates_and_context(
+        request,
+        enable_password,
+        context,
+        policy,
+        builtin_detect_templates(),
+    )
+    .await
 }
 
 fn select_best_detected_template(
@@ -477,6 +604,102 @@ fn build_detected_connection_request(
     ))
 }
 
+fn build_detected_connection_request_from_templates(
+    request: DetectRequest,
+    enable_password: Option<String>,
+    best: &TemplateDetectCandidate,
+    templates: &[DetectTemplateDefinition],
+) -> Result<ConnectionRequest, ConnectError> {
+    let template = templates
+        .iter()
+        .find(|template| {
+            template
+                .template_name
+                .eq_ignore_ascii_case(&best.template_name)
+        })
+        .ok_or_else(|| ConnectError::TemplateNotFound(best.template_name.clone()))?;
+    let handler = template.handler_config.build()?;
+
+    Ok(ConnectionRequest::new(
+        request.user,
+        request.addr,
+        request.port,
+        request.password,
+        enable_password,
+        handler,
+    ))
+}
+
+fn builtin_detect_profiles() -> Vec<(String, TemplateDetectProfile)> {
+    builtin_detect_templates()
+        .into_iter()
+        .map(|template| (template.template_name, template.detect_profile))
+        .collect()
+}
+
+/// Return all built-in autodetect-capable template definitions.
+pub fn builtin_detect_template_definitions() -> Vec<DetectTemplateDefinition> {
+    BUILTIN_TEMPLATES
+        .iter()
+        .filter_map(|name| {
+            let profile = detect_profile_by_name(name)?;
+            let config = by_name_config(name).ok()?;
+            Some(DetectTemplateDefinition::new(*name, config, profile))
+        })
+        .collect()
+}
+
+/// Merge caller-supplied autodetect templates onto the built-in set.
+///
+/// Caller-supplied templates override built-in definitions when `template_name`
+/// matches case-insensitively; otherwise they are appended.
+pub fn merge_with_builtin_detect_templates(
+    templates: Vec<DetectTemplateDefinition>,
+) -> Vec<DetectTemplateDefinition> {
+    let mut merged = builtin_detect_template_definitions();
+
+    for template in templates {
+        if let Some(index) = merged.iter().position(|builtin| {
+            builtin
+                .template_name
+                .eq_ignore_ascii_case(&template.template_name)
+        }) {
+            merged[index] = template;
+        } else {
+            merged.push(template);
+        }
+    }
+
+    merged
+}
+
+fn builtin_detect_templates() -> Vec<DetectTemplateDefinition> {
+    builtin_detect_template_definitions()
+}
+
+fn profiles_from_templates(
+    templates: &[DetectTemplateDefinition],
+) -> Vec<(String, TemplateDetectProfile)> {
+    templates
+        .iter()
+        .map(|template| {
+            (
+                template.template_name.clone(),
+                template.detect_profile.clone(),
+            )
+        })
+        .collect()
+}
+
+fn collect_probe_commands(profiles: &[(String, TemplateDetectProfile)]) -> Vec<String> {
+    profiles
+        .iter()
+        .flat_map(|(_, profile)| profile.probes.iter().map(|probe| probe.command.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn regex_matches(pattern: &str, text: &str) -> bool {
     Regex::new(pattern)
         .map(|regex| regex.is_match(text))
@@ -501,6 +724,7 @@ fn default_probe_error_patterns() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::prompt_rule;
     use crate::templates::by_name as template_by_name;
     use crate::templates::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 
@@ -731,6 +955,122 @@ mod tests {
         assert_eq!(enable_password, None);
         let expected = template_by_name("linux").expect("linux template");
         assert!(handler.is_equivalent(&expected));
+    }
+
+    #[test]
+    fn build_detected_connection_request_from_templates_uses_custom_template() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "custom-linux",
+            90,
+            Vec::new(),
+        )]);
+        let request = DetectRequest::new(
+            "adam".to_string(),
+            "127.0.0.1".to_string(),
+            22,
+            "secret".to_string(),
+        );
+        let custom_config = DeviceHandlerConfig {
+            prompt: vec![prompt_rule("Root", &[r"^custom#\s*$"])],
+            ..DeviceHandlerConfig::default()
+        };
+        let templates = vec![DetectTemplateDefinition::new(
+            "custom-linux",
+            custom_config.clone(),
+            TemplateDetectProfile::default(),
+        )];
+
+        let best = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect("best candidate");
+        let built =
+            build_detected_connection_request_from_templates(request, None, &best, &templates)
+                .expect("connection request should build");
+        let expected = custom_config.build().expect("custom handler");
+
+        assert!(built.handler.is_equivalent(&expected));
+    }
+
+    #[test]
+    fn build_detected_connection_request_from_templates_rejects_missing_template() {
+        let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
+            "custom-linux",
+            90,
+            Vec::new(),
+        )]);
+        let request = DetectRequest::new(
+            "adam".to_string(),
+            "127.0.0.1".to_string(),
+            22,
+            "secret".to_string(),
+        );
+        let best = select_best_detected_template(&report, DetectConnectPolicy::default())
+            .expect("best candidate");
+
+        let err = match build_detected_connection_request_from_templates(request, None, &best, &[])
+        {
+            Ok(_) => panic!("missing custom template should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, ConnectError::TemplateNotFound(_)));
+    }
+
+    #[test]
+    fn merge_with_builtin_detect_templates_appends_new_custom_template() {
+        let merged = merge_with_builtin_detect_templates(vec![DetectTemplateDefinition::new(
+            "custom-linux",
+            DeviceHandlerConfig {
+                prompt: vec![prompt_rule("Root", &[r"^custom#\s*$"])],
+                ..DeviceHandlerConfig::default()
+            },
+            TemplateDetectProfile::default(),
+        )]);
+
+        assert!(
+            merged
+                .iter()
+                .any(|template| template.template_name == "custom-linux")
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|template| template.template_name == "cisco")
+        );
+    }
+
+    #[test]
+    fn merge_with_builtin_detect_templates_overrides_builtin_by_name() {
+        let custom = DetectTemplateDefinition::new(
+            "CiScO",
+            DeviceHandlerConfig {
+                prompt: vec![prompt_rule("Root", &[r"^custom-cisco#\s*$"])],
+                ..DeviceHandlerConfig::default()
+            },
+            TemplateDetectProfile {
+                initial_rules: vec![TemplateProbeRule {
+                    pattern: r"^custom-cisco#\s*$".to_string(),
+                    weight: 42,
+                }],
+                probes: Vec::new(),
+            },
+        );
+
+        let merged = merge_with_builtin_detect_templates(vec![custom]);
+        let cisco = merged
+            .iter()
+            .find(|template| template.template_name.eq_ignore_ascii_case("cisco"))
+            .expect("merged cisco template");
+
+        assert_eq!(cisco.detect_profile.initial_rules.len(), 1);
+        assert_eq!(cisco.detect_profile.initial_rules[0].weight, 42);
+        let expected = DeviceHandlerConfig {
+            prompt: vec![prompt_rule("Root", &[r"^custom-cisco#\s*$"])],
+            ..DeviceHandlerConfig::default()
+        }
+        .build()
+        .expect("expected custom handler");
+        let actual = cisco.handler_config.build().expect("merged custom handler");
+        assert!(actual.is_equivalent(&expected));
     }
 
     #[test]

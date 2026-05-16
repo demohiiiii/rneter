@@ -1000,6 +1000,106 @@ println!("connected with template: {}", connected.template_name);
 # }
 ```
 
+If you want caller-defined autodetect targets, provide your own handler config
+and detect profile:
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::device::DeviceHandlerConfig;
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::{
+    autodetect_with_templates_and_context, DetectTemplateDefinition,
+    TemplateDetectProfile, TemplateProbe, TemplateProbeRule,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let custom = DetectTemplateDefinition::new(
+    "custom_linux",
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Root", &[r"^custom#\\s*$"])],
+        ..DeviceHandlerConfig::default()
+    },
+    TemplateDetectProfile {
+        initial_rules: vec![TemplateProbeRule {
+            pattern: r"^custom#\\s*$".to_string(),
+            weight: 20,
+        }],
+        probes: vec![TemplateProbe {
+            command: "show version".to_string(),
+            rules: vec![TemplateProbeRule {
+                pattern: r"Custom Linux".to_string(),
+                weight: 90,
+            }],
+            error_patterns: Vec::new(),
+        }],
+    },
+);
+
+let report = autodetect_with_templates_and_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+    vec![custom],
+)
+.await?;
+# Ok(())
+# }
+```
+
+If you want built-in autodetect coverage plus your own caller-defined templates,
+use the merge helper directly:
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::device::DeviceHandlerConfig;
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::{
+    autodetect_with_builtin_and_templates_and_context, DetectTemplateDefinition,
+    TemplateDetectProfile, TemplateProbe, TemplateProbeRule,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let custom = DetectTemplateDefinition::new(
+    "custom_linux",
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Root", &[r"^custom#\\s*$"])],
+        ..DeviceHandlerConfig::default()
+    },
+    TemplateDetectProfile {
+        initial_rules: vec![TemplateProbeRule {
+            pattern: r"^custom#\\s*$".to_string(),
+            weight: 20,
+        }],
+        probes: vec![TemplateProbe {
+            command: "show version".to_string(),
+            rules: vec![TemplateProbeRule {
+                pattern: r"Custom Linux".to_string(),
+                weight: 90,
+            }],
+            error_patterns: Vec::new(),
+        }],
+    },
+);
+
+let report = autodetect_with_builtin_and_templates_and_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+    vec![custom],
+)
+.await?;
+# Ok(())
+# }
+```
+
 ## Comparison With Netmiko And Scrapli
 
 If you are coming from [Netmiko](https://github.com/ktbyers/netmiko) or

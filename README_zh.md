@@ -971,6 +971,105 @@ println!("连接使用模板: {}", connected.template_name);
 # }
 ```
 
+如果你希望调用方自己定义 autodetect 目标，也可以直接传入自己的
+`handler_config + detect_profile`：
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::device::DeviceHandlerConfig;
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::{
+    autodetect_with_templates_and_context, DetectTemplateDefinition,
+    TemplateDetectProfile, TemplateProbe, TemplateProbeRule,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let custom = DetectTemplateDefinition::new(
+    "custom_linux",
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Root", &[r"^custom#\\s*$"])],
+        ..DeviceHandlerConfig::default()
+    },
+    TemplateDetectProfile {
+        initial_rules: vec![TemplateProbeRule {
+            pattern: r"^custom#\\s*$".to_string(),
+            weight: 20,
+        }],
+        probes: vec![TemplateProbe {
+            command: "show version".to_string(),
+            rules: vec![TemplateProbeRule {
+                pattern: r"Custom Linux".to_string(),
+                weight: 90,
+            }],
+            error_patterns: Vec::new(),
+        }],
+    },
+);
+
+let report = autodetect_with_templates_and_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+    vec![custom],
+)
+.await?;
+# Ok(())
+# }
+```
+
+如果你希望“内置 autodetect 能力 + 自定义模板”一起跑，可以直接用新的合并入口：
+
+```rust
+use rneter::device::prompt_rule;
+use rneter::device::DeviceHandlerConfig;
+use rneter::session::{DetectRequest, ExecutionContext};
+use rneter::templates::{
+    autodetect_with_builtin_and_templates_and_context, DetectTemplateDefinition,
+    TemplateDetectProfile, TemplateProbe, TemplateProbeRule,
+};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let custom = DetectTemplateDefinition::new(
+    "custom_linux",
+    DeviceHandlerConfig {
+        prompt: vec![prompt_rule("Root", &[r"^custom#\\s*$"])],
+        ..DeviceHandlerConfig::default()
+    },
+    TemplateDetectProfile {
+        initial_rules: vec![TemplateProbeRule {
+            pattern: r"^custom#\\s*$".to_string(),
+            weight: 20,
+        }],
+        probes: vec![TemplateProbe {
+            command: "show version".to_string(),
+            rules: vec![TemplateProbeRule {
+                pattern: r"Custom Linux".to_string(),
+                weight: 90,
+            }],
+            error_patterns: Vec::new(),
+        }],
+    },
+);
+
+let report = autodetect_with_builtin_and_templates_and_context(
+    DetectRequest::new(
+        "admin".to_string(),
+        "192.168.1.1".to_string(),
+        22,
+        "password".to_string(),
+    ),
+    ExecutionContext::default(),
+    vec![custom],
+)
+.await?;
+# Ok(())
+# }
+```
+
 ## 与 Netmiko 和 Scrapli 的对比
 
 如果你之前主要使用 [Netmiko](https://github.com/ktbyers/netmiko) 或
