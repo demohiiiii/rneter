@@ -8,7 +8,7 @@ use regex::Regex;
 
 use super::catalog::BUILTIN_TEMPLATES;
 use super::detect_profile::TemplateDetectProfile;
-use super::{by_name, by_name_config, detect_profile_by_name};
+use super::{by_name_config, detect_profile_by_name};
 use crate::device::DeviceHandlerConfig;
 use crate::error::ConnectError;
 use crate::session::{CmdJob, ConnectionRequest, DetectRequest, ExecutionContext, MANAGER};
@@ -588,22 +588,6 @@ fn select_best_detected_template(
     }
 }
 
-fn build_detected_connection_request(
-    request: DetectRequest,
-    enable_password: Option<String>,
-    best: &TemplateDetectCandidate,
-) -> Result<ConnectionRequest, ConnectError> {
-    let handler = by_name(&best.template_name)?;
-    Ok(ConnectionRequest::new(
-        request.user,
-        request.addr,
-        request.port,
-        request.password,
-        enable_password,
-        handler,
-    ))
-}
-
 fn build_detected_connection_request_from_templates(
     request: DetectRequest,
     enable_password: Option<String>,
@@ -725,7 +709,6 @@ fn default_probe_error_patterns() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::device::prompt_rule;
-    use crate::templates::by_name as template_by_name;
     use crate::templates::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
 
     #[test]
@@ -936,8 +919,13 @@ mod tests {
 
         let best = select_best_detected_template(&report, DetectConnectPolicy::default())
             .expect("best candidate");
-        let built = build_detected_connection_request(request, None, &best)
-            .expect("connection request should build");
+        let built = build_detected_connection_request_from_templates(
+            request,
+            None,
+            &best,
+            &builtin_detect_templates(),
+        )
+        .expect("connection request should build");
 
         let ConnectionRequest {
             user,
@@ -953,7 +941,10 @@ mod tests {
         assert_eq!(port, 22);
         assert_eq!(password, "secret");
         assert_eq!(enable_password, None);
-        let expected = template_by_name("linux").expect("linux template");
+        let expected = by_name_config("linux")
+            .expect("linux config")
+            .build()
+            .expect("linux template");
         assert!(handler.is_equivalent(&expected));
     }
 
