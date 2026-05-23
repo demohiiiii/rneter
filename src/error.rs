@@ -21,6 +21,10 @@ pub enum ConnectError {
     #[error("channel disconnected while waiting for prompt")]
     ChannelDisconnectError,
 
+    /// The SSH channel was disconnected during a specific session stage.
+    #[error("channel disconnected during {stage} for {target}")]
+    ChannelDisconnectStageError { stage: &'static str, target: String },
+
     /// The SSH connection has been closed.
     #[error("connection closed")]
     ConnectClosedError,
@@ -57,9 +61,27 @@ pub enum ConnectError {
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),
 
+    /// An async-ssh2-tokio error occurred during a specific SSH session stage.
+    #[error("async ssh2 error during {stage} for {target}: {source}")]
+    Ssh2StageError {
+        stage: &'static str,
+        target: String,
+        #[source]
+        source: async_ssh2_tokio::Error,
+    },
+
     /// An error occurred in the russh library.
     #[error("russh error: {0}")]
     RusshError(#[from] russh::Error),
+
+    /// A russh error occurred during a specific SSH session stage.
+    #[error("russh error during {stage} for {target}: {source}")]
+    RusshStageError {
+        stage: &'static str,
+        target: String,
+        #[source]
+        source: russh::Error,
+    },
 
     /// Failed to send data through the channel.
     #[error("Failed to send data: {0}")]
@@ -88,4 +110,37 @@ pub enum ConnectError {
     /// An internal server error occurred.
     #[error("Internal server error: {0}")]
     InternalServerError(String),
+}
+
+impl ConnectError {
+    pub(crate) fn ssh2_stage(
+        stage: &'static str,
+        target: impl Into<String>,
+        source: async_ssh2_tokio::Error,
+    ) -> Self {
+        Self::Ssh2StageError {
+            stage,
+            target: target.into(),
+            source,
+        }
+    }
+
+    pub(crate) fn russh_stage(
+        stage: &'static str,
+        target: impl Into<String>,
+        source: russh::Error,
+    ) -> Self {
+        Self::RusshStageError {
+            stage,
+            target: target.into(),
+            source,
+        }
+    }
+
+    pub(crate) fn channel_disconnect_stage(stage: &'static str, target: impl Into<String>) -> Self {
+        Self::ChannelDisconnectStageError {
+            stage,
+            target: target.into(),
+        }
+    }
 }

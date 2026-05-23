@@ -148,6 +148,7 @@ pub struct SharedSshClient {
     sender: Sender<String>,
     recv: Receiver<String>,
     handler: DeviceHandler,
+    device_addr: String,
     prompt: String,
     hooks: SessionHooks,
     in_hook: bool,

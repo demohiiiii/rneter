@@ -155,14 +155,22 @@ impl SharedSshClient {
             security_options.server_check.clone(),
             config,
         )
-        .await?;
+        .await
+        .map_err(|error| ConnectError::ssh2_stage("connect", device_addr.clone(), error))?;
         debug!("{} TCP connection successful", device_addr);
 
-        let mut channel = client.get_channel().await?;
+        let mut channel = client.get_channel().await.map_err(|error| {
+            ConnectError::ssh2_stage("open_channel", device_addr.clone(), error)
+        })?;
         channel
             .request_pty(false, "xterm", 800, 600, 0, 0, &[])
-            .await?;
-        channel.request_shell(false).await?;
+            .await
+            .map_err(|error| {
+                ConnectError::russh_stage("request_pty", device_addr.clone(), error)
+            })?;
+        channel.request_shell(false).await.map_err(|error| {
+            ConnectError::russh_stage("request_shell", device_addr.clone(), error)
+        })?;
         debug!("{} Shell request successful", device_addr);
 
         let (sender_to_shell, mut receiver_from_user) = mpsc::channel::<String>(256);
@@ -308,7 +316,10 @@ impl SharedSshClient {
                         }
                     }
                 } else {
-                    return Err(ConnectError::ChannelDisconnectError);
+                    return Err(ConnectError::channel_disconnect_stage(
+                        "connection_wait_initial_prompt",
+                        device_addr.clone(),
+                    ));
                 }
             }
         })
@@ -330,6 +341,7 @@ impl SharedSshClient {
             client,
             sender: sender_to_shell,
             recv: receiver_from_shell,
+            device_addr: device_addr.clone(),
             hooks: handler.hooks().clone(),
             in_hook: false,
             handler,

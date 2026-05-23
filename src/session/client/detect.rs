@@ -82,6 +82,7 @@ async fn collect_detect_snapshot(
     security_options: &ConnectionSecurityOptions,
     probe_commands: &[String],
 ) -> Result<DetectSnapshot, ConnectError> {
+    let device_addr = request.device_addr();
     debug!(
         "autodetect opening temporary SSH shell target={} port={} probe_commands={}",
         request.addr,
@@ -101,13 +102,21 @@ async fn collect_detect_snapshot(
         security_options.server_check.clone(),
         config,
     )
-    .await?;
+    .await
+    .map_err(|error| ConnectError::ssh2_stage("autodetect_connect", device_addr.clone(), error))?;
 
-    let mut channel = client.get_channel().await?;
+    let mut channel = client.get_channel().await.map_err(|error| {
+        ConnectError::ssh2_stage("autodetect_open_channel", device_addr.clone(), error)
+    })?;
     channel
         .request_pty(false, "xterm", 800, 600, 0, 0, &[])
-        .await?;
-    channel.request_shell(false).await?;
+        .await
+        .map_err(|error| {
+            ConnectError::russh_stage("autodetect_request_pty", device_addr.clone(), error)
+        })?;
+    channel.request_shell(false).await.map_err(|error| {
+        ConnectError::russh_stage("autodetect_request_shell", device_addr.clone(), error)
+    })?;
 
     let mut initial_raw = String::new();
     let prompt = tokio::time::timeout(Duration::from_secs(15), async {
@@ -129,7 +138,10 @@ async fn collect_detect_snapshot(
                     }
                 }
                 Some(ChannelMsg::Eof) | None => {
-                    return Err(ConnectError::ChannelDisconnectError);
+                    return Err(ConnectError::channel_disconnect_stage(
+                        "autodetect_wait_initial_prompt",
+                        device_addr.clone(),
+                    ));
                 }
                 _ => {}
             }
@@ -148,7 +160,16 @@ async fn collect_detect_snapshot(
         }
 
         debug!("autodetect running probe command='{}'", command);
-        channel.data(format!("{command}\n").as_bytes()).await?;
+        channel
+            .data(format!("{command}\n").as_bytes())
+            .await
+            .map_err(|error| {
+                ConnectError::russh_stage(
+                    "autodetect_send_probe_command",
+                    device_addr.clone(),
+                    error,
+                )
+            })?;
         let mut raw = String::new();
         let output = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -171,7 +192,13 @@ async fn collect_detect_snapshot(
                                     command,
                                     summarize_detect_log_text(fragment, 80)
                                 );
-                                channel.data(&b" "[..]).await?;
+                                channel.data(&b" "[..]).await.map_err(|error| {
+                                    ConnectError::russh_stage(
+                                        "autodetect_send_pager_continue",
+                                        device_addr.clone(),
+                                        error,
+                                    )
+                                })?;
                                 continue;
                             }
                             if fragment == prompt {
@@ -187,7 +214,10 @@ async fn collect_detect_snapshot(
                         }
                     }
                     Some(ChannelMsg::Eof) | None => {
-                        return Err(ConnectError::ChannelDisconnectError);
+                        return Err(ConnectError::channel_disconnect_stage(
+                            "autodetect_wait_probe_output",
+                            device_addr.clone(),
+                        ));
                     }
                     _ => {}
                 }

@@ -863,7 +863,10 @@ impl SharedSshClient {
                         }
                     }
                 } else {
-                    return Err(ConnectError::ChannelDisconnectError);
+                    return Err(ConnectError::channel_disconnect_stage(
+                        "command_wait_output",
+                        self.device_addr.clone(),
+                    ));
                 }
             }
         })
