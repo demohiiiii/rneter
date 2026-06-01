@@ -5,30 +5,76 @@ use serde::{Deserialize, Serialize};
 
 /// Built-in template names supported by this crate.
 pub const BUILTIN_TEMPLATES: &[&str] = &[
-    "cisco",
+    "cisco_ios",
+    "cisco_xe",
     "huawei",
-    "h3c",
-    "hillstone",
-    "juniper",
+    "h3c_comware",
+    "hp_comware",
+    "hillstone_stoneos",
+    "juniper_junos",
     "array",
     "linux",
-    "arista",
+    "arista_eos",
     "aruba_aoscx",
     "cisco_asa",
     "cisco_nxos",
     "dell_os10",
     "fortinet",
-    "paloalto",
+    "paloalto_panos",
     "topsec",
     "venustech",
     "dptech",
     "chaitin",
     "qianxin",
     "maipu",
-    "ruijie",
+    "ruijie_os",
     "zte_zxros",
-    "checkpoint",
+    "checkpoint_gaia",
 ];
+
+/// Resolves legacy rneter names and common Netmiko/ntc-template aliases to
+/// the canonical built-in template name exposed by this crate.
+pub(crate) fn canonical_template_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "cisco" | "cisco_ios" => Some("cisco_ios"),
+        "cisco_xe" => Some("cisco_xe"),
+        "huawei" | "huawei_vrp" => Some("huawei"),
+        "h3c" | "h3c_comware" => Some("h3c_comware"),
+        "hp_comware" => Some("hp_comware"),
+        "hillstone" | "hillstone_stoneos" => Some("hillstone_stoneos"),
+        "juniper" | "juniper_junos" => Some("juniper_junos"),
+        "array" => Some("array"),
+        "linux" => Some("linux"),
+        "arista" | "arista_eos" => Some("arista_eos"),
+        "aruba_aoscx" => Some("aruba_aoscx"),
+        "cisco_asa" => Some("cisco_asa"),
+        "cisco_nxos" => Some("cisco_nxos"),
+        "dell_os10" => Some("dell_os10"),
+        "fortinet" => Some("fortinet"),
+        "paloalto" | "paloalto_panos" => Some("paloalto_panos"),
+        "topsec" => Some("topsec"),
+        "venustech" => Some("venustech"),
+        "dptech" => Some("dptech"),
+        "chaitin" => Some("chaitin"),
+        "qianxin" => Some("qianxin"),
+        "maipu" => Some("maipu"),
+        "ruijie" | "ruijie_os" => Some("ruijie_os"),
+        "zte_zxros" => Some("zte_zxros"),
+        "checkpoint" | "checkpoint_gaia" => Some("checkpoint_gaia"),
+        _ => None,
+    }
+}
+
+pub(crate) fn template_names_match(left: &str, right: &str) -> bool {
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+
+    matches!(
+        (canonical_template_name(left), canonical_template_name(right)),
+        (Some(left), Some(right)) if left == right
+    )
+}
 
 /// Capability tags used to describe template compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -71,15 +117,30 @@ fn probe_with_errors(
     }
 }
 
-fn cisco_detect_profile() -> TemplateDetectProfile {
+fn cisco_ios_detect_profile() -> TemplateDetectProfile {
     TemplateDetectProfile {
         initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
         probes: vec![probe_with_errors(
             "show version",
             vec![rule(
-                r"Cisco IOS Software|Cisco Internetwork Operating System Software|Cisco IOS XE Software|Cisco Adaptive Security Appliance|Cisco ASA",
+                r"Cisco IOS Software|Cisco Internetwork Operating System Software",
                 95,
             )],
+            vec![
+                r"Invalid input",
+                r"Unknown command",
+                r"Unrecognized command",
+            ],
+        )],
+    }
+}
+
+fn cisco_xe_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^[^\s<]+>\s*$", 15), rule(r"^[^\s#]+#\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "show version",
+            vec![rule(r"Cisco IOS XE Software", 99)],
             vec![
                 r"Invalid input",
                 r"Unknown command",
@@ -117,15 +178,23 @@ fn huawei_detect_profile() -> TemplateDetectProfile {
     }
 }
 
-fn h3c_detect_profile() -> TemplateDetectProfile {
+fn h3c_comware_detect_profile() -> TemplateDetectProfile {
     TemplateDetectProfile {
         initial_rules: vec![rule(r"^<[^>]+>\s*$", 15), rule(r"^\[[^\]]+\]\s*$", 15)],
         probes: vec![probe_with_errors(
             "display version",
-            vec![rule(
-                r"H3C Comware Software|HPE Comware|HP Comware|Comware Software",
-                99,
-            )],
+            vec![rule(r"H3C Comware Software", 99)],
+            vec![r"Unrecognized command", r"Invalid input", r"Error:"],
+        )],
+    }
+}
+
+fn hp_comware_detect_profile() -> TemplateDetectProfile {
+    TemplateDetectProfile {
+        initial_rules: vec![rule(r"^<[^>]+>\s*$", 15), rule(r"^\[[^\]]+\]\s*$", 15)],
+        probes: vec![probe_with_errors(
+            "display version",
+            vec![rule(r"HPE Comware|HP Comware", 99)],
             vec![r"Unrecognized command", r"Invalid input", r"Error:"],
         )],
     }
@@ -310,10 +379,10 @@ fn checkpoint_detect_profile() -> TemplateDetectProfile {
 
 pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
     let meta = match name {
-        "cisco" => TemplateMetadata {
-            name: "cisco".to_string(),
+        "cisco_ios" => TemplateMetadata {
+            name: "cisco_ios".to_string(),
             vendor: "Cisco".to_string(),
-            family: "IOS/IOS-XE".to_string(),
+            family: "IOS".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![
                 TemplateCapability::LoginMode,
@@ -321,7 +390,20 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::ConfigMode,
                 TemplateCapability::InteractiveInput,
             ],
-            detect_profile: Some(cisco_detect_profile()),
+            detect_profile: Some(cisco_ios_detect_profile()),
+        },
+        "cisco_xe" => TemplateMetadata {
+            name: "cisco_xe".to_string(),
+            vendor: "Cisco".to_string(),
+            family: "IOS-XE".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::LoginMode,
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
+            ],
+            detect_profile: Some(cisco_xe_detect_profile()),
         },
         "huawei" => TemplateMetadata {
             name: "huawei".to_string(),
@@ -335,8 +417,8 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: Some(huawei_detect_profile()),
         },
-        "h3c" => TemplateMetadata {
-            name: "h3c".to_string(),
+        "h3c_comware" => TemplateMetadata {
+            name: "h3c_comware".to_string(),
             vendor: "H3C".to_string(),
             family: "Comware".to_string(),
             template_version: "1.0.0".to_string(),
@@ -344,12 +426,23 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
             ],
-            detect_profile: Some(h3c_detect_profile()),
+            detect_profile: Some(h3c_comware_detect_profile()),
         },
-        "hillstone" => TemplateMetadata {
-            name: "hillstone".to_string(),
+        "hp_comware" => TemplateMetadata {
+            name: "hp_comware".to_string(),
+            vendor: "HP/HPE".to_string(),
+            family: "Comware".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::ConfigMode,
+            ],
+            detect_profile: Some(hp_comware_detect_profile()),
+        },
+        "hillstone_stoneos" => TemplateMetadata {
+            name: "hillstone_stoneos".to_string(),
             vendor: "Hillstone".to_string(),
-            family: "SG".to_string(),
+            family: "StoneOS".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![
                 TemplateCapability::EnableMode,
@@ -358,10 +451,10 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: Some(hillstone_detect_profile()),
         },
-        "juniper" => TemplateMetadata {
-            name: "juniper".to_string(),
+        "juniper_junos" => TemplateMetadata {
+            name: "juniper_junos".to_string(),
             vendor: "Juniper".to_string(),
-            family: "JunOS".to_string(),
+            family: "Junos".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![
                 TemplateCapability::EnableMode,
@@ -396,8 +489,8 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: Some(linux_detect_profile()),
         },
-        "arista" => TemplateMetadata {
-            name: "arista".to_string(),
+        "arista_eos" => TemplateMetadata {
+            name: "arista_eos".to_string(),
             vendor: "Arista".to_string(),
             family: "EOS".to_string(),
             template_version: "1.0.0".to_string(),
@@ -469,10 +562,10 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             capabilities: vec![TemplateCapability::EnableMode],
             detect_profile: Some(fortinet_detect_profile()),
         },
-        "paloalto" => TemplateMetadata {
-            name: "paloalto".to_string(),
+        "paloalto_panos" => TemplateMetadata {
+            name: "paloalto_panos".to_string(),
             vendor: "Palo Alto Networks".to_string(),
-            family: "PA".to_string(),
+            family: "PAN-OS".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![
                 TemplateCapability::EnableMode,
@@ -549,8 +642,8 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: None,
         },
-        "ruijie" => TemplateMetadata {
-            name: "ruijie".to_string(),
+        "ruijie_os" => TemplateMetadata {
+            name: "ruijie_os".to_string(),
             vendor: "Ruijie".to_string(),
             family: "RGOS".to_string(),
             template_version: "1.0.0".to_string(),
@@ -575,10 +668,10 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             ],
             detect_profile: Some(zte_zxros_detect_profile()),
         },
-        "checkpoint" => TemplateMetadata {
-            name: "checkpoint".to_string(),
+        "checkpoint_gaia" => TemplateMetadata {
+            name: "checkpoint_gaia".to_string(),
             vendor: "Check Point".to_string(),
-            family: "Security Gateway".to_string(),
+            family: "Gaia".to_string(),
             template_version: "1.0.0".to_string(),
             capabilities: vec![TemplateCapability::EnableMode],
             detect_profile: Some(checkpoint_detect_profile()),
@@ -603,8 +696,9 @@ pub fn template_catalog() -> Vec<TemplateMetadata> {
 
 /// Returns metadata for one template by name (case-insensitive).
 pub fn template_metadata(name: &str) -> Result<TemplateMetadata, ConnectError> {
-    let key = name.to_ascii_lowercase();
-    metadata_for(&key).ok_or_else(|| ConnectError::TemplateNotFound(name.to_string()))
+    canonical_template_name(name)
+        .and_then(metadata_for)
+        .ok_or_else(|| ConnectError::TemplateNotFound(name.to_string()))
 }
 
 #[cfg(test)]
@@ -615,18 +709,18 @@ mod tests {
     #[test]
     fn available_templates_contains_expected_names() {
         let names = available_templates();
-        assert!(names.contains(&"cisco"));
-        assert!(names.contains(&"juniper"));
+        assert!(names.contains(&"cisco_ios"));
+        assert!(names.contains(&"juniper_junos"));
         assert!(names.contains(&"array"));
         assert!(names.contains(&"linux"));
-        assert!(names.contains(&"arista"));
+        assert!(names.contains(&"arista_eos"));
     }
 
     #[test]
     fn template_catalog_has_metadata_for_all_builtin_templates() {
         let catalog = template_catalog();
         assert_eq!(catalog.len(), BUILTIN_TEMPLATES.len());
-        assert!(catalog.iter().any(|m| m.name == "cisco"));
+        assert!(catalog.iter().any(|m| m.name == "cisco_ios"));
         assert!(catalog.iter().any(|m| m.name == "array"));
         assert!(catalog.iter().any(|m| m.name == "linux"));
     }
@@ -634,8 +728,28 @@ mod tests {
     #[test]
     fn template_metadata_is_case_insensitive() {
         let meta = template_metadata("JuNiPeR").expect("metadata should resolve");
-        assert_eq!(meta.name, "juniper");
+        assert_eq!(meta.name, "juniper_junos");
         assert_eq!(meta.vendor, "Juniper");
+    }
+
+    #[test]
+    fn template_metadata_resolves_legacy_and_ntc_aliases() {
+        assert_eq!(
+            template_metadata("cisco").expect("legacy cisco alias").name,
+            "cisco_ios"
+        );
+        assert_eq!(
+            template_metadata("huawei_vrp")
+                .expect("ntc huawei alias")
+                .name,
+            "huawei"
+        );
+        assert_eq!(
+            template_metadata("paloalto")
+                .expect("legacy panos alias")
+                .name,
+            "paloalto_panos"
+        );
     }
 
     #[test]
@@ -647,16 +761,18 @@ mod tests {
     #[test]
     fn builtin_detect_profiles_exist_for_extended_builtin_templates() {
         for name in [
-            "cisco",
-            "juniper",
+            "cisco_ios",
+            "cisco_xe",
+            "juniper_junos",
             "huawei",
-            "h3c",
-            "hillstone",
+            "h3c_comware",
+            "hp_comware",
+            "hillstone_stoneos",
             "linux",
-            "arista",
+            "arista_eos",
             "fortinet",
-            "paloalto",
-            "checkpoint",
+            "paloalto_panos",
+            "checkpoint_gaia",
         ] {
             assert!(
                 detect_profile_by_name(name).is_some(),

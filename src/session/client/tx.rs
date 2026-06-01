@@ -7,20 +7,20 @@ pub(super) type OperationRunFuture<'a> =
 
 #[derive(Debug)]
 pub(crate) struct OperationRunError {
-    pub error: ConnectError,
+    pub error: Box<ConnectError>,
     pub partial_output: SessionOperationOutput,
 }
 
 impl OperationRunError {
     pub(crate) fn new(error: ConnectError, partial_output: SessionOperationOutput) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             partial_output,
         }
     }
 
     pub(crate) fn into_parts(self) -> (ConnectError, SessionOperationOutput) {
-        (self.error, self.partial_output)
+        (*self.error, self.partial_output)
     }
 }
 

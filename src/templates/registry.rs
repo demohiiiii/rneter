@@ -2,7 +2,7 @@ use crate::device::{DeviceHandler, DeviceHandlerConfig, StateMachineDiagnostics}
 use crate::error::ConnectError;
 use crate::templates::TemplateDetectProfile;
 
-use super::catalog::BUILTIN_TEMPLATES;
+use super::catalog::{BUILTIN_TEMPLATES, canonical_template_name};
 use super::linux::{LinuxTemplateConfig, linux_handler_config};
 use super::network::{
     arista_config, array_config, aruba_aoscx_config, chaitin_config, checkpoint_config,
@@ -19,30 +19,30 @@ pub fn by_name(name: &str) -> Result<DeviceHandler, ConnectError> {
 
 /// Exports the underlying handler configuration for a built-in template by name.
 pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
-    match name.to_ascii_lowercase().as_str() {
-        "cisco" => Ok(cisco_config()),
-        "huawei" => Ok(huawei_config()),
-        "h3c" => Ok(h3c_config()),
-        "hillstone" => Ok(hillstone_config()),
-        "juniper" => Ok(juniper_config()),
-        "array" => Ok(array_config()),
-        "linux" => Ok(linux_handler_config(LinuxTemplateConfig::default())),
-        "arista" => Ok(arista_config()),
-        "aruba_aoscx" => Ok(aruba_aoscx_config()),
-        "cisco_asa" => Ok(cisco_asa_config()),
-        "cisco_nxos" => Ok(cisco_nxos_config()),
-        "dell_os10" => Ok(dell_os10_config()),
-        "fortinet" => Ok(fortinet_config()),
-        "paloalto" => Ok(paloalto_config()),
-        "topsec" => Ok(topsec_config()),
-        "venustech" => Ok(venustech_config()),
-        "dptech" => Ok(dptech_config()),
-        "chaitin" => Ok(chaitin_config()),
-        "qianxin" => Ok(qianxin_config()),
-        "maipu" => Ok(maipu_config()),
-        "ruijie" => Ok(ruijie_config()),
-        "zte_zxros" => Ok(zte_zxros_config()),
-        "checkpoint" => Ok(checkpoint_config()),
+    match canonical_template_name(name) {
+        Some("cisco_ios" | "cisco_xe") => Ok(cisco_config()),
+        Some("huawei") => Ok(huawei_config()),
+        Some("h3c_comware" | "hp_comware") => Ok(h3c_config()),
+        Some("hillstone_stoneos") => Ok(hillstone_config()),
+        Some("juniper_junos") => Ok(juniper_config()),
+        Some("array") => Ok(array_config()),
+        Some("linux") => Ok(linux_handler_config(LinuxTemplateConfig::default())),
+        Some("arista_eos") => Ok(arista_config()),
+        Some("aruba_aoscx") => Ok(aruba_aoscx_config()),
+        Some("cisco_asa") => Ok(cisco_asa_config()),
+        Some("cisco_nxos") => Ok(cisco_nxos_config()),
+        Some("dell_os10") => Ok(dell_os10_config()),
+        Some("fortinet") => Ok(fortinet_config()),
+        Some("paloalto_panos") => Ok(paloalto_config()),
+        Some("topsec") => Ok(topsec_config()),
+        Some("venustech") => Ok(venustech_config()),
+        Some("dptech") => Ok(dptech_config()),
+        Some("chaitin") => Ok(chaitin_config()),
+        Some("qianxin") => Ok(qianxin_config()),
+        Some("maipu") => Ok(maipu_config()),
+        Some("ruijie_os") => Ok(ruijie_config()),
+        Some("zte_zxros") => Ok(zte_zxros_config()),
+        Some("checkpoint_gaia") => Ok(checkpoint_config()),
         _ => Err(ConnectError::TemplateNotFound(name.to_string())),
     }
 }

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use log::{debug, trace};
 use regex::Regex;
 
-use super::catalog::BUILTIN_TEMPLATES;
+use super::catalog::{BUILTIN_TEMPLATES, template_names_match};
 use super::detect_profile::TemplateDetectProfile;
 use super::{by_name_config, detect_profile_by_name};
 use crate::device::DeviceHandlerConfig;
@@ -596,11 +596,7 @@ fn build_detected_connection_request_from_templates(
 ) -> Result<ConnectionRequest, ConnectError> {
     let template = templates
         .iter()
-        .find(|template| {
-            template
-                .template_name
-                .eq_ignore_ascii_case(&best.template_name)
-        })
+        .find(|template| template_names_match(&template.template_name, &best.template_name))
         .ok_or_else(|| ConnectError::TemplateNotFound(best.template_name.clone()))?;
     let handler = template.handler_config.build()?;
 
@@ -636,7 +632,7 @@ pub fn builtin_detect_template_definitions() -> Vec<DetectTemplateDefinition> {
 /// Merge caller-supplied autodetect templates onto the built-in set.
 ///
 /// Caller-supplied templates override built-in definitions when `template_name`
-/// matches case-insensitively; otherwise they are appended.
+/// matches case-insensitively or resolves to the same built-in alias.
 pub fn merge_with_builtin_detect_templates(
     templates: Vec<DetectTemplateDefinition>,
 ) -> Vec<DetectTemplateDefinition> {
@@ -644,11 +640,13 @@ pub fn merge_with_builtin_detect_templates(
 
     for template in templates {
         if let Some(index) = merged.iter().position(|builtin| {
-            builtin
-                .template_name
-                .eq_ignore_ascii_case(&template.template_name)
+            template_names_match(&builtin.template_name, &template.template_name)
         }) {
-            merged[index] = template;
+            let canonical_name = merged[index].template_name.clone();
+            merged[index] = DetectTemplateDefinition {
+                template_name: canonical_name,
+                ..template
+            };
         } else {
             merged.push(template);
         }
@@ -721,11 +719,11 @@ mod tests {
     #[test]
     fn candidate_log_summary_lists_ranked_candidates() {
         let summary = summarize_detect_candidates(&[
-            TemplateDetectCandidate::new("cisco", 95, Vec::new()),
+            TemplateDetectCandidate::new("cisco_ios", 95, Vec::new()),
             TemplateDetectCandidate::new("linux", 20, Vec::new()),
         ]);
 
-        assert_eq!(summary, "cisco:95(high), linux:20(low)");
+        assert_eq!(summary, "cisco_ios:95(high), linux:20(low)");
     }
 
     #[test]
@@ -739,7 +737,7 @@ mod tests {
     fn detect_report_picks_highest_scored_candidate_as_best_match() {
         let report = TemplateDetectReport::from_candidates(vec![
             TemplateDetectCandidate::new("linux", 20, Vec::new()),
-            TemplateDetectCandidate::new("cisco", 90, Vec::new()),
+            TemplateDetectCandidate::new("cisco_ios", 90, Vec::new()),
         ]);
 
         assert_eq!(
@@ -747,7 +745,7 @@ mod tests {
                 .best_match
                 .as_ref()
                 .map(|candidate| candidate.template_name.as_str()),
-            Some("cisco")
+            Some("cisco_ios")
         );
     }
 
@@ -766,7 +764,7 @@ mod tests {
             &snapshot,
             vec![
                 (
-                    "cisco".to_string(),
+                    "cisco_xe".to_string(),
                     TemplateDetectProfile {
                         initial_rules: vec![TemplateProbeRule {
                             pattern: r"router>".to_string(),
@@ -804,7 +802,7 @@ mod tests {
                 .best_match
                 .as_ref()
                 .map(|candidate| candidate.template_name.as_str()),
-            Some("cisco")
+            Some("cisco_xe")
         );
         assert_eq!(report.candidates.len(), 1);
     }
@@ -827,7 +825,7 @@ mod tests {
                 .best_match
                 .as_ref()
                 .map(|candidate| candidate.template_name.as_str()),
-            Some("hillstone")
+            Some("hillstone_stoneos")
         );
     }
 
@@ -879,7 +877,7 @@ mod tests {
     #[test]
     fn select_best_detected_template_accepts_medium_or_higher_match() {
         let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
-            "cisco",
+            "cisco_xe",
             90,
             Vec::new(),
         )]);
@@ -887,20 +885,20 @@ mod tests {
         let best = select_best_detected_template(&report, DetectConnectPolicy::default())
             .expect("high confidence match should pass");
 
-        assert_eq!(best.template_name, "cisco");
+        assert_eq!(best.template_name, "cisco_xe");
     }
 
     #[test]
     fn autodetected_connection_exposes_selected_template_name() {
         let report = TemplateDetectReport::from_candidates(vec![TemplateDetectCandidate::new(
-            "juniper",
+            "juniper_junos",
             90,
             Vec::new(),
         )]);
         let (sender, _recv) = mpsc::channel(1);
         let connection = AutodetectedConnection::new(sender, report).expect("connection");
 
-        assert_eq!(connection.template_name, "juniper");
+        assert_eq!(connection.template_name, "juniper_junos");
     }
 
     #[test]
@@ -1025,7 +1023,7 @@ mod tests {
         assert!(
             merged
                 .iter()
-                .any(|template| template.template_name == "cisco")
+                .any(|template| template.template_name == "cisco_ios")
         );
     }
 
@@ -1049,7 +1047,7 @@ mod tests {
         let merged = merge_with_builtin_detect_templates(vec![custom]);
         let cisco = merged
             .iter()
-            .find(|template| template.template_name.eq_ignore_ascii_case("cisco"))
+            .find(|template| template.template_name.eq_ignore_ascii_case("cisco_ios"))
             .expect("merged cisco template");
 
         assert_eq!(cisco.detect_profile.initial_rules.len(), 1);
@@ -1078,7 +1076,7 @@ mod tests {
         let report = score_detect_profiles(
             &snapshot,
             vec![(
-                "cisco".to_string(),
+                "cisco_xe".to_string(),
                 TemplateDetectProfile {
                     initial_rules: Vec::new(),
                     probes: vec![TemplateProbe {
@@ -1113,7 +1111,7 @@ mod tests {
         let report = score_detect_profiles(
             &snapshot,
             vec![(
-                "cisco".to_string(),
+                "cisco_xe".to_string(),
                 TemplateDetectProfile {
                     initial_rules: Vec::new(),
                     probes: vec![TemplateProbe {

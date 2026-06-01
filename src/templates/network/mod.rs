@@ -135,7 +135,7 @@ mod tests {
     fn network_cases() -> Vec<NetworkTemplateCase> {
         vec![
             NetworkTemplateCase {
-                name: "arista",
+                name: "arista_eos",
                 builder: arista,
                 config_builder: arista_config,
                 expected_states: &["login", "enable", "config"],
@@ -188,7 +188,7 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
-                name: "checkpoint",
+                name: "checkpoint_gaia",
                 builder: checkpoint,
                 config_builder: checkpoint_config,
                 expected_states: &["enable"],
@@ -196,7 +196,7 @@ mod tests {
                 expected_capabilities: &[TemplateCapability::EnableMode],
             },
             NetworkTemplateCase {
-                name: "cisco",
+                name: "cisco_ios",
                 builder: cisco,
                 config_builder: cisco_config,
                 expected_states: &["login", "enable", "config"],
@@ -267,7 +267,7 @@ mod tests {
                 expected_capabilities: &[TemplateCapability::EnableMode],
             },
             NetworkTemplateCase {
-                name: "h3c",
+                name: "h3c_comware",
                 builder: h3c,
                 config_builder: h3c_config,
                 expected_states: &["enable", "config"],
@@ -278,7 +278,7 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
-                name: "hillstone",
+                name: "hillstone_stoneos",
                 builder: hillstone,
                 config_builder: hillstone_config,
                 expected_states: &["enable", "config"],
@@ -302,7 +302,7 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
-                name: "juniper",
+                name: "juniper_junos",
                 builder: juniper,
                 config_builder: juniper_config,
                 expected_states: &["enable", "config"],
@@ -327,7 +327,7 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
-                name: "paloalto",
+                name: "paloalto_panos",
                 builder: paloalto,
                 config_builder: paloalto_config,
                 expected_states: &["enable", "config"],
@@ -349,7 +349,7 @@ mod tests {
                 ],
             },
             NetworkTemplateCase {
-                name: "ruijie",
+                name: "ruijie_os",
                 builder: ruijie,
                 config_builder: ruijie_config,
                 expected_states: &["login", "enable", "config"],

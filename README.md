@@ -726,7 +726,7 @@ let cmds = vec![
     "host 10.0.0.10".to_string(),
 ];
 let block = templates::build_tx_block(
-    "cisco",
+    "cisco_ios",
     "addr-create",
     "Config",
     &cmds,
@@ -752,11 +752,11 @@ You can manage built-in templates as a catalog and run state-graph diagnostics:
 use rneter::templates;
 
 let names = templates::available_templates();
-assert!(names.contains(&"cisco"));
+assert!(names.contains(&"cisco_ios"));
 
-let _handler = templates::by_name("juniper")?; // case-insensitive
+let _handler = templates::by_name("juniper_junos")?; // case-insensitive, legacy aliases still work
 
-let report = templates::diagnose_template("cisco")?;
+let report = templates::diagnose_template("cisco_ios")?;
 println!("has issues: {}", report.has_issues());
 println!("dead ends: {:?}", report.dead_end_states);
 
@@ -773,7 +773,7 @@ You can also export a built-in template configuration, extend it, and build your
 use rneter::device::prompt_rule;
 use rneter::templates;
 
-let mut config = templates::by_name_config("cisco")?;
+let mut config = templates::by_name_config("cisco_ios")?;
 config
     .prompt
     .push(prompt_rule("CustomMode", &[r"^custom>\s*$"]));
@@ -927,13 +927,14 @@ The autodetect result is a ranked report, not a single opaque answer:
 - `candidates`
 - `raw_facts`
 
-This makes it easier to understand why a device looks like Cisco, Juniper, Huawei, H3C, Linux, Arista, Aruba AOS-CX, Cisco ASA/NX-OS, Dell OS10, Ruijie, ZTE ZXROS, Fortinet, Palo Alto, or Check Point, and to debug ambiguous results in mixed environments.
+This makes it easier to understand why a device looks like Cisco IOS/IOS-XE, Juniper Junos, Huawei, H3C/HP Comware, Linux, Arista EOS, Aruba AOS-CX, Cisco ASA/NX-OS, Dell OS10, Ruijie OS, ZTE ZXROS, Fortinet, Palo Alto PAN-OS, or Check Point Gaia, and to debug ambiguous results in mixed environments.
 
 Current scope:
 
 - SSH only
-- built-in templates currently covered: `cisco`, `juniper`, `huawei`, `h3c`, `linux`, `hillstone`, `arista`, `aruba_aoscx`, `cisco_asa`, `cisco_nxos`, `dell_os10`, `fortinet`, `paloalto`, `ruijie`, `zte_zxros`, `checkpoint`
-- `cisco_asa` is exposed as a distinct template name and autodetect target, but it currently reuses the proven `cisco` handler behavior
+- built-in templates currently covered: `cisco_ios`, `cisco_xe`, `juniper_junos`, `huawei`, `h3c_comware`, `hp_comware`, `linux`, `hillstone_stoneos`, `arista_eos`, `aruba_aoscx`, `cisco_asa`, `cisco_nxos`, `dell_os10`, `fortinet`, `paloalto_panos`, `ruijie_os`, `zte_zxros`, `checkpoint_gaia`
+- legacy rneter names such as `cisco`, `juniper`, `h3c`, `hillstone`, `arista`, `paloalto`, `ruijie`, and `checkpoint` remain accepted as aliases
+- `cisco_asa` is exposed as a distinct template name and autodetect target, but it currently reuses the proven `cisco_ios` handler behavior
 - probe-driven scoring using initial prompt/output plus cached read-only probe commands
 
 How to read the diagnostics:

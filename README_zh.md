@@ -698,7 +698,7 @@ let cmds = vec![
     "host 10.0.0.10".to_string(),
 ];
 let block = templates::build_tx_block(
-    "cisco",
+    "cisco_ios",
     "addr-create",
     "Config",
     &cmds,
@@ -724,11 +724,11 @@ cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/sessio
 use rneter::templates;
 
 let names = templates::available_templates();
-assert!(names.contains(&"cisco"));
+assert!(names.contains(&"cisco_ios"));
 
-let _handler = templates::by_name("juniper")?; // 大小写不敏感
+let _handler = templates::by_name("juniper_junos")?; // 大小写不敏感，旧别名也仍可用
 
-let report = templates::diagnose_template("cisco")?;
+let report = templates::diagnose_template("cisco_ios")?;
 println!("是否存在问题: {}", report.has_issues());
 println!("死路状态: {:?}", report.dead_end_states);
 
@@ -745,7 +745,7 @@ println!("全部诊断 JSON 字节数: {}", all_json.len());
 use rneter::device::prompt_rule;
 use rneter::templates;
 
-let mut config = templates::by_name_config("cisco")?;
+let mut config = templates::by_name_config("cisco_ios")?;
 config
     .prompt
     .push(prompt_rule("CustomMode", &[r"^custom>\s*$"]));
@@ -899,13 +899,14 @@ Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件
 - `candidates`
 - `raw_facts`
 
-这样在现场环境里更容易理解“为什么它更像 Cisco / Juniper / Huawei / H3C / Linux / Arista / Aruba AOS-CX / Cisco ASA/NX-OS / Dell OS10 / Ruijie / ZTE ZXROS / Fortinet / Palo Alto / Check Point”，也更方便排查误判。
+这样在现场环境里更容易理解“为什么它更像 Cisco IOS/IOS-XE / Juniper Junos / Huawei / H3C/HP Comware / Linux / Arista EOS / Aruba AOS-CX / Cisco ASA/NX-OS / Dell OS10 / Ruijie OS / ZTE ZXROS / Fortinet / Palo Alto PAN-OS / Check Point Gaia”，也更方便排查误判。
 
 当前范围：
 
 - 仅支持 SSH
-- 当前已覆盖的内置模板：`cisco`、`juniper`、`huawei`、`h3c`、`linux`、`hillstone`、`arista`、`aruba_aoscx`、`cisco_asa`、`cisco_nxos`、`dell_os10`、`fortinet`、`paloalto`、`ruijie`、`zte_zxros`、`checkpoint`
-- `cisco_asa` 作为独立模板名和自动识别目标暴露，但当前复用已经验证过的 `cisco` handler 行为
+- 当前已覆盖的内置模板：`cisco_ios`、`cisco_xe`、`juniper_junos`、`huawei`、`h3c_comware`、`hp_comware`、`linux`、`hillstone_stoneos`、`arista_eos`、`aruba_aoscx`、`cisco_asa`、`cisco_nxos`、`dell_os10`、`fortinet`、`paloalto_panos`、`ruijie_os`、`zte_zxros`、`checkpoint_gaia`
+- 旧的 rneter 名称如 `cisco`、`juniper`、`h3c`、`hillstone`、`arista`、`paloalto`、`ruijie`、`checkpoint` 仍然可作为别名使用
+- `cisco_asa` 作为独立模板名和自动识别目标暴露，但当前复用已经验证过的 `cisco_ios` handler 行为
 - 基于初始 prompt/输出和只读 probe 命令做缓存式打分
 
 如何理解诊断结果：
