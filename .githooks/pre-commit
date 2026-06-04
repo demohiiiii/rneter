@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+cargo fmt
+
+if ! git diff --quiet; then
+    echo "cargo fmt updated files. Please review and stage the formatting changes, then commit again."
+    exit 1
+fi
+
+cargo clippy -- -D warnings
