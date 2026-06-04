@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.6] - 2026-06-04
+
+### New Features
+- Added caller-supplied autodetect templates through `DetectTemplateDefinition`, allowing custom handler configs and detect profiles to participate in SSH autodetection and connection selection.
+- Added autodetect helpers for custom and merged template sets, including `autodetect_with_templates_and_context(...)`, `autodetect_with_builtin_and_templates_and_context(...)`, `autodetect_and_connect_with_templates_and_context(...)`, and `merge_with_builtin_detect_templates(...)`.
+- Added staged SSH error variants for connection and autodetect flows, surfacing the failing stage and target for SSH connect, channel, PTY, shell, probe send, pager continuation, and disconnect failures.
+
+### Optimizations
+- Aligned built-in template identifiers and metadata with Netmiko/ntc-style names such as `cisco_ios`, `cisco_xe`, `juniper_junos`, `arista_eos`, `paloalto_panos`, and `checkpoint_gaia`, while preserving legacy aliases for lookup.
+- Split several broad detect profiles into more specific built-in profiles, including separate Cisco IOS/IOS-XE and H3C/HP Comware matches, improving ranked autodetect candidates.
+- Added repository quality gates with a pre-commit hook for `cargo fmt` and warning-denying `cargo clippy`, plus GitHub Actions CI for `cargo clippy -- -D warnings` and `cargo test`.
+
+### API Changes
+- Public autodetect exports now include `DetectTemplateDefinition`, `collect_detect_snapshot_with_context(...)`, `autodetect_with_profiles_and_context(...)`, `autodetect_with_templates_and_context(...)`, `autodetect_with_builtin_and_templates_and_context(...)`, `autodetect_and_connect_with_templates_and_context(...)`, `autodetect_and_connect_with_builtin_and_templates_and_context(...)`, `builtin_detect_template_definitions()`, and `merge_with_builtin_detect_templates(...)`.
+- `available_templates()`, `template_catalog()`, and autodetect reports now prefer canonical template names such as `cisco_ios`, `h3c_comware`, `hillstone_stoneos`, `ruijie_os`, and `checkpoint_gaia`; callers comparing returned names should migrate from legacy strings to canonical names.
+- `by_name_config(...)` and `template_metadata(...)` continue to resolve legacy names such as `cisco`, `juniper`, `arista`, `paloalto`, `ruijie`, and `checkpoint`, so existing lookup callers can upgrade without changing inputs.
+- `ConnectError` now includes staged variants (`Ssh2StageError`, `RusshStageError`, and `ChannelDisconnectStageError`); exhaustive matches over `ConnectError` must add arms for these variants.
+
+### Risks
+- Canonical template names may affect integrations that persist or compare names returned by catalogs or autodetect results, even though legacy lookup aliases remain supported.
+- Custom autodetect templates can override built-in definitions by name, so callers should ensure custom handler configs and detect profiles are kept in sync to avoid selecting an incompatible handler.
+- Staged SSH errors improve diagnostics but add new enum variants, which is a source-compatible risk for downstream code using exhaustive `ConnectError` matching.
+
 ## [0.4.5] - 2026-05-10
 
 ### New Features
