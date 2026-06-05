@@ -6,7 +6,7 @@
 
 [中文文档](README_zh.md)
 
-`rneter` is a Rust library for managing SSH connections to network devices and Linux hosts with an explicit prompt-state-machine execution model. Its design is inspired by libraries such as [Netmiko](https://github.com/ktbyers/netmiko) and [Scrapli](https://github.com/carlmontanari/scrapli), and it serves a similar problem space, while focusing more heavily on formal state transitions, reusable interactive flows, transactions, and replayable automation workflows.
+`rneter` is a Rust library for managing SSH connections to network devices and Linux hosts with an explicit prompt-state-machine execution model. Its design is inspired by libraries such as [Netmiko](https://github.com/ktbyers/netmiko), [Scrapli](https://github.com/carlmontanari/scrapli), and [OpenSecFlow/netdriver](https://github.com/OpenSecFlow/netdriver), and it serves a similar problem space, while focusing more heavily on formal state transitions, reusable interactive flows, transactions, and replayable automation workflows.
 
 ## Table of Contents
 
@@ -45,7 +45,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.4.4"
+rneter = "0.4.6"
 ```
 
 ## Quick Start

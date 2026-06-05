@@ -6,7 +6,7 @@
 
 [English Documentation](README.md)
 
-`rneter` 是一个用于管理网络设备和 Linux 主机 SSH 连接的 Rust 库，采用显式的 Prompt 状态机执行模型。它的设计思路参考了 [Netmiko](https://github.com/ktbyers/netmiko) 和 [Scrapli](https://github.com/carlmontanari/scrapli)，解决的问题域与它们类似，但更强调正式的状态切换、可复用交互流程、事务回滚以及可回放的自动化工作流。
+`rneter` 是一个用于管理网络设备和 Linux 主机 SSH 连接的 Rust 库，采用显式的 Prompt 状态机执行模型。它的设计思路参考了 [Netmiko](https://github.com/ktbyers/netmiko)、[Scrapli](https://github.com/carlmontanari/scrapli) 和 [OpenSecFlow/netdriver](https://github.com/OpenSecFlow/netdriver)，解决的问题域与它们类似，但更强调正式的状态切换、可复用交互流程、事务回滚以及可回放的自动化工作流。
 
 ## 目录
 
@@ -45,7 +45,7 @@
 
 ```toml
 [dependencies]
-rneter = "0.4.4"
+rneter = "0.4.6"
 ```
 
 ## 快速开始
