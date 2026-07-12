@@ -3,7 +3,7 @@ use crate::error::ConnectError;
 use crate::templates::TemplateDetectProfile;
 
 use super::catalog::{BUILTIN_TEMPLATES, canonical_template_name};
-use super::linux::{LinuxTemplateConfig, linux_handler_config};
+use super::linux::linux_handler_config;
 use super::network::{
     arista_config, array_config, aruba_aoscx_config, chaitin_config, checkpoint_config,
     cisco_asa_config, cisco_config, cisco_nxos_config, dell_os10_config, dptech_config,
@@ -26,7 +26,7 @@ pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
         Some("hillstone_stoneos") => Ok(hillstone_config()),
         Some("juniper_junos") => Ok(juniper_config()),
         Some("array") => Ok(array_config()),
-        Some("linux") => Ok(linux_handler_config(LinuxTemplateConfig::default())),
+        Some("linux") => Ok(linux_handler_config()),
         Some("arista_eos") => Ok(arista_config()),
         Some("aruba_aoscx") => Ok(aruba_aoscx_config()),
         Some("cisco_asa") => Ok(cisco_asa_config()),

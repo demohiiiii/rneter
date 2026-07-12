@@ -106,12 +106,7 @@ use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure Linux template with sudo password
-    let mut handler = templates::linux()?;
-    handler.dyn_param.insert(
-        "SudoPassword".to_string(),
-        "your_sudo_password".to_string()
-    );
+    let handler = templates::linux()?;
 
     // Connect to Linux server
     let sender = MANAGER
@@ -121,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "192.168.1.100".to_string(),
                 22,
                 "ssh_password".to_string(),
-                None,
+                Some("your_privilege_password".to_string()),
                 handler,
             ),
             ExecutionContext::default(),
@@ -177,42 +172,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`LinuxTemplateConfig.shell_flavor` defaults to `DeviceShellFlavor::Posix`. If the remote login shell is `fish`, set it explicitly to `DeviceShellFlavor::Fish`.
+The Linux template defaults to `DeviceShellFlavor::Posix`. For a `fish` login shell,
+override `DeviceHandlerConfig.command_execution` as shown below.
 
 **Custom Configuration:**
 
 ```rust
-use rneter::device::DeviceShellFlavor;
-use rneter::templates::{linux_with_config, LinuxTemplateConfig, SudoMode, CustomPrompts};
-
-// Use sudo -s instead of sudo -i
-let config = LinuxTemplateConfig {
-    sudo_mode: SudoMode::SudoShell,
-    sudo_password: Some("password".to_string()),
-    custom_prompts: None,
-    ..LinuxTemplateConfig::default()
+use rneter::device::{
+    DeviceCommandExecutionConfig, DeviceShellFlavor, prompt_rule, transition_rule,
 };
-let handler = linux_with_config(config)?;
+use rneter::templates::linux_handler_config;
+
+// Replace the default User -> Root `sudo -i` transition with `sudo -s`.
+let mut config = linux_handler_config();
+config.edges = vec![
+    transition_rule("User", "sudo -s", "Root", false, false),
+    transition_rule("Root", "exit", "User", true, false),
+];
+let handler = config.build()?;
 
 // Custom prompt patterns
-let config = LinuxTemplateConfig {
-    sudo_mode: SudoMode::SudoInteractive,
-    sudo_password: Some("password".to_string()),
-    custom_prompts: Some(CustomPrompts {
-        user_prompts: vec![r"^myuser@myhost\$\s*$"],
-        root_prompts: vec![r"^root@myhost#\s*$"],
-    }),
-    ..LinuxTemplateConfig::default()
-};
-let handler = linux_with_config(config)?;
+let mut config = linux_handler_config();
+config.prompt = vec![
+    prompt_rule("User", &[r"^myuser@myhost\$\s*$"]),
+    prompt_rule("Root", &[r"^root@myhost#\s*$"]),
+];
+let handler = config.build()?;
 
 // Force fish-compatible exit-status capture
-let config = LinuxTemplateConfig {
+let mut config = linux_handler_config();
+config.command_execution = DeviceCommandExecutionConfig::ShellExitStatus {
+    marker: "__RNETER_EXIT_CODE__:".to_string(),
     shell_flavor: DeviceShellFlavor::Fish,
-    ..LinuxTemplateConfig::default()
 };
-let handler = linux_with_config(config)?;
+let handler = config.build()?;
 ```
+
+The default Linux template uses `sudo -i` for the `User -> Root` edge. Customize
+privilege escalation by replacing `DeviceHandlerConfig.edges`. Prompts and command execution
+behavior are customized on the same config. Direct root logins are recognized as `Root` from
+the prompt and do not execute the edge.
 
 ### File Uploads
 
@@ -718,20 +717,29 @@ for block in &workflow_result.block_results {
 }
 ```
 
-You can also build blocks from template strategies:
+You can also build blocks with an explicit rollback policy:
 
 ```rust
+use rneter::session::{Command, RollbackPolicy};
+
 let cmds = vec![
     "object network WEB01".to_string(),
     "host 10.0.0.10".to_string(),
 ];
 let block = templates::build_tx_block(
-    "cisco_ios",
     "addr-create",
     "Config",
     &cmds,
     Some(30),
-    Some("no object network WEB01".to_string()), // whole-resource rollback
+    RollbackPolicy::WholeResource {
+        rollback: Box::new(Command {
+            mode: "Config".to_string(),
+            command: "no object network WEB01".to_string(),
+            timeout: Some(30),
+            ..Command::default()
+        }.into()),
+        trigger_step_index: 0,
+    },
 )?;
 ```
 

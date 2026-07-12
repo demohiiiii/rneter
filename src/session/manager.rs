@@ -18,8 +18,13 @@ impl SshConnectionManager {
         request: ConnectionRequest,
         context: ExecutionContext,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
-        self.get_with_request_and_recording(request, context.security_options, None)
-            .await
+        self.get_with_request_and_recording(
+            request,
+            context.security_options,
+            context.connect_timeout,
+            None,
+        )
+        .await
     }
 
     /// Execute a single command directly using a structured connection/context pair.
@@ -58,17 +63,22 @@ impl SshConnectionManager {
     ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
         let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(request, context.security_options, None)
-            .await
-            .map_err(|err| {
-                SessionOperationExecutionError::new(
-                    err,
-                    SessionOperationOutput {
-                        success: false,
-                        steps: Vec::new(),
-                    },
-                )
-            })?;
+        self.get_with_request_and_recording(
+            request,
+            context.security_options,
+            context.connect_timeout,
+            None,
+        )
+        .await
+        .map_err(|err| {
+            SessionOperationExecutionError::new(
+                err,
+                SessionOperationOutput {
+                    success: false,
+                    steps: Vec::new(),
+                },
+            )
+        })?;
 
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             SessionOperationExecutionError::new(
@@ -112,8 +122,13 @@ impl SshConnectionManager {
     ) -> Result<TxResult, ConnectError> {
         let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(request, context.security_options, None)
-            .await?;
+        self.get_with_request_and_recording(
+            request,
+            context.security_options,
+            context.connect_timeout,
+            None,
+        )
+        .await?;
 
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             ConnectError::InternalServerError("connection cache miss".to_string())
@@ -132,8 +147,13 @@ impl SshConnectionManager {
     ) -> Result<TxWorkflowResult, ConnectError> {
         let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(request, context.security_options, None)
-            .await?;
+        self.get_with_request_and_recording(
+            request,
+            context.security_options,
+            context.connect_timeout,
+            None,
+        )
+        .await?;
 
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             ConnectError::InternalServerError("connection cache miss".to_string())
@@ -153,8 +173,13 @@ impl SshConnectionManager {
         context: ExecutionContext,
     ) -> Result<(), ConnectError> {
         let device_addr = request.device_addr();
-        self.get_with_request_and_recording(request, context.security_options, None)
-            .await?;
+        self.get_with_request_and_recording(
+            request,
+            context.security_options,
+            context.connect_timeout,
+            None,
+        )
+        .await?;
 
         let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
             ConnectError::InternalServerError("connection cache miss".to_string())
@@ -188,6 +213,7 @@ impl SshConnectionManager {
             .get_with_request_and_recording(
                 request,
                 context.security_options,
+                context.connect_timeout,
                 Some(recorder.clone()),
             )
             .await?;
@@ -198,6 +224,7 @@ impl SshConnectionManager {
         &self,
         request: ConnectionRequest,
         security_options: ConnectionSecurityOptions,
+        connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
         let device_addr = request.device_addr();
@@ -271,6 +298,7 @@ impl SshConnectionManager {
             enable_password,
             handler,
             security_options,
+            connect_timeout,
             recorder,
         )
         .await?;

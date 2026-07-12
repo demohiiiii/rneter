@@ -35,10 +35,7 @@ pub use detect::{
     merge_with_builtin_detect_templates, score_builtin_templates, score_detect_profiles,
 };
 pub use detect_profile::{TemplateDetectProfile, TemplateProbe, TemplateProbeRule};
-pub use linux::{
-    CustomPrompts, LinuxCommandType, LinuxTemplateConfig, SudoMode, classify_linux_command, linux,
-    linux_handler_config, linux_with_config,
-};
+pub use linux::{linux, linux_handler_config};
 pub use network::{
     arista, arista_config, array, array_config, aruba_aoscx, aruba_aoscx_config, chaitin,
     chaitin_config, checkpoint, checkpoint_config, cisco, cisco_asa, cisco_asa_config,

@@ -11,6 +11,17 @@ fn build_init_timeout_message(initial_output: &str) -> String {
     normalized_output
 }
 
+async fn await_ssh_connect<T>(
+    device_addr: &str,
+    connect_timeout: Duration,
+    connect: impl std::future::Future<Output = Result<T, async_ssh2_tokio::Error>>,
+) -> Result<T, ConnectError> {
+    tokio::time::timeout(connect_timeout, connect)
+        .await
+        .map_err(|_| ConnectError::ConnectTimeout(device_addr.to_string()))?
+        .map_err(|error| ConnectError::ssh2_stage("connect", device_addr.to_string(), error))
+}
+
 fn should_run_hook_actions(in_hook: bool, actions: &[HookAction]) -> bool {
     !in_hook && !actions.is_empty()
 }
@@ -138,6 +149,7 @@ impl SharedSshClient {
         enable_password: Option<String>,
         mut handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
+        connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
@@ -148,15 +160,18 @@ impl SharedSshClient {
             ..Default::default()
         };
 
-        let client = Client::connect_with_config(
-            (addr, port),
-            &user,
-            AuthMethod::with_password(&password),
-            security_options.server_check.clone(),
-            config,
+        let client = await_ssh_connect(
+            &device_addr,
+            connect_timeout,
+            Client::connect_with_config(
+                (addr, port),
+                &user,
+                AuthMethod::with_password(&password),
+                security_options.server_check.clone(),
+                config,
+            ),
         )
-        .await
-        .map_err(|error| ConnectError::ssh2_stage("connect", device_addr.clone(), error))?;
+        .await?;
         debug!("{} TCP connection successful", device_addr);
 
         let mut channel = client.get_channel().await.map_err(|error| {
@@ -475,9 +490,11 @@ impl SharedSshClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_init_timeout_message, should_run_hook_actions};
+    use super::{await_ssh_connect, build_init_timeout_message, should_run_hook_actions};
     use crate::device::normalize_terminal_output;
+    use crate::error::ConnectError;
     use crate::session::{Command, HookAction, HookFailurePolicy, SessionOperation};
+    use std::time::Duration;
 
     fn sample_hook_action() -> HookAction {
         HookAction::new(
@@ -528,6 +545,22 @@ mod tests {
         ));
         assert!(!super::should_propagate_hook_failure(
             &HookFailurePolicy::BestEffort
+        ));
+    }
+
+    #[tokio::test]
+    async fn ssh_connect_timeout_reports_target() {
+        let result = await_ssh_connect(
+            "admin@192.0.2.1:22",
+            Duration::from_millis(1),
+            std::future::pending::<Result<(), async_ssh2_tokio::Error>>(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ConnectError::ConnectTimeout(target))
+                if target == "admin@192.0.2.1:22"
         ));
     }
 }

@@ -1,5 +1,6 @@
 use rneter::session::{
-    ConnectionRequest, ExecutionContext, MANAGER, RollbackPolicy, TxWorkflow, TxWorkflowResult,
+    Command, ConnectionRequest, ExecutionContext, MANAGER, RollbackPolicy, TxWorkflow,
+    TxWorkflowResult,
 };
 use rneter::templates;
 use std::error::Error;
@@ -17,6 +18,21 @@ fn validate_template(template: &str) -> Result<(), Box<dyn Error>> {
         .into());
     }
     Ok(())
+}
+
+fn whole_resource_rollback(mode: &str, command: &str, timeout: u64) -> RollbackPolicy {
+    RollbackPolicy::WholeResource {
+        rollback: Box::new(
+            Command {
+                mode: mode.to_string(),
+                command: command.to_string(),
+                timeout: Some(timeout),
+                ..Command::default()
+            }
+            .into(),
+        ),
+        trigger_step_index: 0,
+    }
 }
 
 fn print_workflow_report(result: &TxWorkflowResult) {
@@ -151,12 +167,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "host 10.10.10.10".to_string(),
     ];
     let addr_block = templates::build_tx_block(
-        "cisco",
         "addr-objects",
         "Config",
         &addr_cmds,
         Some(30),
-        Some("no object network WEB01".to_string()),
+        whole_resource_rollback("Config", "no object network WEB01", 30),
     )?;
 
     // 2) Build service-object block (whole-resource rollback).
@@ -165,12 +180,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "service tcp destination eq 443".to_string(),
     ];
     let svc_block = templates::build_tx_block(
-        "cisco",
         "service-objects",
         "Config",
         &svc_cmds,
         Some(30),
-        Some("no object service WEB01-SVC".to_string()),
+        whole_resource_rollback("Config", "no object service WEB01-SVC", 30),
     )?;
 
     // 3) Build policy block (whole-resource rollback).
@@ -178,14 +192,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "access-list OUTSIDE_IN extended permit tcp object WEB01 object WEB01-SVC".to_string(),
     ];
     let policy_block = templates::build_tx_block(
-        "cisco",
         "policy-rules",
         "Config",
         &policy_cmds,
         Some(30),
-        Some(
-            "no access-list OUTSIDE_IN extended permit tcp object WEB01 object WEB01-SVC"
-                .to_string(),
+        whole_resource_rollback(
+            "Config",
+            "no access-list OUTSIDE_IN extended permit tcp object WEB01 object WEB01-SVC",
+            30,
         ),
     )?;
 

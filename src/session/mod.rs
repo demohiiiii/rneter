@@ -115,12 +115,24 @@ impl ConnectionRequest {
 }
 
 /// Execution context shared by manager entrypoints.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ExecutionContext {
     /// SSH security behavior for connection establishment.
     pub security_options: ConnectionSecurityOptions,
     /// Optional system name used by templates with dynamic transitions.
     pub sys: Option<String>,
+    /// Maximum time allowed for the underlying SSH connection to establish.
+    pub connect_timeout: Duration,
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self {
+            security_options: ConnectionSecurityOptions::default(),
+            sys: None,
+            connect_timeout: Duration::from_secs(60),
+        }
+    }
 }
 
 impl ExecutionContext {
@@ -139,6 +151,17 @@ impl ExecutionContext {
     pub fn with_sys(mut self, sys: Option<String>) -> Self {
         self.sys = sys;
         self
+    }
+
+    /// Override the maximum time allowed for SSH connection establishment.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Override the SSH connection establishment timeout in seconds.
+    pub fn with_connect_timeout_secs(self, timeout_secs: u64) -> Self {
+        self.with_connect_timeout(Duration::from_secs(timeout_secs))
     }
 }
 
@@ -174,8 +197,6 @@ pub struct SharedSshClient {
 pub struct CommandDynamicParams {
     #[serde(default, alias = "EnablePassword")]
     pub enable_password: Option<String>,
-    #[serde(default, alias = "SudoPassword")]
-    pub sudo_password: Option<String>,
     /// Extra prompt-response pairs for template-specific interactive flows.
     #[serde(default, flatten)]
     pub extra: HashMap<String, String>,
@@ -184,7 +205,7 @@ pub struct CommandDynamicParams {
 impl CommandDynamicParams {
     /// Returns true when no structured or extra prompt responses are set.
     pub fn is_empty(&self) -> bool {
-        self.enable_password.is_none() && self.sudo_password.is_none() && self.extra.is_empty()
+        self.enable_password.is_none() && self.extra.is_empty()
     }
 
     /// Insert a template-specific prompt-response pair.
@@ -202,10 +223,6 @@ impl CommandDynamicParams {
         if let Some(value) = self.enable_password.as_ref() {
             values.insert("EnablePassword".to_string(), value.clone());
         }
-        if let Some(value) = self.sudo_password.as_ref() {
-            values.insert("SudoPassword".to_string(), value.clone());
-        }
-
         values
     }
 }
@@ -662,12 +679,28 @@ mod tests {
     fn execution_context_builder_overrides_defaults() {
         let context = ExecutionContext::new()
             .with_security_options(ConnectionSecurityOptions::legacy_compatible())
-            .with_sys(Some("vsys1".to_string()));
+            .with_sys(Some("vsys1".to_string()))
+            .with_connect_timeout(Duration::from_secs(12));
         assert_eq!(
             context.security_options,
             ConnectionSecurityOptions::legacy_compatible()
         );
         assert_eq!(context.sys.as_deref(), Some("vsys1"));
+        assert_eq!(context.connect_timeout, Duration::from_secs(12));
+    }
+
+    #[test]
+    fn execution_context_connect_timeout_defaults_to_60_seconds() {
+        assert_eq!(
+            ExecutionContext::new().connect_timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            ExecutionContext::new()
+                .with_connect_timeout_secs(7)
+                .connect_timeout,
+            Duration::from_secs(7)
+        );
     }
 
     #[test]
@@ -731,14 +764,12 @@ mod tests {
             "command": "show version",
             "dyn_params": {
                 "EnablePassword": "enable\n",
-                "SudoPassword": "sudo\n",
                 "CustomPrompt": "yes\n"
             }
         }))
         .expect("deserialize command");
 
         assert_eq!(cmd.dyn_params.enable_password.as_deref(), Some("enable\n"));
-        assert_eq!(cmd.dyn_params.sudo_password.as_deref(), Some("sudo\n"));
         assert_eq!(
             cmd.dyn_params.extra.get("CustomPrompt"),
             Some(&"yes\n".to_string())

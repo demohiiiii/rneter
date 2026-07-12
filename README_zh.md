@@ -106,10 +106,7 @@ use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut handler = templates::linux()?;
-    handler
-        .dyn_param
-        .insert("SudoPassword".to_string(), "your_sudo_password".to_string());
+    let handler = templates::linux()?;
 
     let sender = MANAGER
         .get_with_context(
@@ -118,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "192.168.1.100".to_string(),
                 22,
                 "ssh_password".to_string(),
-                None,
+                Some("your_privilege_password".to_string()),
                 handler,
             ),
             ExecutionContext::default(),
@@ -161,39 +158,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`LinuxTemplateConfig.shell_flavor` 默认使用 `DeviceShellFlavor::Posix`。如果远端登录 shell 是 `fish`，可以显式设置为 `DeviceShellFlavor::Fish`。
+Linux 模板默认使用 `DeviceShellFlavor::Posix`。如果远端登录 shell 是 `fish`，
+可按下面的示例修改 `DeviceHandlerConfig.command_execution`。
 
 **自定义配置：**
 
 ```rust
-use rneter::device::DeviceShellFlavor;
-use rneter::templates::{linux_with_config, CustomPrompts, LinuxTemplateConfig, SudoMode};
-
-let config = LinuxTemplateConfig {
-    sudo_mode: SudoMode::SudoShell,
-    sudo_password: Some("password".to_string()),
-    custom_prompts: None,
-    ..LinuxTemplateConfig::default()
+use rneter::device::{
+    DeviceCommandExecutionConfig, DeviceShellFlavor, prompt_rule, transition_rule,
 };
-let handler = linux_with_config(config)?;
+use rneter::templates::linux_handler_config;
 
-let config = LinuxTemplateConfig {
-    sudo_mode: SudoMode::SudoInteractive,
-    sudo_password: Some("password".to_string()),
-    custom_prompts: Some(CustomPrompts {
-        user_prompts: vec![r"^myuser@myhost\$\s*$"],
-        root_prompts: vec![r"^root@myhost#\s*$"],
-    }),
-    ..LinuxTemplateConfig::default()
-};
-let handler = linux_with_config(config)?;
+// 将默认的 User -> Root `sudo -i` 切换命令替换为 `sudo -s`
+let mut config = linux_handler_config();
+config.edges = vec![
+    transition_rule("User", "sudo -s", "Root", false, false),
+    transition_rule("Root", "exit", "User", true, false),
+];
+let handler = config.build()?;
 
-let config = LinuxTemplateConfig {
+let mut config = linux_handler_config();
+config.prompt = vec![
+    prompt_rule("User", &[r"^myuser@myhost\$\s*$"]),
+    prompt_rule("Root", &[r"^root@myhost#\s*$"]),
+];
+let handler = config.build()?;
+
+let mut config = linux_handler_config();
+config.command_execution = DeviceCommandExecutionConfig::ShellExitStatus {
+    marker: "__RNETER_EXIT_CODE__:".to_string(),
     shell_flavor: DeviceShellFlavor::Fish,
-    ..LinuxTemplateConfig::default()
 };
-let handler = linux_with_config(config)?;
+let handler = config.build()?;
 ```
+
+默认 Linux 模板使用 `sudo -i` 作为 `User -> Root` edge。需要使用其他提权方式时，
+直接替换 `DeviceHandlerConfig.edges`；prompt 和命令执行策略也在同一个配置上修改。
+直接以 root 登录时，prompt 会识别为 `Root`，不会执行该 edge。
 
 ### 安全级别
 
@@ -690,20 +691,29 @@ for block in &workflow_result.block_results {
 }
 ```
 
-也可以直接用模板策略自动构建事务块：
+也可以通过显式回滚策略构建事务块：
 
 ```rust
+use rneter::session::{Command, RollbackPolicy};
+
 let cmds = vec![
     "object network WEB01".to_string(),
     "host 10.0.0.10".to_string(),
 ];
 let block = templates::build_tx_block(
-    "cisco_ios",
     "addr-create",
     "Config",
     &cmds,
     Some(30),
-    Some("no object network WEB01".to_string()), // 整体回滚
+    RollbackPolicy::WholeResource {
+        rollback: Box::new(Command {
+            mode: "Config".to_string(),
+            command: "no object network WEB01".to_string(),
+            timeout: Some(30),
+            ..Command::default()
+        }.into()),
+        trigger_step_index: 0,
+    },
 )?;
 ```
 

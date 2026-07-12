@@ -41,6 +41,10 @@ pub enum ConnectError {
     #[error("connection initialization timeout: {0}")]
     InitTimeout(String),
 
+    /// SSH connection establishment timed out.
+    #[error("SSH connection timeout: {0}")]
+    ConnectTimeout(String),
+
     /// Device handler configuration is invalid.
     #[error("invalid device handler config: {0}")]
     InvalidDeviceHandlerConfig(String),
