@@ -57,7 +57,6 @@ static CISCO_LIKE_COMMAND_FLOW_TEMPLATE: Lazy<CommandFlowTemplate> = Lazy::new(|
                 ]),
         ],
     )
-    .with_description("Generic interactive SCP/TFTP copy flow for Cisco-like CLIs.")
     .with_default_mode("Enable")
 });
 

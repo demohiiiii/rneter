@@ -94,9 +94,6 @@ fn render_inline_template(
 pub struct CommandFlowTemplate {
     /// Stable template identifier.
     pub name: String,
-    /// Optional human-readable summary of the workflow.
-    #[serde(default)]
-    pub description: Option<String>,
     /// Stop after the first failing step when true.
     #[serde(default = "default_true")]
     pub stop_on_error: bool,
@@ -113,17 +110,10 @@ impl CommandFlowTemplate {
     pub fn new(name: impl Into<String>, steps: Vec<CommandFlowTemplateStep>) -> Self {
         Self {
             name: name.into(),
-            description: None,
             stop_on_error: true,
             default_mode: None,
             steps,
         }
-    }
-
-    /// Attach a human-readable description.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
     }
 
     /// Override the default mode applied to steps without `mode`.
