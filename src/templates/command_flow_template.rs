@@ -3,7 +3,6 @@ use crate::session::{Command, CommandFlow, CommandInteraction, PromptResponseRul
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
 
 fn invalid_template(message: impl Into<String>) -> ConnectError {
     ConnectError::InvalidCommandFlowTemplate(message.into())
@@ -11,10 +10,6 @@ fn invalid_template(message: impl Into<String>) -> ConnectError {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_var_kind() -> CommandFlowTemplateVarKind {
-    CommandFlowTemplateVarKind::String
 }
 
 /// Lightweight `{{var}}` inline text template used by command-flow templates.
@@ -32,7 +27,7 @@ impl CommandFlowTemplateText {
         }
     }
 
-    fn render(&self, values: &Map<String, Value>) -> String {
+    fn render(&self, values: &Map<String, Value>) -> Result<String, ConnectError> {
         render_inline_template(self.value.as_str(), values)
     }
 }
@@ -59,7 +54,10 @@ fn render_value_as_text(value: &Value) -> String {
     }
 }
 
-fn render_inline_template(template: &str, values: &Map<String, Value>) -> String {
+fn render_inline_template(
+    template: &str,
+    values: &Map<String, Value>,
+) -> Result<String, ConnectError> {
     let mut output = String::new();
     let mut rest = template;
 
@@ -74,8 +72,10 @@ fn render_inline_template(template: &str, values: &Map<String, Value>) -> String
                 output.push_str("{{");
                 output.push_str(raw_name);
                 output.push_str("}}");
-            } else if let Some(value) = values.get(name) {
+            } else if let Some(value) = values.get(name).filter(|value| !value.is_null()) {
                 output.push_str(&render_value_as_text(value));
+            } else {
+                return Err(invalid_template(format!("missing template var '{name}'")));
             }
             rest = &after_start[end + 2..];
         } else {
@@ -86,7 +86,7 @@ fn render_inline_template(template: &str, values: &Map<String, Value>) -> String
     }
 
     output.push_str(rest);
-    output
+    Ok(output)
 }
 
 /// Declarative reusable definition for an interactive command flow.
@@ -97,9 +97,6 @@ pub struct CommandFlowTemplate {
     /// Optional human-readable summary of the workflow.
     #[serde(default)]
     pub description: Option<String>,
-    /// Variables consumed by step and prompt templates.
-    #[serde(default)]
-    pub vars: Vec<CommandFlowTemplateVar>,
     /// Stop after the first failing step when true.
     #[serde(default = "default_true")]
     pub stop_on_error: bool,
@@ -117,7 +114,6 @@ impl CommandFlowTemplate {
         Self {
             name: name.into(),
             description: None,
-            vars: Vec::new(),
             stop_on_error: true,
             default_mode: None,
             steps,
@@ -127,12 +123,6 @@ impl CommandFlowTemplate {
     /// Attach a human-readable description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
-        self
-    }
-
-    /// Replace the variable metadata list.
-    pub fn with_vars(mut self, vars: Vec<CommandFlowTemplateVar>) -> Self {
-        self.vars = vars;
         self
     }
 
@@ -154,8 +144,17 @@ impl CommandFlowTemplate {
         runtime: &CommandFlowTemplateRuntime,
     ) -> Result<CommandFlow, ConnectError> {
         self.validate_definition()?;
-        let resolved_vars = self.resolve_runtime_vars(&runtime.vars)?;
-        let context = build_command_flow_values(self, runtime, resolved_vars);
+        let vars = match &runtime.vars {
+            Value::Null => Map::new(),
+            Value::Object(map) => map.clone(),
+            _ => {
+                return Err(invalid_template(format!(
+                    "template '{}' expects vars to be a JSON object",
+                    self.name
+                )));
+            }
+        };
+        let context = build_command_flow_values(self, runtime, vars);
         let fallback_mode = runtime
             .default_mode
             .as_deref()
@@ -165,7 +164,7 @@ impl CommandFlowTemplate {
 
         let mut steps = Vec::with_capacity(self.steps.len());
         for step in &self.steps {
-            let command = step.command.render(&context);
+            let command = step.command.render(&context)?;
             if command.trim().is_empty() {
                 return Err(invalid_template(format!(
                     "template '{}' rendered an empty command",
@@ -174,7 +173,7 @@ impl CommandFlowTemplate {
             }
 
             let mode = if let Some(mode_template) = &step.mode {
-                let rendered = mode_template.render(&context);
+                let rendered = mode_template.render(&context)?;
                 let normalized = rendered.trim();
                 if normalized.is_empty() {
                     fallback_mode.clone()
@@ -194,7 +193,7 @@ impl CommandFlowTemplate {
                     )));
                 }
 
-                let mut response = prompt.response.render(&context);
+                let mut response = prompt.response.render(&context)?;
                 if prompt.append_newline {
                     response.push('\n');
                 }
@@ -231,73 +230,7 @@ impl CommandFlowTemplate {
             )));
         }
 
-        let mut seen = HashSet::new();
-        for field in &self.vars {
-            let name = field.name.trim();
-            if name.is_empty() {
-                return Err(invalid_template(format!(
-                    "template '{}' contains a var with an empty name",
-                    self.name
-                )));
-            }
-            if !is_safe_var_name(name) {
-                return Err(invalid_template(format!(
-                    "template '{}' has invalid var name '{}'",
-                    self.name, field.name
-                )));
-            }
-            if !seen.insert(name.to_string()) {
-                return Err(invalid_template(format!(
-                    "template '{}' contains duplicate var '{}'",
-                    self.name, field.name
-                )));
-            }
-            if let Some(default_value) = &field.default_value {
-                field.validate_value(default_value)?;
-            }
-        }
-
         Ok(())
-    }
-
-    fn resolve_runtime_vars(&self, raw_vars: &Value) -> Result<Map<String, Value>, ConnectError> {
-        let mut vars = match raw_vars {
-            Value::Null => Map::new(),
-            Value::Object(map) => map.clone(),
-            _ => {
-                return Err(invalid_template(format!(
-                    "template '{}' expects vars to be a JSON object",
-                    self.name
-                )));
-            }
-        };
-
-        for field in &self.vars {
-            let key = field.name.trim();
-            let treat_as_missing =
-                !vars.contains_key(key) || vars.get(key).is_some_and(Value::is_null);
-
-            if treat_as_missing {
-                vars.remove(key);
-                if let Some(default_value) = &field.default_value {
-                    vars.insert(key.to_string(), default_value.clone());
-                    continue;
-                }
-                if field.required {
-                    return Err(invalid_template(format!(
-                        "template '{}' is missing required var '{}'",
-                        self.name, field.name
-                    )));
-                }
-                continue;
-            }
-
-            if let Some(value) = vars.get(key) {
-                field.validate_value(value)?;
-            }
-        }
-
-        Ok(vars)
     }
 }
 
@@ -396,165 +329,6 @@ impl CommandFlowTemplatePrompt {
     }
 }
 
-/// Supported variable kinds for structured command-flow templates.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandFlowTemplateVarKind {
-    String,
-    Secret,
-    Number,
-    Boolean,
-    Json,
-}
-
-impl CommandFlowTemplateVarKind {
-    fn validate_value(self, value: &Value) -> bool {
-        match self {
-            Self::String | Self::Secret => value.is_string(),
-            Self::Number => value.is_number(),
-            Self::Boolean => value.is_boolean(),
-            Self::Json => true,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Secret => "secret",
-            Self::Number => "number",
-            Self::Boolean => "boolean",
-            Self::Json => "json",
-        }
-    }
-}
-
-/// Variable metadata exposed by a reusable command-flow template.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct CommandFlowTemplateVar {
-    /// Variable name referenced by the template.
-    pub name: String,
-    /// Optional display label for UI/forms.
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional human-readable description.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Value type expected at runtime.
-    #[serde(rename = "type", default = "default_var_kind")]
-    pub kind: CommandFlowTemplateVarKind,
-    /// Whether callers must provide a value when no default exists.
-    #[serde(default)]
-    pub required: bool,
-    /// Optional placeholder value for UI/forms.
-    #[serde(default)]
-    pub placeholder: Option<String>,
-    /// Optional list of allowed string values.
-    #[serde(default)]
-    pub options: Vec<String>,
-    /// Optional default value when the caller does not provide one.
-    #[serde(rename = "default", default)]
-    pub default_value: Option<Value>,
-}
-
-impl CommandFlowTemplateVar {
-    /// Build variable metadata for one named runtime value.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            label: None,
-            description: None,
-            kind: default_var_kind(),
-            required: false,
-            placeholder: None,
-            options: Vec::new(),
-            default_value: None,
-        }
-    }
-
-    /// Attach a human-readable label.
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// Attach a human-readable description.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Override the expected value type.
-    pub fn with_kind(mut self, kind: CommandFlowTemplateVarKind) -> Self {
-        self.kind = kind;
-        self
-    }
-
-    /// Mark the variable as required.
-    pub fn with_required(mut self, required: bool) -> Self {
-        self.required = required;
-        self
-    }
-
-    /// Attach a placeholder value for UI/forms.
-    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
-        self.placeholder = Some(placeholder.into());
-        self
-    }
-
-    /// Restrict the variable to one of the provided string options.
-    pub fn with_options<I, S>(mut self, options: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.options = options.into_iter().map(Into::into).collect();
-        self
-    }
-
-    /// Set a default runtime value.
-    pub fn with_default_value(mut self, default_value: Value) -> Self {
-        self.default_value = Some(default_value);
-        self
-    }
-
-    /// Human-friendly label, falling back to the variable name.
-    pub fn display_label(&self) -> &str {
-        self.label
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(self.name.as_str())
-    }
-
-    fn validate_value(&self, value: &Value) -> Result<(), ConnectError> {
-        if !self.kind.validate_value(value) {
-            return Err(invalid_template(format!(
-                "var '{}' expected {}",
-                self.name,
-                self.kind.label()
-            )));
-        }
-
-        if !self.options.is_empty() && !matches!(self.kind, CommandFlowTemplateVarKind::Json) {
-            let Some(text) = value.as_str() else {
-                return Err(invalid_template(format!(
-                    "var '{}' expected one of [{}]",
-                    self.name,
-                    self.options.join(", ")
-                )));
-            };
-            if !self.options.iter().any(|option| option == text) {
-                return Err(invalid_template(format!(
-                    "var '{}' expected one of [{}]",
-                    self.name,
-                    self.options.join(", ")
-                )));
-            }
-        }
-
-        Ok(())
-    }
-}
-
 /// Runtime values used to render a structured command-flow template.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandFlowTemplateRuntime {
@@ -602,57 +376,32 @@ fn build_command_flow_values(
     runtime: &CommandFlowTemplateRuntime,
     mut vars: Map<String, Value>,
 ) -> Map<String, Value> {
-    vars.insert(
-        "default_mode".to_string(),
-        runtime
-            .default_mode
-            .clone()
-            .or_else(|| template.default_mode.clone())
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    vars.insert(
-        "connection_name".to_string(),
-        runtime
-            .connection_name
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    vars.insert(
-        "host".to_string(),
-        runtime
-            .host
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    vars.insert(
-        "username".to_string(),
-        runtime
-            .username
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    vars.insert(
-        "device_profile".to_string(),
-        runtime
-            .device_profile
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    vars
-}
-
-fn is_safe_var_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {}
-        _ => return false,
+    if let Some(default_mode) = runtime
+        .default_mode
+        .clone()
+        .or_else(|| template.default_mode.clone())
+    {
+        vars.insert("default_mode".to_string(), Value::String(default_mode));
     }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    if let Some(connection_name) = &runtime.connection_name {
+        vars.insert(
+            "connection_name".to_string(),
+            Value::String(connection_name.clone()),
+        );
+    }
+    if let Some(host) = &runtime.host {
+        vars.insert("host".to_string(), Value::String(host.clone()));
+    }
+    if let Some(username) = &runtime.username {
+        vars.insert("username".to_string(), Value::String(username.clone()));
+    }
+    if let Some(device_profile) = &runtime.device_profile {
+        vars.insert(
+            "device_profile".to_string(),
+            Value::String(device_profile.clone()),
+        );
+    }
+    vars
 }
 
 #[cfg(test)]
@@ -677,14 +426,7 @@ mod tests {
                     ]),
             ],
         )
-        .with_default_mode("Enable")
-        .with_vars(vec![
-            CommandFlowTemplateVar::new("protocol")
-                .with_required(true)
-                .with_options(["scp", "tftp"]),
-            CommandFlowTemplateVar::new("device_path").with_required(true),
-            CommandFlowTemplateVar::new("server_addr").with_required(true),
-        ]);
+        .with_default_mode("Enable");
 
         let flow = template
             .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({
@@ -707,16 +449,29 @@ mod tests {
     #[test]
     fn missing_required_var_fails_rendering() {
         let template =
-            CommandFlowTemplate::new("demo", vec![CommandFlowTemplateStep::new("show {{host}}")])
-                .with_vars(vec![
-                    CommandFlowTemplateVar::new("host").with_required(true),
-                ]);
+            CommandFlowTemplate::new("demo", vec![CommandFlowTemplateStep::new("show {{host}}")]);
 
         let err = template
             .to_command_flow(&CommandFlowTemplateRuntime::new())
             .expect_err("missing required var should fail");
 
         assert!(matches!(err, ConnectError::InvalidCommandFlowTemplate(_)));
+    }
+
+    #[test]
+    fn null_var_fails_but_empty_string_is_explicit() {
+        let template =
+            CommandFlowTemplate::new("demo", vec![CommandFlowTemplateStep::new("show {{value}}")]);
+
+        let err = template
+            .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({ "value": null })))
+            .expect_err("null var should fail");
+        assert!(matches!(err, ConnectError::InvalidCommandFlowTemplate(_)));
+
+        let flow = template
+            .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({ "value": "" })))
+            .expect("empty string should be explicit");
+        assert_eq!(flow.steps[0].command, "show ");
     }
 
     #[test]
@@ -766,11 +521,7 @@ mod tests {
                     ]),
             ],
         )
-        .with_default_mode("Enable")
-        .with_vars(vec![
-            CommandFlowTemplateVar::new("target").with_required(true),
-            CommandFlowTemplateVar::new("exec_mode").with_required(true),
-        ]);
+        .with_default_mode("Enable");
 
         let flow = template
             .to_command_flow(&CommandFlowTemplateRuntime::new().with_vars(json!({

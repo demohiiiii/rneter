@@ -19,8 +19,7 @@ pub use catalog::{
 };
 pub use command_flow_template::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateText, CommandFlowTemplateVar,
-    CommandFlowTemplateVarKind,
+    CommandFlowTemplateStep, CommandFlowTemplateText,
 };
 pub(crate) use detect::summarize_detect_log_text;
 pub use detect::{

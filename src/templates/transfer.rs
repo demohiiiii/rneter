@@ -1,9 +1,7 @@
 use once_cell::sync::Lazy;
-use serde_json::Value;
 
 use super::command_flow_template::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateStep,
-    CommandFlowTemplateVar, CommandFlowTemplateVarKind,
 };
 
 const DEFAULT_TRANSFER_TIMEOUT_SECS: u64 = 300;
@@ -61,35 +59,6 @@ static CISCO_LIKE_COMMAND_FLOW_TEMPLATE: Lazy<CommandFlowTemplate> = Lazy::new(|
     )
     .with_description("Generic interactive SCP/TFTP copy flow for Cisco-like CLIs.")
     .with_default_mode("Enable")
-    .with_vars(vec![
-        CommandFlowTemplateVar::new("command")
-            .with_label("Copy Command")
-            .with_description("Full device-side copy command, e.g. `copy scp: flash:/image.bin`.")
-            .with_required(true)
-            .with_placeholder("copy scp: flash:/image.bin"),
-        CommandFlowTemplateVar::new("server_addr")
-            .with_label("Server Address")
-            .with_description("SCP/TFTP server reachable from the target device.")
-            .with_required(true)
-            .with_placeholder("192.0.2.10"),
-        CommandFlowTemplateVar::new("remote_path")
-            .with_label("Remote Path")
-            .with_description("Response used for Source/Destination file name prompts.")
-            .with_required(true)
-            .with_placeholder("/images/image.bin"),
-        CommandFlowTemplateVar::new("transfer_username")
-            .with_label("Transfer Username")
-            .with_description("Required when the protocol is SCP.")
-            .with_placeholder("backup"),
-        CommandFlowTemplateVar::new("transfer_password")
-            .with_label("Transfer Password")
-            .with_description("Required when the protocol is SCP.")
-            .with_kind(CommandFlowTemplateVarKind::Secret),
-        CommandFlowTemplateVar::new("overwrite_answer")
-            .with_label("Overwrite Answer")
-            .with_description("Response for overwrite confirmation prompts.")
-            .with_default_value(Value::String("y".to_string())),
-    ])
 });
 
 /// Built-in copy workflow template for Cisco-like CLIs.
@@ -114,7 +83,6 @@ mod tests {
         assert_eq!(template.name, "cisco_like_copy");
         assert_eq!(template.default_mode.as_deref(), Some("Enable"));
         assert_eq!(template.steps.len(), 1);
-        assert_eq!(template.vars.len(), 6);
     }
 
     #[test]
@@ -130,6 +98,7 @@ mod tests {
                         "remote_path": "/pub/image.bin",
                         "transfer_username": "deploy",
                         "transfer_password": "secret",
+                        "overwrite_answer": "y",
                     })),
             )
             .expect("render flow");
@@ -163,6 +132,9 @@ mod tests {
                         "command": "copy startup-config tftp:",
                         "server_addr": "198.51.100.20",
                         "remote_path": "configs/r1.cfg",
+                        "transfer_username": "",
+                        "transfer_password": "",
+                        "overwrite_answer": "y",
                     })),
             )
             .expect("render flow");
@@ -188,6 +160,9 @@ mod tests {
                 "command": "copy startup-config scp:",
                 "server_addr": "198.51.100.20",
                 "remote_path": "configs/r1.cfg",
+                "transfer_username": "",
+                "transfer_password": "",
+                "overwrite_answer": "y",
             })))
             .expect("render flow");
 
@@ -205,6 +180,8 @@ mod tests {
                 "command": "copy scp: flash:/image.bin",
                 "server_addr": "198.51.100.20",
                 "remote_path": "/pub/image.bin",
+                "transfer_username": "",
+                "transfer_password": "",
                 "overwrite_answer": "n",
             })))
             .expect("render flow");

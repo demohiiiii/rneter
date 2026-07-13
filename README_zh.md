@@ -13,6 +13,13 @@
 - [特性](#特性)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [Linux 主机管理](#linux-主机管理)
+- [连接安全](#连接安全)
+- [文件传输](#文件传输)
+- [命令流与交互](#命令流与交互)
+- [会话录制与回放](#会话录制与回放)
+- [事务工作流](#事务工作流)
+- [模板与状态机生态](#模板与状态机生态)
 - [架构](#架构)
 - [生命周期 Hook](#生命周期-hook)
 - [模板自动识别](#模板自动识别)
@@ -50,45 +57,33 @@ rneter = "0.4.6"
 
 ## 快速开始
 
+使用内置模板连接设备并执行一条命令：
+
 ```rust
-use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
+use rneter::session::{Command, ConnectionRequest, ExecutionContext, MANAGER};
 use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 使用预定义的设备模板（例如：Cisco）
-    let handler = templates::cisco()?;
-
-    // 从管理器获取一个连接
-    let sender = MANAGER
-        .get_with_context(
+    let output = MANAGER
+        .execute_command_with_context(
             ConnectionRequest::new(
                 "admin".to_string(),
                 "192.168.1.1".to_string(),
                 22,
                 "password".to_string(),
                 None,
-                handler,
+                templates::cisco()?,
             ),
+            Command {
+                mode: "Enable".to_string(), // Cisco 模板使用 "Enable" 模式
+                command: "show version".to_string(),
+                timeout: Some(60),
+                ..Command::default()
+            },
             ExecutionContext::default(),
         )
         .await?;
-
-    // 执行命令
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd = CmdJob {
-        data: Command {
-            mode: "Enable".to_string(), // Cisco 模板使用 "Enable" 模式
-            command: "show version".to_string(),
-            timeout: Some(60),
-            ..Command::default()
-        },
-        sys: None,
-        responder: tx,
-    };
-
-    sender.send(cmd).await?;
-    let output = rx.await??;
 
     println!("命令执行成功: {}", output.success);
     println!("输出: {}", output.content);
@@ -96,7 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Linux 主机管理
+后续章节分别介绍 Linux 主机、文件传输、交互命令流、连接安全、会话录制和事务工作流。
+
+## Linux 主机管理
 
 `rneter` 支持 Linux 主机管理，并可按需配置提权方式：
 
@@ -196,7 +193,7 @@ let handler = config.build()?;
 直接替换 `DeviceHandlerConfig.edges`；prompt 和命令执行策略也在同一个配置上修改。
 直接以 root 登录时，prompt 会识别为 `Root`，不会执行该 edge。
 
-### 安全级别
+## 连接安全
 
 `rneter` 现在支持安全默认值，并可在连接时自定义 SSH 安全级别：
 
@@ -238,7 +235,9 @@ let _sender = MANAGER
     .await?;
 ```
 
-### 文件上传
+## 文件传输
+
+### SFTP 文件上传
 
 如果远端主机启用了 SSH `sftp` 子系统，`rneter` 可以在同一条认证过的 SSH 连接上上传本地文件：
 
@@ -297,6 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "remote_path": "/pub/image.bin",
                 "transfer_username": "deploy",
                 "transfer_password": "secret",
+                "overwrite_answer": "y",
             })),
     )?;
 
@@ -323,20 +323,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 这个内置模板适配 `cisco`、`cisco_asa`、`cisco_nxos`、`arista`、`aruba_aoscx`、`chaitin`、`dell_os10`、`maipu`、`ruijie`、`venustech` 和 `zte_zxros` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
-这个模板有意不在输入侧做条件分支：只需要传完整的 `command`，再配合通用的
-`server_addr`、`remote_path` 和可选凭据变量即可。
+这个模板有意不在输入侧做条件分支：需要传完整的 `command` 和所有通用 prompt
+变量。当前协议不使用凭据时，也要把对应字段显式传为空字符串。
+
+## 命令流与交互
 
 ### 结构化命令流模板
 
 如果你希望交互流程不要写死在 Rust 里，可以直接构建一个可复用的
-`CommandFlowTemplate`。它保留了之前 TOML 设计里的核心结构：`vars`、`steps`、
-`prompts`、`default_mode`。现在这套模型是纯线性的：每一步只负责发送命令、
+`CommandFlowTemplate`。模板本身只描述 `steps`、`prompts` 和 `default_mode`，变量由
+运行时根据 `{{var}}` 占位符提供。现在这套模型是纯线性的：每一步只负责发送命令、
 回答预期 prompt，然后顺序进入下一步，不再额外维护输出分支。
 
 ```rust
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateVar,
+    CommandFlowTemplateStep,
 };
 use serde_json::json;
 
@@ -359,26 +361,7 @@ let template = CommandFlowTemplate::new(
         CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
     ],
 )
-.with_default_mode("Enable")
-.with_vars(vec![
-    CommandFlowTemplateVar::new("protocol")
-        .with_label("Transfer Protocol")
-        .with_description("Transfer protocol used by the device-side copy workflow.")
-        .with_required(true)
-        .with_options(["scp", "tftp"]),
-    CommandFlowTemplateVar::new("server_addr")
-        .with_label("Server Address")
-        .with_description("SCP/TFTP server reachable from the target device.")
-        .with_required(true),
-    CommandFlowTemplateVar::new("remote_path")
-        .with_label("Remote Path")
-        .with_description("Remote file path that the device should fetch.")
-        .with_required(true),
-    CommandFlowTemplateVar::new("device_path")
-        .with_label("Device Path")
-        .with_description("Destination path on the target device.")
-        .with_required(true),
-]);
+.with_default_mode("Enable");
 
 let flow = template.to_command_flow(
     &CommandFlowTemplateRuntime::new()
@@ -392,12 +375,88 @@ let flow = template.to_command_flow(
 )?;
 ```
 
+变量直接由命令、mode 和 prompt 回复中使用的 `{{var}}` 占位符决定。所有被引用的值都必须通过 `CommandFlowTemplateRuntime.vars` 提供；缺失任意值都会返回 `ConnectError::InvalidCommandFlowTemplate`。模板不再声明变量或提供默认值，因此可选值也必须显式传入，包括空字符串。
+
 现在内置的 `cisco_like_copy_template()` 也是走这套结构化模板抽象，所以后面无论是
 `http`、`ftp`，还是厂商自定义 copy 向导，都可以优先沉淀成同一套模板层，而不是继续往底层结构里塞特例字段。
 
+### 命令交互与命令流
+
+交互行为分布在两个不同的执行边界：
+
+```text
+CommandFlow
+  -> Command
+       -> CommandInteraction
+            -> PromptResponseRule
+```
+
+- `CommandInteraction` 用于一条命令仍在执行、设备尚未返回正常 prompt 时，回答中间询问。
+- `CommandFlow` 用于按声明顺序执行多条完整命令。每条命令返回正常设备 prompt 后，才开始下一条命令。
+- Flow 内的每条命令都可以定义自己的 `CommandInteraction`，两者是组合关系，不是替代关系。
+
+| 机制 | 定义 prompt 匹配规则 | 定义回复值 | 生命周期 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| 模板 `write` / `input_rule` | 是 | 静态值或动态 key | 整个 handler/session | 设备系列通用提示，例如 enable 或 sudo 密码 |
+| `Command.dyn_params` | 否 | 是 | 仅当前命令 | 临时覆盖模板 `input_rule` 使用的动态值 |
+| `Command.interaction` | 是 | 是 | 仅当前命令 | 当前命令特有提示，例如文件名和覆盖确认 |
+| `CommandFlow` | 否 | 否 | 多条完整命令 | 顺序执行、逐命令 mode/timeout 和遇错停止 |
+
+当前命令执行期间的提示处理顺序如下：
+
+```text
+正常设备 prompt
+  -> 命令级 interaction 规则
+  -> 模板级 write/input 规则
+  -> 继续等待输出
+```
+
+匹配正常设备 prompt 会结束当前命令，因此 interaction 规则用于处理中间询问，不用于开始另一条命令。运行时 interaction 正则会在命令执行前编译；无效表达式会返回 `ConnectError::InvalidCommandInteraction`。
+
+模板已经知道如何匹配提示，但某条命令需要临时回复值时，使用 `dyn_params`：
+
+```rust
+use rneter::session::{Command, CommandDynamicParams};
+
+let command = Command {
+    mode: "Enable".to_string(),
+    command: "copy protected-config startup-config".to_string(),
+    dyn_params: CommandDynamicParams {
+        enable_password: Some("temporary-secret\n".to_string()),
+        ..CommandDynamicParams::default()
+    },
+    ..Command::default()
+};
+```
+
+命令级动态值和 interaction 回复都会按原样发送。远端提示需要立即提交回复时，应自行包含结尾换行符。命令结束后会恢复原有动态值，因此不会永久覆盖连接级参数。
+
+提示本身只属于当前命令时，使用 `CommandInteraction`：
+
+```rust
+use rneter::session::{Command, CommandInteraction, PromptResponseRule};
+
+let command = Command {
+    mode: "Enable".to_string(),
+    command: "copy running-config startup-config".to_string(),
+    interaction: CommandInteraction::default()
+        .push_prompt(PromptResponseRule::new(
+            vec![r"(?i)^Destination filename.*\?\s*$".to_string()],
+            "\n".to_string(),
+        ))
+        .push_prompt(PromptResponseRule::new(
+            vec![r"(?i)^Overwrite.*\?\s*$".to_string()],
+            "yes\n".to_string(),
+        )),
+    ..Command::default()
+};
+```
+
+`record_input` 决定匹配到的提示是否保留在捕获输出中。密码类提示应保持为 `false`；需要保留非敏感交互上下文时可以启用。
+
 ### 自定义交互命令流程
 
-如果设备上的流程需要多条命令，或者 prompt 文案并没有内置在模板里，可以直接构建 `CommandFlow`，并给每一步挂运行时 `PromptResponseRule`：
+设备流程需要多条完整命令时，可以直接构建 `CommandFlow`，并为包含中间询问的步骤挂载运行时 `PromptResponseRule`。Flow 在同一个活动连接上执行，每条命令可以使用独立 mode 和 timeout；默认遇到首个失败步骤就停止，也可以通过 `with_max_steps(...)` 限制最大步骤数：
 
 ```rust
 use rneter::session::{
@@ -435,7 +494,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         command: "verify /md5 flash:/image.bin".to_string(),
         timeout: Some(300),
         ..Command::default()
-    }]);
+    }])
+    .with_stop_on_error(true)
+    .with_max_steps(10);
 
     let result = MANAGER
         .execute_command_flow_with_context(
@@ -460,9 +521,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 运行时 prompt-response 规则会优先于模板里的静态输入规则生效，所以后续新增 `scp`、`tftp`、`http` 这类向导式 CLI 交互时，通常不需要再改底层模板定义。
-整个流程会按照声明顺序线性执行，这样设备复制类向导更容易阅读、调试和复用。
+每条命令到达正常 prompt 后，Flow 才会按声明顺序进入下一步。每一步都会在 `CommandFlowOutput.outputs` 中产生独立输出。
 
-### 会话录制与回放
+## 会话录制与回放
 
 ```rust
 use rneter::session::{
@@ -539,9 +600,83 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
-### 事务化命令块下发
+对于 CI 离线测试，可以把 JSONL 录制文件放入 `tests/fixtures/`，并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。可以用下面的命令将线上噪声录制归一化为稳定 fixture：
 
-对于可变更类流程，可以按“块”执行并显式指定 `RollbackPolicy`：
+```bash
+cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+```
+
+## 事务工作流
+
+事务能力由四层模型组成：
+
+```text
+SessionOperation -> TxStep -> TxBlock -> TxWorkflow
+```
+
+- `SessionOperation` 是一个可执行单元，可以是 `Command`、`CommandFlow` 或渲染后的模板。
+- `TxStep` 将正向操作与可选的补偿操作关联起来。
+- `TxBlock` 按顺序执行一组相关步骤，并应用一个显式回滚策略。
+- `TxWorkflow` 按顺序执行多个 block；后续 block 失败时，已提交 block 会按相反顺序执行补偿。
+
+这里的事务是应用层补偿事务，不是数据库事务。设备已经接受的命令不会被原子撤销，回滚操作本身也可能失败。事务行为不会根据命令文本自动推断：调用方必须明确选择策略，并提供该策略所需的补偿操作。
+
+### 回滚策略
+
+| 策略 | 行为 | 典型场景 |
+| --- | --- | --- |
+| `RollbackPolicy::None` | 不尝试回滚 | 只读操作，或由 rneter 之外的系统管理变更 |
+| `RollbackPolicy::WholeResource` | 执行一个 block 级补偿操作 | 可以通过单个操作撤销的创建或更新流程 |
+| `RollbackPolicy::PerStep` | 按相反顺序执行可用的补偿操作 | 各步骤具有独立逆操作的多步变更 |
+
+对于 `WholeResource`，`trigger_step_index` 表示必须成功执行哪个正向步骤后，整体回滚才有效。对于 `PerStep`，`rollback_on_failure` 决定是否尝试补偿失败步骤本身；此前已成功的步骤仍按执行顺序的反向顺序处理。
+
+```rust
+let block = TxBlock {
+    name: "interface-update".to_string(),
+    rollback_policy: RollbackPolicy::PerStep,
+    steps: vec![
+        TxStep::new(Command {
+            mode: "Config".to_string(),
+            command: "interface ethernet 1/1".to_string(),
+            ..Command::default()
+        }),
+        TxStep::new(Command {
+            mode: "Config".to_string(),
+            command: "description uplink".to_string(),
+            ..Command::default()
+        })
+        .with_rollback(Command {
+            mode: "Config".to_string(),
+            command: "no description".to_string(),
+            ..Command::default()
+        })
+        .with_rollback_on_failure(true),
+    ],
+    fail_fast: true,
+};
+```
+
+`PerStep` 允许某些步骤不提供 rollback；无法生成补偿计划时，结果中会记录为跳过。
+
+### 失败处理顺序
+
+使用推荐配置 `fail_fast: true` 时，失败处理顺序如下：
+
+```text
+正向步骤失败
+  -> 停止当前 block
+  -> 执行当前 block 的回滚策略
+  -> 将 workflow 标记为失败
+  -> 按相反顺序补偿此前已提交的 block
+  -> 分别返回正向执行与回滚结果
+```
+
+在 block 层，`fail_fast` 会在首次失败后停止剩余步骤；在 workflow 层，它会在首个 block 失败后停止启动后续 block。需要统一成败语义时应保持开启。
+
+### 构建并执行单个事务块
+
+下面的 block 用于创建地址对象。步骤 `0` 成功后，如果后续步骤失败，整体回滚操作会删除该对象：
 
 ```rust
 use rneter::session::{
@@ -609,7 +744,9 @@ println!(
 );
 ```
 
-现在 `TxStep::new(...)` 接受的是任意 `SessionOperation`，所以 workflow 里的一个步骤既可以是
+### 步骤操作
+
+`TxStep::new(...)` 接受任意 `SessionOperation`，因此事务步骤既可以是
 单条命令，也可以是多步 `CommandFlow`，或者一个可复用的模板调用：
 
 ```rust
@@ -621,6 +758,7 @@ let copy_step = TxStep::new(SessionOperation::template(
         "remote_path": "/srv/images/fw.bin",
         "transfer_username": "deploy",
         "transfer_password": "secret",
+        "overwrite_answer": "y",
     })),
 ));
 
@@ -631,7 +769,9 @@ println!(
 );
 ```
 
-对于“地址对象 -> 服务对象 -> 策略”这类多块统一成败场景，可使用 workflow：
+### 多块工作流
+
+“地址对象 -> 服务对象 -> 策略”这类有顺序依赖的场景可以使用 `TxWorkflow`。某个 block 失败时，会先执行该 block 自身的回滚策略，然后依据各 block 的策略，按相反顺序补偿此前已提交的 block。
 
 ```rust
 use rneter::session::{TxWorkflow, TxWorkflowResult};
@@ -691,7 +831,20 @@ for block in &workflow_result.block_results {
 }
 ```
 
-也可以通过显式回滚策略构建事务块：
+### 检查执行结果
+
+`TxResult` 和 `TxWorkflowResult` 同时保留正向执行与回滚细节：
+
+- Block 结果：`committed`、`failed_step`、`failure_reason`
+- 回滚结果：`rollback_attempted`、`rollback_succeeded`、`rollback_errors`
+- Step 结果：`execution_state`、`failure_reason`、`rollback_state`、`rollback_reason`
+- 嵌套操作输出：`forward_operation_steps`、`rollback_operation_steps`、`block_rollback_steps`
+
+调用方可以据此区分正向操作失败、回滚被跳过，以及已尝试但执行失败的回滚。
+
+### 便捷构建函数
+
+`templates::build_tx_block` 可以把命令字符串列表转换为 `TxStep`。它仍然要求显式传入 `RollbackPolicy`，不会判断命令是只读还是修改操作：
 
 ```rust
 use rneter::session::{Command, RollbackPolicy};
@@ -717,16 +870,32 @@ let block = templates::build_tx_block(
 )?;
 ```
 
-对于 CI 的离线测试，可以将 JSONL 录制文件放在 `tests/fixtures/` 下，
-并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。
+### 使用建议
 
-将线上录制归一化为稳定 fixture：
+- 补偿操作应尽量保持幂等，避免重试造成额外影响。
+- 只有在回滚目标资源确定已经创建后，才应设置对应的 `trigger_step_index`。
+- 仅当失败步骤可能部分生效且能够安全补偿时，才启用 `rollback_on_failure`。
+- 回滚失败应作为独立的运维事件处理；事务失败不等于状态一定已经恢复。
+- 手动构造 block 或 workflow 时，建议在执行前调用校验方法。
+- 使用会话录制保留审计信息，并离线回放正向执行和回滚行为。
 
-```bash
-cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+### 录制与审计
+
+启用会话录制后，事务执行会产生 block、step、rollback 和 workflow 生命周期事件。主要事件类型包括 `tx_block_started`、`tx_step_succeeded`、`tx_step_failed`、`tx_rollback_started`、`tx_rollback_step_succeeded`、`tx_rollback_step_failed`、`tx_block_finished`、`tx_workflow_started` 和 `tx_workflow_finished`。
+
+```json
+{
+  "kind": "tx_block_finished",
+  "block_name": "addr-create",
+  "committed": false,
+  "rollback_attempted": true,
+  "rollback_succeeded": true
+}
 ```
 
-### 模板与状态机生态
+如果只需要审计生命周期结果，可以使用 `SessionRecordLevel::KeyEventsOnly`；需要排查原始数据块和详细命令输出时，使用 `Full`。
+
+## 模板与状态机生态
 
 你可以把内置模板当作注册表管理，并直接对状态图做诊断：
 
@@ -769,7 +938,6 @@ assert!(handler.states().iter().any(|state| state == "custommode"));
 - Prompt 前后态：每条 `command_output` 都记录 `prompt_before`/`prompt_after`
 - 状态机 prompt 前后态：事件可记录 `fsm_prompt_before`/`fsm_prompt_after`
 - 返回值带 prompt：命令执行与离线回放的 `Output` 现在包含 `prompt`
-- 事务生命周期事件：`tx_block_started`、`tx_step_succeeded`、`tx_step_failed`、`tx_rollback_started`、`tx_rollback_step_succeeded`、`tx_rollback_step_failed`、`tx_block_finished`
 - 兼容旧 schema：历史 `connection_established` 的 `prompt`/`state` 字段仍可读取
 - fixture 测试工作流：`tests/fixtures/` 提供成功流/失败流/状态切换样本，`tests/replay_fixtures.rs` 提供快照与质量校验
 
@@ -787,18 +955,6 @@ assert!(handler.states().iter().any(|state| state == "custommode"));
   "success": true,
   "content": "Version 1.0",
   "all": "show version\nVersion 1.0\nrouter#"
-}
-```
-
-事务生命周期事件示例：
-
-```json
-{
-  "kind": "tx_block_finished",
-  "block_name": "addr-create",
-  "committed": false,
-  "rollback_attempted": true,
-  "rollback_succeeded": true
 }
 ```
 

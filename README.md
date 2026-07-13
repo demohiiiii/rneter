@@ -13,6 +13,13 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Linux Server Management](#linux-server-management)
+- [File Transfers](#file-transfers)
+- [Command Flows and Interaction](#command-flows-and-interaction)
+- [Connection Security](#connection-security)
+- [Session Recording and Replay](#session-recording-and-replay)
+- [Transaction Workflows](#transaction-workflows)
+- [Template and State-Machine Ecosystem](#template-and-state-machine-ecosystem)
 - [Architecture](#architecture)
 - [Lifecycle Hooks](#lifecycle-hooks)
 - [Template Autodetect](#template-autodetect)
@@ -50,45 +57,33 @@ rneter = "0.4.6"
 
 ## Quick Start
 
+Connect with a built-in template and execute one command:
+
 ```rust
-use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER, Command, CmdJob};
+use rneter::session::{Command, ConnectionRequest, ExecutionContext, MANAGER};
 use rneter::templates;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Use a predefined device template (e.g., Cisco)
-    let handler = templates::cisco()?;
-
-    // Get a connection from the manager
-    let sender = MANAGER
-        .get_with_context(
+    let output = MANAGER
+        .execute_command_with_context(
             ConnectionRequest::new(
                 "admin".to_string(),
                 "192.168.1.1".to_string(),
                 22,
                 "password".to_string(),
                 None,
-                handler,
+                templates::cisco()?,
             ),
+            Command {
+                mode: "Enable".to_string(), // Cisco template uses "Enable" mode
+                command: "show version".to_string(),
+                timeout: Some(60),
+                ..Command::default()
+            },
             ExecutionContext::default(),
         )
         .await?;
-
-    // Execute a command
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let cmd = CmdJob {
-        data: Command {
-            mode: "Enable".to_string(), // Cisco template uses "Enable" mode
-            command: "show version".to_string(),
-            timeout: Some(60),
-            ..Command::default()
-        },
-        sys: None,
-        responder: tx,
-    };
-
-    sender.send(cmd).await?;
-    let output = rx.await??;
 
     println!("Command successful: {}", output.success);
     println!("Output: {}", output.content);
@@ -96,7 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Linux Server Management
+The following sections cover Linux hosts, transfers, interactive command flows, security, recording, and transactions independently.
+
+## Linux Server Management
 
 `rneter` supports Linux server management with flexible privilege escalation:
 
@@ -213,7 +210,9 @@ privilege escalation by replacing `DeviceHandlerConfig.edges`. Prompts and comma
 behavior are customized on the same config. Direct root logins are recognized as `Root` from
 the prompt and do not execute the edge.
 
-### File Uploads
+## File Transfers
+
+### SFTP File Uploads
 
 If the remote host enables the SSH `sftp` subsystem, `rneter` can upload local files over the
 same authenticated SSH connection:
@@ -276,6 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "remote_path": "/pub/image.bin",
                 "transfer_username": "deploy",
                 "transfer_password": "secret",
+                "overwrite_answer": "y",
             })),
     )?;
 
@@ -305,7 +305,10 @@ This built-in template matches the prompt style used by `cisco`, `cisco_asa`, `c
 `arista`, `aruba_aoscx`, `chaitin`, `dell_os10`, `maipu`, `ruijie`, `venustech`, and `zte_zxros`.
 If a vendor wizard differs, build another `CommandFlowTemplate` on top of the same abstraction.
 The template intentionally avoids input-side conditional branches: pass the exact `command`
-plus shared prompt vars (`server_addr`, `remote_path`, and optional credentials).
+plus all shared prompt vars. Credentials that are not used by the selected protocol must be
+supplied as empty strings.
+
+## Command Flows and Interaction
 
 ### Structured Command-Flow Templates
 
@@ -316,7 +319,7 @@ prompts, and then continues to the next step. There is no output-side branching 
 ```rust
 use rneter::templates::{
     CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateVar,
+    CommandFlowTemplateStep,
 };
 use serde_json::json;
 
@@ -339,26 +342,7 @@ let template = CommandFlowTemplate::new(
         CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
     ],
 )
-.with_default_mode("Enable")
-.with_vars(vec![
-    CommandFlowTemplateVar::new("protocol")
-        .with_label("Transfer Protocol")
-        .with_description("Transfer protocol used by the device-side copy workflow.")
-        .with_required(true)
-        .with_options(["scp", "tftp"]),
-    CommandFlowTemplateVar::new("server_addr")
-        .with_label("Server Address")
-        .with_description("SCP/TFTP server reachable from the target device.")
-        .with_required(true),
-    CommandFlowTemplateVar::new("remote_path")
-        .with_label("Remote Path")
-        .with_description("Remote file path that the device should fetch.")
-        .with_required(true),
-    CommandFlowTemplateVar::new("device_path")
-        .with_label("Device Path")
-        .with_description("Destination path on the target device.")
-        .with_required(true),
-]);
+.with_default_mode("Enable");
 
 let flow = template.to_command_flow(
     &CommandFlowTemplateRuntime::new()
@@ -372,14 +356,89 @@ let flow = template.to_command_flow(
 )?;
 ```
 
+Variables are discovered directly from the `{{var}}` placeholders used by commands, modes, and prompt responses. Supply every referenced value through `CommandFlowTemplateRuntime.vars`; a missing value returns `ConnectError::InvalidCommandFlowTemplate`. Templates do not declare variables or provide defaults, so optional values must also be explicit, including empty strings.
+
 The built-in `cisco_like_copy_template()` uses the same abstraction, so future `http`, `ftp`,
 or vendor-specific copy wizards can stay in one structured template layer instead of adding more
 one-off Rust structs.
 
+### Command Interaction and Command Flows
+
+Interactive behavior is modeled at two different execution boundaries:
+
+```text
+CommandFlow
+  -> Command
+       -> CommandInteraction
+            -> PromptResponseRule
+```
+
+- `CommandInteraction` answers prompts while one command is still running and before the device returns its normal prompt.
+- `CommandFlow` runs multiple complete commands in declaration order. Each command finishes at a normal device prompt before the next command starts.
+- A command inside a flow can define its own `CommandInteraction`, so the two mechanisms compose rather than compete.
+
+| Mechanism | Defines prompt patterns | Defines response values | Lifetime | Use it for |
+| --- | --- | --- | --- | --- |
+| Template `write` / `input_rule` | Yes | Static value or dynamic key | Entire handler/session | Prompts common to the device family, such as enable or sudo passwords |
+| `Command.dyn_params` | No | Yes | Current command only | Temporarily overriding values consumed by template `input_rule`s |
+| `Command.interaction` | Yes | Yes | Current command only | Prompts unique to one command, such as filenames and overwrite confirmations |
+| `CommandFlow` | No | No | Multiple complete commands | Ordered execution, per-command modes/timeouts, and stop-on-error behavior |
+
+Prompt handling for the currently executing command uses this order:
+
+```text
+normal device prompt
+  -> command-level interaction rules
+  -> template-level write/input rules
+  -> continue waiting for output
+```
+
+A normal device prompt completes the command, so interaction rules are for intermediate questions, not for starting another command. Runtime interaction regexes are compiled before command execution; invalid patterns return `ConnectError::InvalidCommandInteraction`.
+
+Use `dyn_params` when the template already knows which prompt to match but one command needs a temporary value:
+
+```rust
+use rneter::session::{Command, CommandDynamicParams};
+
+let command = Command {
+    mode: "Enable".to_string(),
+    command: "copy protected-config startup-config".to_string(),
+    dyn_params: CommandDynamicParams {
+        enable_password: Some("temporary-secret\n".to_string()),
+        ..CommandDynamicParams::default()
+    },
+    ..Command::default()
+};
+```
+
+Command-level dynamic values and interaction responses are sent as provided. Include a trailing newline when the remote prompt expects the response to be submitted immediately. Dynamic values are restored after the command completes, so they do not permanently replace connection-level values.
+
+Use `CommandInteraction` when the prompt itself belongs only to this command:
+
+```rust
+use rneter::session::{Command, CommandInteraction, PromptResponseRule};
+
+let command = Command {
+    mode: "Enable".to_string(),
+    command: "copy running-config startup-config".to_string(),
+    interaction: CommandInteraction::default()
+        .push_prompt(PromptResponseRule::new(
+            vec![r"(?i)^Destination filename.*\?\s*$".to_string()],
+            "\n".to_string(),
+        ))
+        .push_prompt(PromptResponseRule::new(
+            vec![r"(?i)^Overwrite.*\?\s*$".to_string()],
+            "yes\n".to_string(),
+        )),
+    ..Command::default()
+};
+```
+
+`record_input` controls whether the matched prompt remains in captured output. Keep it `false` for password-like prompts; enable it when the prompt is useful non-sensitive context.
+
 ### Custom Interactive Command Flows
 
-If a device workflow needs multiple commands or prompt patterns that are not baked into a template,
-build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to each step:
+If a device workflow needs multiple complete commands, build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to the steps that contain intermediate questions. A flow executes on one live connection, supports a separate mode and timeout for each command, stops on the first unsuccessful step by default, and can be bounded with `with_max_steps(...)`:
 
 ```rust
 use rneter::session::{
@@ -417,7 +476,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         command: "verify /md5 flash:/image.bin".to_string(),
         timeout: Some(300),
         ..Command::default()
-    }]);
+    }])
+    .with_stop_on_error(true)
+    .with_max_steps(10);
 
     let result = MANAGER
         .execute_command_flow_with_context(
@@ -443,10 +504,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Runtime prompt-response rules are evaluated before template static input rules, so new SCP/TFTP/HTTP
 style wizards can usually be added without changing the underlying template definition.
-Each flow then continues step-by-step in declaration order, which keeps device copy workflows
-predictable and easier to review.
+After each command reaches its normal prompt, the flow continues to the next step in declaration
+order. Each step produces an independent output in `CommandFlowOutput.outputs`.
 
-### Security Levels
+## Connection Security
 
 `rneter` now supports secure defaults and configurable SSH security levels when connecting:
 
@@ -488,7 +549,7 @@ let _sender = MANAGER
     .await?;
 ```
 
-### Session Recording and Replay
+## Session Recording and Replay
 
 ```rust
 use rneter::session::{
@@ -565,9 +626,83 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
-### Transactional Command Blocks
+For CI-style offline tests, store JSONL recordings under `tests/fixtures/` and replay them in integration tests (see `tests/replay_fixtures.rs`). Normalize noisy online recordings into stable fixtures with:
 
-For mutable workflows, execute a block with explicit `RollbackPolicy`:
+```bash
+cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+```
+
+## Transaction Workflows
+
+Transactions organize state-changing automation into four layers:
+
+```text
+SessionOperation -> TxStep -> TxBlock -> TxWorkflow
+```
+
+- `SessionOperation` is one executable unit: a `Command`, `CommandFlow`, or rendered template.
+- `TxStep` pairs a forward operation with an optional compensating operation.
+- `TxBlock` executes related steps in order under one explicit rollback policy.
+- `TxWorkflow` executes multiple blocks and compensates previously committed blocks in reverse order when a later block fails.
+
+These are application-level compensating transactions, not database transactions. Commands already accepted by a device are not atomically undone, and rollback operations can also fail. Transaction behavior is never inferred from command text: callers explicitly select the policy and provide the compensating operations required by that policy.
+
+### Rollback Policies
+
+| Policy | Behavior | Typical use |
+| --- | --- | --- |
+| `RollbackPolicy::None` | Never attempts rollback | Read-only work or changes intentionally managed outside rneter |
+| `RollbackPolicy::WholeResource` | Runs one block-level compensating operation | Create/update workflows that can be reverted with one operation |
+| `RollbackPolicy::PerStep` | Runs available compensating operations in reverse order | Multi-step changes where steps have independent inverse operations |
+
+For `WholeResource`, `trigger_step_index` identifies the forward step that must complete before rollback is valid. For `PerStep`, `rollback_on_failure` controls whether the failed step's own compensation is attempted; previously successful steps are still considered in reverse execution order.
+
+```rust
+let block = TxBlock {
+    name: "interface-update".to_string(),
+    rollback_policy: RollbackPolicy::PerStep,
+    steps: vec![
+        TxStep::new(Command {
+            mode: "Config".to_string(),
+            command: "interface ethernet 1/1".to_string(),
+            ..Command::default()
+        }),
+        TxStep::new(Command {
+            mode: "Config".to_string(),
+            command: "description uplink".to_string(),
+            ..Command::default()
+        })
+        .with_rollback(Command {
+            mode: "Config".to_string(),
+            command: "no description".to_string(),
+            ..Command::default()
+        })
+        .with_rollback_on_failure(true),
+    ],
+    fail_fast: true,
+};
+```
+
+Steps without a rollback operation are valid under `PerStep`; they are reported as skipped when no compensation can be planned.
+
+### Failure Sequence
+
+With the recommended `fail_fast: true`, failure handling follows this order:
+
+```text
+forward step fails
+  -> stop the current block
+  -> run the current block's rollback policy
+  -> mark the workflow failed
+  -> compensate earlier committed blocks in reverse order
+  -> return forward and rollback results separately
+```
+
+At block level, `fail_fast` stops remaining steps after the first failure. At workflow level, it stops starting later blocks after the first failed block. Keep it enabled for all-or-nothing workflows.
+
+### Build and Execute a Block
+
+The following block creates an address object. If a later step fails after step `0` succeeds, the whole-resource rollback removes the object:
 
 ```rust
 use rneter::session::{
@@ -635,7 +770,9 @@ println!(
 );
 ```
 
-`TxStep::new(...)` now accepts any `SessionOperation`, so a workflow step can be a single
+### Step Operations
+
+`TxStep::new(...)` accepts any `SessionOperation`, so a transaction step can be a single
 command, a multi-step `CommandFlow`, or a reusable template invocation:
 
 ```rust
@@ -647,6 +784,7 @@ let copy_step = TxStep::new(SessionOperation::template(
         "remote_path": "/srv/images/fw.bin",
         "transfer_username": "deploy",
         "transfer_password": "secret",
+        "overwrite_answer": "y",
     })),
 ));
 
@@ -657,7 +795,9 @@ println!(
 );
 ```
 
-For multi-block all-or-nothing workflows (for example addresses -> services -> policy):
+### Multi-Block Workflows
+
+Use `TxWorkflow` for ordered blocks such as addresses -> services -> policy. If a block fails, its own rollback policy runs first; previously committed blocks are then compensated in reverse order according to their policies.
 
 ```rust
 use rneter::session::{TxWorkflow, TxWorkflowResult};
@@ -717,7 +857,20 @@ for block in &workflow_result.block_results {
 }
 ```
 
-You can also build blocks with an explicit rollback policy:
+### Inspect Results
+
+`TxResult` and `TxWorkflowResult` retain both forward and rollback details:
+
+- Block outcome: `committed`, `failed_step`, `failure_reason`
+- Rollback outcome: `rollback_attempted`, `rollback_succeeded`, `rollback_errors`
+- Step outcome: `execution_state`, `failure_reason`, `rollback_state`, `rollback_reason`
+- Nested operation output: `forward_operation_steps`, `rollback_operation_steps`, `block_rollback_steps`
+
+This allows callers to distinguish a failed forward operation, a skipped rollback, and a rollback that was attempted but failed.
+
+### Convenience Builder
+
+`templates::build_tx_block` converts a list of command strings into `TxStep` values. It still requires an explicit `RollbackPolicy` and does not classify commands as read-only or mutating:
 
 ```rust
 use rneter::session::{Command, RollbackPolicy};
@@ -743,16 +896,32 @@ let block = templates::build_tx_block(
 )?;
 ```
 
-For CI-style offline tests, you can store JSONL recordings under `tests/fixtures/`
-and replay them in integration tests (see `tests/replay_fixtures.rs`).
+### Operational Guidance
 
-To normalize noisy online recordings into stable fixtures:
+- Keep compensating operations idempotent so retries do not create additional damage.
+- Use `trigger_step_index` only after the resource addressed by the rollback is known to exist.
+- Set `rollback_on_failure` only when a partially applied failed step is safe to compensate.
+- Treat rollback failure as a separate operational incident; a failed transaction is not necessarily restored.
+- Validate blocks and workflows before execution when constructing them manually.
+- Use session recording for audit trails and offline replay of forward/rollback behavior.
 
-```bash
-cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/session_new.jsonl
+### Recording and Audit
+
+When session recording is enabled, transaction execution emits block, step, rollback, and workflow lifecycle events. Key event kinds include `tx_block_started`, `tx_step_succeeded`, `tx_step_failed`, `tx_rollback_started`, `tx_rollback_step_succeeded`, `tx_rollback_step_failed`, `tx_block_finished`, `tx_workflow_started`, and `tx_workflow_finished`.
+
+```json
+{
+  "kind": "tx_block_finished",
+  "block_name": "addr-create",
+  "committed": false,
+  "rollback_attempted": true,
+  "rollback_succeeded": true
+}
 ```
 
-### Template and State-Machine Ecosystem
+Use `SessionRecordLevel::KeyEventsOnly` when lifecycle outcomes are sufficient, or `Full` when raw chunks and detailed command output are required for diagnosis.
+
+## Template and State-Machine Ecosystem
 
 You can manage built-in templates as a catalog and run state-graph diagnostics:
 
@@ -795,7 +964,6 @@ New recording/replay capabilities:
 - Prompt tracking: each `command_output` now records both `prompt_before`/`prompt_after`
 - FSM prompt tracking: each event can include `fsm_prompt_before`/`fsm_prompt_after`
 - Output prompt: command/replay results now include `Output.prompt`
-- Transaction lifecycle recording: `tx_block_started`, `tx_step_succeeded`, `tx_step_failed`, `tx_rollback_started`, `tx_rollback_step_succeeded`, `tx_rollback_step_failed`, `tx_block_finished`
 - Schema compatibility: legacy `connection_established` fields (`prompt`/`state`) remain readable
 - Fixture quality workflow: `tests/fixtures/` includes success/failure/state-switch samples and snapshot checks in `tests/replay_fixtures.rs`
 
@@ -813,18 +981,6 @@ Example `command_output` event shape:
   "success": true,
   "content": "Version 1.0",
   "all": "show version\nVersion 1.0\nrouter#"
-}
-```
-
-Example transaction lifecycle event shape:
-
-```json
-{
-  "kind": "tx_block_finished",
-  "block_name": "addr-create",
-  "committed": false,
-  "rollback_attempted": true,
-  "rollback_succeeded": true
 }
 ```
 
