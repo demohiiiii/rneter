@@ -335,18 +335,6 @@ pub struct CommandFlowTemplateRuntime {
     /// Per-render default mode. Falls back to template `default_mode`.
     #[serde(default)]
     pub default_mode: Option<String>,
-    /// Optional connection name exposed to the renderer.
-    #[serde(default)]
-    pub connection_name: Option<String>,
-    /// Optional host exposed to the renderer.
-    #[serde(default)]
-    pub host: Option<String>,
-    /// Optional username exposed to the renderer.
-    #[serde(default)]
-    pub username: Option<String>,
-    /// Optional device profile exposed to the renderer.
-    #[serde(default)]
-    pub device_profile: Option<String>,
     /// Template vars. Must be a JSON object when provided.
     #[serde(default)]
     pub vars: Value,
@@ -382,24 +370,6 @@ fn build_command_flow_values(
         .or_else(|| template.default_mode.clone())
     {
         vars.insert("default_mode".to_string(), Value::String(default_mode));
-    }
-    if let Some(connection_name) = &runtime.connection_name {
-        vars.insert(
-            "connection_name".to_string(),
-            Value::String(connection_name.clone()),
-        );
-    }
-    if let Some(host) = &runtime.host {
-        vars.insert("host".to_string(), Value::String(host.clone()));
-    }
-    if let Some(username) = &runtime.username {
-        vars.insert("username".to_string(), Value::String(username.clone()));
-    }
-    if let Some(device_profile) = &runtime.device_profile {
-        vars.insert(
-            "device_profile".to_string(),
-            Value::String(device_profile.clone()),
-        );
     }
     vars
 }
