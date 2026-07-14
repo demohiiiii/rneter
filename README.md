@@ -251,118 +251,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 This path requires SFTP support on the remote host. For devices that only expose CLI-driven
-transfer commands such as `copy scp:` or `copy tftp:`, build a transfer flow from `templates`
-and execute it through the generic command-flow API.
-
-### Network Device SCP/TFTP Transfers
-
-For Cisco-like CLIs, `rneter` ships a built-in reusable copy template. Render it with runtime
-variables, then execute the resulting `CommandFlow` through the generic command-flow API:
-
-```rust
-use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
-use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
-use serde_json::json;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let flow = cisco_like_copy_template().to_command_flow(
-        &CommandFlowTemplateRuntime::new()
-            .with_default_mode("Enable")
-            .with_vars(json!({
-                "command": "copy scp: flash:/image.bin",
-                "server_addr": "198.51.100.20",
-                "remote_path": "/pub/image.bin",
-                "transfer_username": "deploy",
-                "transfer_password": "secret",
-                "overwrite_answer": "y",
-            })),
-    )?;
-
-    let result = MANAGER
-        .execute_command_flow_with_context(
-            ConnectionRequest::new(
-                "admin".to_string(),
-                "192.168.1.1".to_string(),
-                22,
-                "password".to_string(),
-                None,
-                templates::cisco()?,
-            ),
-            flow,
-            ExecutionContext::default(),
-        )
-        .await?;
-
-    if let Some(last) = result.outputs.last() {
-        println!("Transfer output: {}", last.content);
-    }
-    Ok(())
-}
-```
-
-This built-in template matches the prompt style used by `cisco`, `cisco_asa`, `cisco_nxos`,
-`arista`, `aruba_aoscx`, `chaitin`, `dell_os10`, `maipu`, `ruijie`, `venustech`, and `zte_zxros`.
-If a vendor wizard differs, build another `CommandFlowTemplate` on top of the same abstraction.
-The template intentionally avoids input-side conditional branches: pass the exact `command`
-plus all shared prompt vars. Credentials that are not used by the selected protocol must be
-supplied as empty strings.
+transfer commands such as `copy scp:` or `copy tftp:`, callers can build a `CommandFlow` with
+command-specific `CommandInteraction` rules and execute it through the generic command-flow API.
 
 ## Command Flows and Interaction
-
-### Structured Command-Flow Templates
-
-If you want a less hard-coded workflow, build a reusable `CommandFlowTemplate` in Rust.
-The current model is intentionally linear: each step sends one command, answers any expected
-prompts, and then continues to the next step. There is no output-side branching layer to maintain.
-
-```rust
-use rneter::templates::{
-    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep,
-};
-use serde_json::json;
-
-let template = CommandFlowTemplate::new(
-    "copy_with_verify",
-    vec![
-        CommandFlowTemplateStep::from_template("copy {{protocol}}: {{device_path}}")
-            .with_prompts(vec![
-                CommandFlowTemplatePrompt::from_template(
-                    vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
-                    "{{server_addr}}",
-                )
-                .with_append_newline(true),
-                CommandFlowTemplatePrompt::from_template(
-                    vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
-                    "{{remote_path}}",
-                )
-                .with_append_newline(true),
-            ]),
-        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
-    ],
-)
-.with_default_mode("Enable");
-
-let flow = template.to_command_flow(
-    &CommandFlowTemplateRuntime::new()
-        .with_default_mode("Enable")
-        .with_vars(json!({
-            "protocol": "scp",
-            "server_addr": "198.51.100.20",
-            "remote_path": "/pub/image.bin",
-            "device_path": "flash:/image.bin",
-        })),
-)?;
-```
-
-Variables are discovered directly from the `{{var}}` placeholders used by commands, modes, and prompt responses. Supply every referenced value through `CommandFlowTemplateRuntime.vars`; a missing value returns `ConnectError::InvalidCommandFlowTemplate`. Templates do not declare variables or provide defaults, so optional values must also be explicit, including empty strings.
-
-The built-in `cisco_like_copy_template()` uses the same abstraction, so future `http`, `ftp`,
-or vendor-specific copy wizards can stay in one structured template layer instead of adding more
-one-off Rust structs.
-
-### Command Interaction and Command Flows
 
 Interactive behavior is modeled at two different execution boundaries:
 
@@ -709,7 +601,7 @@ use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
     RollbackPolicy, TxBlock, TxStep,
 };
-use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
+use rneter::templates;
 
 let block = TxBlock {
     name: "addr-create".to_string(),
@@ -772,23 +664,23 @@ println!(
 
 ### Step Operations
 
-`TxStep::new(...)` accepts a command or `CommandFlow`. Render reusable templates before building
-the transaction so the caller controls whether the result is one flow or several transaction steps:
+`TxStep::new(...)` accepts either a command or a concrete `CommandFlow`:
 
 ```rust
-let copy_flow = cisco_like_copy_template().to_command_flow(
-    &CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
-        "command": "copy scp: flash:/fw.bin",
-        "server_addr": "192.168.1.100",
-        "remote_path": "/srv/images/fw.bin",
-        "transfer_username": "deploy",
-        "transfer_password": "secret",
-        "overwrite_answer": "y",
-    })),
-)?;
-let copy_step = TxStep::new(copy_flow);
+let verify_step = TxStep::new(CommandFlow::new(vec![
+    Command {
+        mode: "Enable".to_string(),
+        command: "show running-config".to_string(),
+        ..Command::default()
+    },
+    Command {
+        mode: "Enable".to_string(),
+        command: "show startup-config".to_string(),
+        ..Command::default()
+    },
+]));
 
-let summary = copy_step.run.summary()?;
+let summary = verify_step.run.summary()?;
 println!(
     "kind={} mode={} steps={} desc={}",
     summary.kind, summary.mode, summary.step_count, summary.description
@@ -1302,7 +1194,7 @@ At a high level:
 | ------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | Run `show version`             | Send a command and read until prompt                           | Send a command through the channel and read until prompt pattern                | Converge to target mode, execute command, and update FSM from returned prompt    |
 | Send config commands           | Enter config mode, send commands, optionally exit              | Acquire config privilege level, send configs, later return to desired privilege | Treat config as a named state and route execution there through transition edges |
-| Handle `copy scp:` prompts     | Use timing / multiline helpers with expected follow-up prompts | Use interactive send/read operations with explicit prompt expectations          | Model the interaction as a reusable `CommandFlow` or `CommandFlowTemplate`       |
+| Handle `copy scp:` prompts     | Use timing / multiline helpers with expected follow-up prompts | Use interactive send/read operations with explicit prompt expectations          | Build a `CommandFlow` with command-specific `CommandInteraction` rules            |
 | Handle `[edit]` + `user@host#` | Tune prompt logic for this platform                            | Tune prompt pattern / channel read behavior                                     | Model `[edit]` as a prompt prefix and merge it into the next prompt candidate    |
 
 ### Why This Matters

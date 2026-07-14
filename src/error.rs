@@ -57,10 +57,6 @@ pub enum ConnectError {
     #[error("invalid command flow: {0}")]
     InvalidCommandFlow(String),
 
-    /// Command flow template definition or rendering is invalid.
-    #[error("invalid command flow template: {0}")]
-    InvalidCommandFlowTemplate(String),
-
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),

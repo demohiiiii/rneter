@@ -4,22 +4,16 @@
 //! the public exports stable while the implementation is split by concern.
 
 mod catalog;
-mod command_flow_template;
 mod detect;
 mod detect_profile;
 mod linux;
 mod network;
 mod registry;
 mod transaction;
-mod transfer;
 
 pub use catalog::{
     BUILTIN_TEMPLATES, TemplateCapability, TemplateMetadata, available_templates, template_catalog,
     template_metadata,
-};
-pub use command_flow_template::{
-    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep, CommandFlowTemplateText,
 };
 pub(crate) use detect::summarize_detect_log_text;
 pub use detect::{
@@ -49,4 +43,3 @@ pub use registry::{
     diagnose_all_templates_json, diagnose_template, diagnose_template_json,
 };
 pub use transaction::build_tx_block;
-pub use transfer::cisco_like_copy_template;

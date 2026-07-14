@@ -274,113 +274,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的网络设备，更适合先通过 `templates` 构建 transfer flow，再交给通用的 command-flow 执行 API。
-
-### 网络设备 SCP/TFTP 传输
-
-对于 Cisco-like CLI，`rneter` 现在提供了一个内置的 copy flow 模板。你只需要填运行时变量，把它渲染成 `CommandFlow`，再交给通用执行入口即可：
-
-```rust
-use rneter::session::{ConnectionRequest, ExecutionContext, MANAGER};
-use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
-use serde_json::json;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let flow = cisco_like_copy_template().to_command_flow(
-        &CommandFlowTemplateRuntime::new()
-            .with_default_mode("Enable")
-            .with_vars(json!({
-                "command": "copy scp: flash:/image.bin",
-                "server_addr": "198.51.100.20",
-                "remote_path": "/pub/image.bin",
-                "transfer_username": "deploy",
-                "transfer_password": "secret",
-                "overwrite_answer": "y",
-            })),
-    )?;
-
-    let result = MANAGER
-        .execute_command_flow_with_context(
-            ConnectionRequest::new(
-                "admin".to_string(),
-                "192.168.1.1".to_string(),
-                22,
-                "password".to_string(),
-                None,
-                templates::cisco()?,
-            ),
-            flow,
-            ExecutionContext::default(),
-        )
-        .await?;
-
-    if let Some(last) = result.outputs.last() {
-        println!("传输输出: {}", last.content);
-    }
-    Ok(())
-}
-```
-
-这个内置模板适配 `cisco`、`cisco_asa`、`cisco_nxos`、`arista`、`aruba_aoscx`、`chaitin`、`dell_os10`、`maipu`、`ruijie`、`venustech` 和 `zte_zxros` 这类 Cisco-like 提示风格。如果某个厂商的向导文案不同，就继续基于同一套 `CommandFlowTemplate` 自己再定义一个模板即可。
-这个模板有意不在输入侧做条件分支：需要传完整的 `command` 和所有通用 prompt
-变量。当前协议不使用凭据时，也要把对应字段显式传为空字符串。
+这条路径要求远端支持 SFTP。对于只支持 `copy scp:`、`copy tftp:` 这类 CLI 传输命令的
+网络设备，调用方可以直接构建带命令级 `CommandInteraction` 规则的 `CommandFlow`，再交给
+通用的 command-flow 执行 API。
 
 ## 命令流与交互
-
-### 结构化命令流模板
-
-如果你希望交互流程不要写死在 Rust 里，可以直接构建一个可复用的
-`CommandFlowTemplate`。模板本身只描述 `steps`、`prompts` 和 `default_mode`，变量由
-运行时根据 `{{var}}` 占位符提供。现在这套模型是纯线性的：每一步只负责发送命令、
-回答预期 prompt，然后顺序进入下一步，不再额外维护输出分支。
-
-```rust
-use rneter::templates::{
-    CommandFlowTemplate, CommandFlowTemplatePrompt, CommandFlowTemplateRuntime,
-    CommandFlowTemplateStep,
-};
-use serde_json::json;
-
-let template = CommandFlowTemplate::new(
-    "copy_with_verify",
-    vec![
-        CommandFlowTemplateStep::from_template("copy {{protocol}}: {{device_path}}")
-            .with_prompts(vec![
-                CommandFlowTemplatePrompt::from_template(
-                    vec![r"(?i)^Address or name of remote host.*\?\s*$".to_string()],
-                    "{{server_addr}}",
-                )
-                .with_append_newline(true),
-                CommandFlowTemplatePrompt::from_template(
-                    vec![r"(?i)^Source (?:file ?name|filename).*\?\s*$".to_string()],
-                    "{{remote_path}}",
-                )
-                .with_append_newline(true),
-            ]),
-        CommandFlowTemplateStep::from_template("verify /md5 {{device_path}}"),
-    ],
-)
-.with_default_mode("Enable");
-
-let flow = template.to_command_flow(
-    &CommandFlowTemplateRuntime::new()
-        .with_default_mode("Enable")
-        .with_vars(json!({
-            "protocol": "scp",
-            "server_addr": "198.51.100.20",
-            "remote_path": "/pub/image.bin",
-            "device_path": "flash:/image.bin",
-        })),
-)?;
-```
-
-变量直接由命令、mode 和 prompt 回复中使用的 `{{var}}` 占位符决定。所有被引用的值都必须通过 `CommandFlowTemplateRuntime.vars` 提供；缺失任意值都会返回 `ConnectError::InvalidCommandFlowTemplate`。模板不再声明变量或提供默认值，因此可选值也必须显式传入，包括空字符串。
-
-现在内置的 `cisco_like_copy_template()` 也是走这套结构化模板抽象，所以后面无论是
-`http`、`ftp`，还是厂商自定义 copy 向导，都可以优先沉淀成同一套模板层，而不是继续往底层结构里塞特例字段。
-
-### 命令交互与命令流
 
 交互行为分布在两个不同的执行边界：
 
@@ -683,7 +581,7 @@ use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
     RollbackPolicy, TxBlock, TxStep,
 };
-use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
+use rneter::templates;
 
 let block = TxBlock {
     name: "addr-create".to_string(),
@@ -746,23 +644,23 @@ println!(
 
 ### 步骤操作
 
-`TxStep::new(...)` 接受单条命令或 `CommandFlow`。可复用模板需要在构建事务前由调用方
-显式渲染，从而自行决定把结果作为一个 flow，还是拆成多个事务步骤：
+`TxStep::new(...)` 接受单条命令或一个已经确定的 `CommandFlow`：
 
 ```rust
-let copy_flow = cisco_like_copy_template().to_command_flow(
-    &CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
-        "command": "copy scp: flash:/fw.bin",
-        "server_addr": "192.168.1.100",
-        "remote_path": "/srv/images/fw.bin",
-        "transfer_username": "deploy",
-        "transfer_password": "secret",
-        "overwrite_answer": "y",
-    })),
-)?;
-let copy_step = TxStep::new(copy_flow);
+let verify_step = TxStep::new(CommandFlow::new(vec![
+    Command {
+        mode: "Enable".to_string(),
+        command: "show running-config".to_string(),
+        ..Command::default()
+    },
+    Command {
+        mode: "Enable".to_string(),
+        command: "show startup-config".to_string(),
+        ..Command::default()
+    },
+]));
 
-let summary = copy_step.run.summary()?;
+let summary = verify_step.run.summary()?;
 println!(
     "kind={} mode={} steps={} desc={}",
     summary.kind, summary.mode, summary.step_count, summary.description
@@ -1274,7 +1172,7 @@ let report = autodetect_with_builtin_and_templates_and_context(
 | ---------------------------- | --------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
 | 执行 `show version`          | 发命令并一直读到 prompt                             | 通过 channel 发命令并一直读到 prompt pattern    | 先收敛到目标 mode，再执行命令，并用返回 prompt 更新 FSM        |
 | 下发配置命令                 | 进入 config mode，发命令，必要时退出                | 切换到 config privilege，发送配置，再视情况切回 | 把 config 视为一个状态节点，并通过状态边自动路由过去           |
-| 处理 `copy scp:` 交互        | 用 timing / multiline helper 加预期 prompt 逐步处理 | 用交互式 send/read 操作配合显式 prompt 期望处理 | 建模成可复用 `CommandFlow` 或 `CommandFlowTemplate`            |
+| 处理 `copy scp:` 交互        | 用 timing / multiline helper 加预期 prompt 逐步处理 | 用交互式 send/read 操作配合显式 prompt 期望处理 | 构建带命令级 `CommandInteraction` 规则的 `CommandFlow`         |
 | 处理 `[edit]` + `user@host#` | 调整平台 prompt 逻辑                                | 调整 prompt pattern / channel 行为              | 将 `[edit]` 建模为 prompt prefix，并在匹配前与后续 prompt 合并 |
 
 ### 为什么这很重要
