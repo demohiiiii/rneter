@@ -617,16 +617,19 @@ impl SharedSshClient {
     ) -> Result<SessionOperationOutput, OperationRunError> {
         match operation {
             SessionOperation::Command(command) => {
-                let step = self
-                    .execute_command_step(0, command, sys)
-                    .await
+                let flow = command
+                    .clone()
+                    .into_flow()
                     .map_err(OperationRunError::from)?;
-                Ok(SessionOperationOutput {
-                    success: step.success,
-                    steps: vec![step],
-                })
+                self.execute_command_flow_detailed(&flow, sys).await
             }
-            SessionOperation::Flow(flow) => self.execute_command_flow_detailed(flow, sys).await,
+            SessionOperation::Flow(flow) => {
+                let flow = flow
+                    .clone()
+                    .expand_multiline()
+                    .map_err(OperationRunError::from)?;
+                self.execute_command_flow_detailed(&flow, sys).await
+            }
         }
     }
 

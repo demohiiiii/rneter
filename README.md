@@ -328,6 +328,51 @@ let command = Command {
 
 `record_input` controls whether the matched prompt remains in captured output. Keep it `false` for password-like prompts; enable it when the prompt is useful non-sensitive context.
 
+### Multiline Commands
+
+Commands carry their own multiline strategy. `SplitLines` is the default: every non-empty trimmed
+line becomes an independent command with its own prompt and output. Use
+`execute_multiline_command_with_context(...)` when the result may contain multiple steps.
+
+```rust
+use rneter::session::{
+    Command, ConnectionRequest, ExecutionContext, MANAGER, MultilineMode,
+};
+use rneter::templates;
+
+let result = MANAGER
+    .execute_multiline_command_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version\nshow inventory\nshow interfaces".to_string(),
+            timeout: Some(60),
+            ..Command::default()
+        },
+        ExecutionContext::default(),
+    )
+    .await?;
+
+for step in &result.steps {
+    println!(
+        "step={} command={} success={} output={}",
+        step.step_index, step.operation_summary, step.success, step.content
+    );
+}
+```
+
+Set `.with_multiline_mode(MultilineMode::Whole)` on the command for a heredoc, script block, or
+other input that must remain a single command. In that mode `result.steps` contains exactly one
+output. A timeout or disconnect returns `SessionOperationExecutionError`; completed lines remain
+available through `partial_output()`.
+
 ### Custom Interactive Command Flows
 
 If a device workflow needs multiple complete commands, build a `CommandFlow` directly and attach runtime `PromptResponseRule`s to the steps that contain intermediate questions. A flow executes on one live connection, supports a separate mode and timeout for each command, stops on the first unsuccessful step by default, and can be bounded with `with_max_steps(...)`:
@@ -666,19 +711,16 @@ println!(
 
 `TxStep::new(...)` accepts either a command or a concrete `CommandFlow`:
 
+Commands containing multiple lines are expanded automatically according to `Command.multiline_mode`.
+The default `SplitLines` strategy makes every non-empty line a child operation inside the same
+transaction step; set `Whole` when the text must remain one command.
+
 ```rust
-let verify_step = TxStep::new(CommandFlow::new(vec![
-    Command {
-        mode: "Enable".to_string(),
-        command: "show running-config".to_string(),
-        ..Command::default()
-    },
-    Command {
-        mode: "Enable".to_string(),
-        command: "show startup-config".to_string(),
-        ..Command::default()
-    },
-]));
+let verify_step = TxStep::new(Command {
+    mode: "Enable".to_string(),
+    command: "show running-config\nshow startup-config".to_string(),
+    ..Command::default()
+});
 
 let summary = verify_step.run.summary()?;
 println!(

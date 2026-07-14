@@ -290,27 +290,35 @@ impl SessionOperation {
     pub fn to_command_flow(&self) -> Result<CommandFlow, ConnectError> {
         match self {
             SessionOperation::Command(command) => {
-                validate_command(command, "session operation command")?;
-                Ok(CommandFlow::new(vec![command.clone()]))
+                let flow = command.clone().into_flow()?;
+                validate_command_flow(&flow, "session operation command")?;
+                Ok(flow)
             }
             SessionOperation::Flow(flow) => {
-                validate_command_flow(flow, "session operation flow")?;
-                Ok(flow.clone())
+                let flow = flow.clone().expand_multiline()?;
+                validate_command_flow(&flow, "session operation flow")?;
+                Ok(flow)
             }
         }
     }
 
     pub(crate) fn summary_impl(&self) -> Result<SessionOperationSummary, ConnectError> {
         match self {
-            SessionOperation::Command(command) => Ok(SessionOperationSummary {
-                kind: "command".to_string(),
-                mode: command.mode.clone(),
-                description: command.command.clone(),
-                step_count: 1,
-            }),
+            SessionOperation::Command(command) => {
+                let flow = command.clone().into_flow()?;
+                validate_command_flow(&flow, "session operation command")?;
+                let (mode, description) = summarize_command_flow(&flow);
+                Ok(SessionOperationSummary {
+                    kind: "command".to_string(),
+                    mode,
+                    description,
+                    step_count: flow.steps.len(),
+                })
+            }
             SessionOperation::Flow(flow) => {
-                validate_command_flow(flow, "session operation flow")?;
-                let (mode, description) = summarize_command_flow(flow);
+                let flow = flow.clone().expand_multiline()?;
+                validate_command_flow(&flow, "session operation flow")?;
+                let (mode, description) = summarize_command_flow(&flow);
                 Ok(SessionOperationSummary {
                     kind: "flow".to_string(),
                     mode,
@@ -328,8 +336,18 @@ impl SessionOperation {
 
     pub(crate) fn validate(&self, context: &str) -> Result<(), ConnectError> {
         match self {
-            SessionOperation::Command(command) => validate_command(command, context),
-            SessionOperation::Flow(flow) => validate_command_flow(flow, context),
+            SessionOperation::Command(command) => {
+                let flow = command.clone().into_flow().map_err(|error| {
+                    ConnectError::InvalidTransaction(format!("{context}: {error}"))
+                })?;
+                validate_command_flow(&flow, context)
+            }
+            SessionOperation::Flow(flow) => {
+                let flow = flow.clone().expand_multiline().map_err(|error| {
+                    ConnectError::InvalidTransaction(format!("{context}: {error}"))
+                })?;
+                validate_command_flow(&flow, context)
+            }
         }
     }
 }
@@ -927,6 +945,24 @@ mod tests {
         assert!(result.failure_reason.is_none());
         assert!(result.rollback_operation_summary.is_none());
         assert!(result.rollback_reason.is_none());
+    }
+
+    #[test]
+    fn tx_step_command_automatically_expands_multiline_text() {
+        let step = TxStep::new(Command {
+            mode: "Config".to_string(),
+            command: "set addr 1\nset addr 2".to_string(),
+            ..Command::default()
+        });
+
+        let flow = step.run.to_command_flow().expect("expand tx command");
+        assert_eq!(flow.steps.len(), 2);
+        assert_eq!(flow.steps[0].command, "set addr 1");
+        assert_eq!(flow.steps[1].command, "set addr 2");
+
+        let summary = step.run.summary().expect("summarize tx command");
+        assert_eq!(summary.step_count, 2);
+        assert_eq!(summary.description, "<flow:2 steps>");
     }
 
     #[test]

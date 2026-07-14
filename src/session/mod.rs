@@ -281,6 +281,17 @@ impl CommandInteraction {
     }
 }
 
+/// Controls how a command containing newline-separated text is expanded.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MultilineMode {
+    /// Execute each non-empty trimmed line as an independent command.
+    #[default]
+    SplitLines,
+    /// Preserve the original text and execute it as one command.
+    Whole,
+}
+
 /// Configuration for a command to execute on a device.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Command {
@@ -300,6 +311,10 @@ pub struct Command {
     /// - "interface GigabitEthernet0/1" - Enter interface configuration
     pub command: String,
 
+    /// Controls whether newline-separated text is split into concrete commands.
+    #[serde(default)]
+    pub multiline_mode: MultilineMode,
+
     /// Single command timeout (seconds) - Maximum execution time for this command
     /// If None, defaults to 60 seconds
     /// If command execution exceeds this value, it will be forcibly terminated
@@ -318,6 +333,51 @@ pub struct Command {
     /// `copy tftp:`, or future HTTP-style wizards that should not require template edits.
     #[serde(default)]
     pub interaction: CommandInteraction,
+}
+
+impl Command {
+    /// Override how newline-separated command text is expanded.
+    pub fn with_multiline_mode(mut self, multiline_mode: MultilineMode) -> Self {
+        self.multiline_mode = multiline_mode;
+        self
+    }
+
+    /// Expand this command into the concrete flow described by its multiline strategy.
+    pub fn into_flow(self) -> Result<CommandFlow, ConnectError> {
+        match self.multiline_mode {
+            MultilineMode::Whole => {
+                if self.command.trim().is_empty() {
+                    return Err(ConnectError::InvalidCommandFlow(
+                        "multiline command cannot be empty".to_string(),
+                    ));
+                }
+                Ok(CommandFlow::new(vec![self]))
+            }
+            MultilineMode::SplitLines => {
+                let lines = self
+                    .command
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if lines.is_empty() {
+                    return Err(ConnectError::InvalidCommandFlow(
+                        "multiline command has no executable lines".to_string(),
+                    ));
+                }
+
+                let steps = lines
+                    .into_iter()
+                    .map(|command| Command {
+                        command,
+                        ..self.clone()
+                    })
+                    .collect();
+                Ok(CommandFlow::new(steps))
+            }
+        }
+    }
 }
 
 /// Higher-level executable operation supported by the session layer.
@@ -462,6 +522,24 @@ impl CommandFlow {
             steps,
             ..Self::default()
         }
+    }
+
+    /// Expand multiline commands while preserving flow-level execution options.
+    pub fn expand_multiline(self) -> Result<Self, ConnectError> {
+        let Self {
+            steps,
+            stop_on_error,
+            max_steps,
+        } = self;
+        let mut expanded_steps = Vec::new();
+        for command in steps {
+            expanded_steps.extend(command.into_flow()?.steps);
+        }
+        Ok(Self {
+            steps: expanded_steps,
+            stop_on_error,
+            max_steps,
+        })
     }
 
     /// Override whether execution should stop after the first unsuccessful step.
@@ -740,8 +818,111 @@ mod tests {
         assert_eq!(cmd.timeout, None);
         assert!(cmd.mode.is_empty());
         assert!(cmd.command.is_empty());
+        assert_eq!(cmd.multiline_mode, MultilineMode::SplitLines);
         assert!(cmd.dyn_params.is_empty());
         assert!(cmd.interaction.is_empty());
+    }
+
+    #[test]
+    fn multiline_mode_defaults_to_split_lines() {
+        assert_eq!(MultilineMode::default(), MultilineMode::SplitLines);
+    }
+
+    #[test]
+    fn command_into_flow_splits_lines_and_inherits_command_options() {
+        let command = Command {
+            mode: "Config".to_string(),
+            command: "\n interface Gi0/1 \n\n description uplink \n no shutdown\n".to_string(),
+            multiline_mode: MultilineMode::SplitLines,
+            timeout: Some(30),
+            dyn_params: CommandDynamicParams {
+                enable_password: None,
+                extra: HashMap::from([("confirm".to_string(), "yes\n".to_string())]),
+            },
+            interaction: CommandInteraction::default().push_prompt(PromptResponseRule::new(
+                vec!["confirm".to_string()],
+                "yes\n".to_string(),
+            )),
+        };
+
+        let flow = command.into_flow().expect("split multiline command");
+
+        assert_eq!(flow.steps.len(), 3);
+        assert_eq!(flow.steps[0].command, "interface Gi0/1");
+        assert_eq!(flow.steps[1].command, "description uplink");
+        assert_eq!(flow.steps[2].command, "no shutdown");
+        assert!(flow.steps.iter().all(|step| step.mode == "Config"));
+        assert!(flow.steps.iter().all(|step| step.timeout == Some(30)));
+        assert!(
+            flow.steps
+                .iter()
+                .all(|step| step.dyn_params == flow.steps[0].dyn_params)
+        );
+        assert!(
+            flow.steps
+                .iter()
+                .all(|step| step.interaction == flow.steps[0].interaction)
+        );
+    }
+
+    #[test]
+    fn command_into_flow_whole_preserves_original_text() {
+        let original = "echo first\necho second\n";
+        let flow = Command {
+            mode: "Root".to_string(),
+            command: original.to_string(),
+            ..Command::default()
+        }
+        .with_multiline_mode(MultilineMode::Whole)
+        .into_flow()
+        .expect("preserve multiline command");
+
+        assert_eq!(flow.steps.len(), 1);
+        assert_eq!(flow.steps[0].command, original);
+    }
+
+    #[test]
+    fn command_into_flow_rejects_empty_multiline_text() {
+        for mode in [MultilineMode::SplitLines, MultilineMode::Whole] {
+            let err = Command {
+                mode: "Enable".to_string(),
+                command: " \n\t\n".to_string(),
+                ..Command::default()
+            }
+            .with_multiline_mode(mode)
+            .into_flow()
+            .expect_err("empty multiline command should fail");
+
+            assert!(matches!(err, ConnectError::InvalidCommandFlow(_)));
+        }
+    }
+
+    #[test]
+    fn command_flow_expands_nested_multiline_commands() {
+        let flow = CommandFlow::new(vec![
+            Command {
+                mode: "Enable".to_string(),
+                command: "show version\nshow inventory".to_string(),
+                ..Command::default()
+            },
+            Command {
+                mode: "Root".to_string(),
+                command: "printf 'a\\nb'".to_string(),
+                ..Command::default()
+            }
+            .with_multiline_mode(MultilineMode::Whole),
+        ])
+        .with_stop_on_error(false)
+        .with_max_steps(4)
+        .expand_multiline()
+        .expect("expand multiline flow");
+
+        assert_eq!(flow.steps.len(), 3);
+        assert_eq!(flow.steps[0].command, "show version");
+        assert_eq!(flow.steps[1].command, "show inventory");
+        assert_eq!(flow.steps[2].command, "printf 'a\\nb'");
+        assert!(!flow.stop_on_error);
+        assert_eq!(flow.max_steps, Some(4));
     }
 
     #[test]

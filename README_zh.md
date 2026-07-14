@@ -352,6 +352,50 @@ let command = Command {
 
 `record_input` 决定匹配到的提示是否保留在捕获输出中。密码类提示应保持为 `false`；需要保留非敏感交互上下文时可以启用。
 
+### 多行命令
+
+多行策略由 `Command` 自身携带。`SplitLines` 是默认策略：每个去除首尾空白后的非空行
+都会成为一条独立命令，分别等待 prompt 并产生输出。结果可能包含多个步骤时，使用
+`execute_multiline_command_with_context(...)` 下发。
+
+```rust
+use rneter::session::{
+    Command, ConnectionRequest, ExecutionContext, MANAGER, MultilineMode,
+};
+use rneter::templates;
+
+let result = MANAGER
+    .execute_multiline_command_with_context(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version\nshow inventory\nshow interfaces".to_string(),
+            timeout: Some(60),
+            ..Command::default()
+        },
+        ExecutionContext::default(),
+    )
+    .await?;
+
+for step in &result.steps {
+    println!(
+        "step={} command={} success={} output={}",
+        step.step_index, step.operation_summary, step.success, step.content
+    );
+}
+```
+
+heredoc、脚本块或其他必须作为一条命令发送的输入，应在 command 上设置
+`.with_multiline_mode(MultilineMode::Whole)`；此时 `result.steps` 只包含一个输出。发生超时或断连时会返回
+`SessionOperationExecutionError`，已经完成的行仍可通过 `partial_output()` 读取。
+
 ### 自定义交互命令流程
 
 设备流程需要多条完整命令时，可以直接构建 `CommandFlow`，并为包含中间询问的步骤挂载运行时 `PromptResponseRule`。Flow 在同一个活动连接上执行，每条命令可以使用独立 mode 和 timeout；默认遇到首个失败步骤就停止，也可以通过 `with_max_steps(...)` 限制最大步骤数：
@@ -646,19 +690,15 @@ println!(
 
 `TxStep::new(...)` 接受单条命令或一个已经确定的 `CommandFlow`：
 
+包含多行文本的 `Command` 会根据自身的 `multiline_mode` 自动展开。默认 `SplitLines` 会把
+每个非空行作为同一个事务步骤里的子操作；必须保持整体发送时设置为 `Whole`。
+
 ```rust
-let verify_step = TxStep::new(CommandFlow::new(vec![
-    Command {
-        mode: "Enable".to_string(),
-        command: "show running-config".to_string(),
-        ..Command::default()
-    },
-    Command {
-        mode: "Enable".to_string(),
-        command: "show startup-config".to_string(),
-        ..Command::default()
-    },
-]));
+let verify_step = TxStep::new(Command {
+    mode: "Enable".to_string(),
+    command: "show running-config\nshow startup-config".to_string(),
+    ..Command::default()
+});
 
 let summary = verify_step.run.summary()?;
 println!(

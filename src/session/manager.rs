@@ -34,8 +34,15 @@ impl SshConnectionManager {
         command: Command,
         context: ExecutionContext,
     ) -> Result<Output, ConnectError> {
+        let flow = command.into_flow()?;
+        if flow.steps.len() != 1 {
+            return Err(ConnectError::InvalidCommandFlow(
+                "multiline command produces multiple outputs; use execute_multiline_command_with_context"
+                    .to_string(),
+            ));
+        }
         let result = self
-            .execute_operation_with_context(request, SessionOperation::from(command), context)
+            .execute_operation_with_context(request, SessionOperation::from(flow), context)
             .await
             .map_err(|err| err.into_parts().0)?;
         match result.steps.len() {
@@ -49,6 +56,20 @@ impl SshConnectionManager {
                 "expected one output for command execution, got {count}"
             ))),
         }
+    }
+
+    /// Execute newline-separated command text using its configured multiline strategy.
+    ///
+    /// The result always retains one child output per concrete command. In
+    /// [`MultilineMode::Whole`] mode the result therefore contains one step.
+    pub async fn execute_multiline_command_with_context(
+        &self,
+        request: ConnectionRequest,
+        command: Command,
+        context: ExecutionContext,
+    ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
+        self.execute_operation_with_context(request, SessionOperation::from(command), context)
+            .await
     }
 
     /// Execute any supported session operation using a structured connection/context pair.
@@ -316,27 +337,38 @@ impl SshConnectionManager {
                         let _ = job.responder.send(Err(ConnectError::ConnectClosedError));
                         break;
                     }
-                    let res = {
-                        let mut client_guard = client_clone.write().await;
-                        let Command {
-                            mode,
-                            command,
-                            timeout,
-                            dyn_params,
-                            interaction,
-                            ..
-                        } = job.data;
-                        let timeout = Duration::from_secs(timeout.unwrap_or(60));
-                        client_guard
-                            .write_with_mode_and_timeout_using_command(
-                                &command,
-                                &mode,
-                                job.sys.as_ref(),
+                    let res = match job.data.into_flow() {
+                        Err(error) => Err(error),
+                        Ok(flow) if flow.steps.len() != 1 => Err(ConnectError::InvalidCommandFlow(
+                            "CmdJob supports one concrete command; use the multiline manager API"
+                                .to_string(),
+                        )),
+                        Ok(mut flow) => {
+                            let command = flow
+                                .steps
+                                .pop()
+                                .expect("single-command flow should contain one step");
+                            let Command {
+                                mode,
+                                command,
                                 timeout,
-                                &dyn_params,
-                                &interaction,
-                            )
-                            .await
+                                dyn_params,
+                                interaction,
+                                ..
+                            } = command;
+                            let timeout = Duration::from_secs(timeout.unwrap_or(60));
+                            let mut client_guard = client_clone.write().await;
+                            client_guard
+                                .write_with_mode_and_timeout_using_command(
+                                    &command,
+                                    &mode,
+                                    job.sys.as_ref(),
+                                    timeout,
+                                    &dyn_params,
+                                    &interaction,
+                                )
+                                .await
+                        }
                     };
 
                     let _ = job.responder.send(res);
