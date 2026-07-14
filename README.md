@@ -640,7 +640,7 @@ Transactions organize state-changing automation into four layers:
 SessionOperation -> TxStep -> TxBlock -> TxWorkflow
 ```
 
-- `SessionOperation` is one executable unit: a `Command`, `CommandFlow`, or rendered template.
+- `SessionOperation` is one concrete executable unit: a `Command` or `CommandFlow`.
 - `TxStep` pairs a forward operation with an optional compensating operation.
 - `TxBlock` executes related steps in order under one explicit rollback policy.
 - `TxWorkflow` executes multiple blocks and compensates previously committed blocks in reverse order when a later block fails.
@@ -707,7 +707,7 @@ The following block creates an address object. If a later step fails after step 
 ```rust
 use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
-    RollbackPolicy, SessionOperation, TxBlock, TxStep,
+    RollbackPolicy, TxBlock, TxStep,
 };
 use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
 
@@ -772,13 +772,12 @@ println!(
 
 ### Step Operations
 
-`TxStep::new(...)` accepts any `SessionOperation`, so a transaction step can be a single
-command, a multi-step `CommandFlow`, or a reusable template invocation:
+`TxStep::new(...)` accepts a command or `CommandFlow`. Render reusable templates before building
+the transaction so the caller controls whether the result is one flow or several transaction steps:
 
 ```rust
-let copy_step = TxStep::new(SessionOperation::template(
-    cisco_like_copy_template(),
-    CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
+let copy_flow = cisco_like_copy_template().to_command_flow(
+    &CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
         "command": "copy scp: flash:/fw.bin",
         "server_addr": "192.168.1.100",
         "remote_path": "/srv/images/fw.bin",
@@ -786,7 +785,8 @@ let copy_step = TxStep::new(SessionOperation::template(
         "transfer_password": "secret",
         "overwrite_answer": "y",
     })),
-));
+)?;
+let copy_step = TxStep::new(copy_flow);
 
 let summary = copy_step.run.summary()?;
 println!(

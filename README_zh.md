@@ -614,7 +614,7 @@ cargo run --example normalize_fixture -- raw_session.jsonl tests/fixtures/sessio
 SessionOperation -> TxStep -> TxBlock -> TxWorkflow
 ```
 
-- `SessionOperation` 是一个可执行单元，可以是 `Command`、`CommandFlow` 或渲染后的模板。
+- `SessionOperation` 是一个已经确定的可执行单元，可以是 `Command` 或 `CommandFlow`。
 - `TxStep` 将正向操作与可选的补偿操作关联起来。
 - `TxBlock` 按顺序执行一组相关步骤，并应用一个显式回滚策略。
 - `TxWorkflow` 按顺序执行多个 block；后续 block 失败时，已提交 block 会按相反顺序执行补偿。
@@ -681,7 +681,7 @@ let block = TxBlock {
 ```rust
 use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
-    RollbackPolicy, SessionOperation, TxBlock, TxStep,
+    RollbackPolicy, TxBlock, TxStep,
 };
 use rneter::templates::{self, cisco_like_copy_template, CommandFlowTemplateRuntime};
 
@@ -746,13 +746,12 @@ println!(
 
 ### 步骤操作
 
-`TxStep::new(...)` 接受任意 `SessionOperation`，因此事务步骤既可以是
-单条命令，也可以是多步 `CommandFlow`，或者一个可复用的模板调用：
+`TxStep::new(...)` 接受单条命令或 `CommandFlow`。可复用模板需要在构建事务前由调用方
+显式渲染，从而自行决定把结果作为一个 flow，还是拆成多个事务步骤：
 
 ```rust
-let copy_step = TxStep::new(SessionOperation::template(
-    cisco_like_copy_template(),
-    CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
+let copy_flow = cisco_like_copy_template().to_command_flow(
+    &CommandFlowTemplateRuntime::new().with_vars(serde_json::json!({
         "command": "copy scp: flash:/fw.bin",
         "server_addr": "192.168.1.100",
         "remote_path": "/srv/images/fw.bin",
@@ -760,7 +759,8 @@ let copy_step = TxStep::new(SessionOperation::template(
         "transfer_password": "secret",
         "overwrite_answer": "y",
     })),
-));
+)?;
+let copy_step = TxStep::new(copy_flow);
 
 let summary = copy_step.run.summary()?;
 println!(

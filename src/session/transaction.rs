@@ -297,11 +297,6 @@ impl SessionOperation {
                 validate_command_flow(flow, "session operation flow")?;
                 Ok(flow.clone())
             }
-            SessionOperation::Template { template, runtime } => {
-                let flow = template.to_command_flow(runtime)?;
-                validate_command_flow(&flow, "session operation template")?;
-                Ok(flow)
-            }
         }
     }
 
@@ -315,21 +310,9 @@ impl SessionOperation {
             }),
             SessionOperation::Flow(flow) => {
                 validate_command_flow(flow, "session operation flow")?;
-                let (mode, description) = summarize_command_flow(flow, None);
+                let (mode, description) = summarize_command_flow(flow);
                 Ok(SessionOperationSummary {
                     kind: "flow".to_string(),
-                    mode,
-                    description,
-                    step_count: flow.steps.len(),
-                })
-            }
-            SessionOperation::Template { template, runtime } => {
-                let flow = template.to_command_flow(runtime)?;
-                validate_command_flow(&flow, "session operation template")?;
-                let (mode, description) =
-                    summarize_command_flow(&flow, Some(template.name.as_str()));
-                Ok(SessionOperationSummary {
-                    kind: "template".to_string(),
                     mode,
                     description,
                     step_count: flow.steps.len(),
@@ -347,10 +330,6 @@ impl SessionOperation {
         match self {
             SessionOperation::Command(command) => validate_command(command, context),
             SessionOperation::Flow(flow) => validate_command_flow(flow, context),
-            SessionOperation::Template { template, runtime } => {
-                let flow = template.to_command_flow(runtime)?;
-                validate_command_flow(&flow, context)
-            }
         }
     }
 }
@@ -383,7 +362,7 @@ fn validate_command_flow(flow: &CommandFlow, context: &str) -> Result<(), Connec
     Ok(())
 }
 
-fn summarize_command_flow(flow: &CommandFlow, template_name: Option<&str>) -> (String, String) {
+fn summarize_command_flow(flow: &CommandFlow) -> (String, String) {
     let first_mode = flow
         .steps
         .first()
@@ -399,10 +378,7 @@ fn summarize_command_flow(flow: &CommandFlow, template_name: Option<&str>) -> (S
         return (first_mode, command);
     }
 
-    let label = match template_name {
-        Some(name) => format!("<template:{name} {} steps>", flow.steps.len()),
-        None => format!("<flow:{} steps>", flow.steps.len()),
-    };
+    let label = format!("<flow:{} steps>", flow.steps.len());
     (first_mode, label)
 }
 

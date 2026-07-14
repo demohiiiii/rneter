@@ -324,17 +324,12 @@ pub struct Command {
 ///
 /// Transactions and workflows run this abstraction instead of assuming every
 /// step is a plain text command. This keeps the current executor compatible
-/// with direct commands, multi-step command flows, and higher-level template
-/// invocations that resolve into a flow at runtime.
+/// with direct commands and multi-step command flows.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionOperation {
     Command(Command),
     Flow(CommandFlow),
-    Template {
-        template: crate::templates::CommandFlowTemplate,
-        runtime: crate::templates::CommandFlowTemplateRuntime,
-    },
 }
 
 /// Stable summary metadata for any executable session operation.
@@ -359,14 +354,6 @@ impl SessionOperation {
     /// Wrap a multi-step flow as a session operation.
     pub fn flow(flow: CommandFlow) -> Self {
         Self::Flow(flow)
-    }
-
-    /// Wrap a structured template invocation as a session operation.
-    pub fn template(
-        template: crate::templates::CommandFlowTemplate,
-        runtime: crate::templates::CommandFlowTemplateRuntime,
-    ) -> Self {
-        Self::Template { template, runtime }
     }
 
     /// Inspect this operation without executing it.

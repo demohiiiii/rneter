@@ -627,12 +627,6 @@ impl SharedSshClient {
                 })
             }
             SessionOperation::Flow(flow) => self.execute_command_flow_detailed(flow, sys).await,
-            SessionOperation::Template { template, runtime } => {
-                let flow = template
-                    .to_command_flow(runtime)
-                    .map_err(OperationRunError::from)?;
-                self.execute_command_flow_detailed(&flow, sys).await
-            }
         }
     }
 
