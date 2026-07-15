@@ -123,10 +123,12 @@ mod tests {
         );
     }
 
+    type ConfigBuilder = fn() -> DeviceHandlerConfig;
+
     struct NetworkTemplateCase {
         name: &'static str,
         builder: fn() -> Result<DeviceHandler, ConnectError>,
-        config_builder: fn() -> DeviceHandlerConfig,
+        config_builder: ConfigBuilder,
         expected_states: &'static [&'static str],
         expected_capabilities: &'static [TemplateCapability],
         expected_prompt_order: &'static [&'static str],
@@ -499,6 +501,43 @@ mod tests {
         for case in network_cases() {
             let config = (case.config_builder)();
             assert_prompt_order(&config.prompt, case.expected_prompt_order, case.name);
+        }
+    }
+
+    #[test]
+    fn cisco_like_prompts_distinguish_enable_and_config_modes() {
+        let cases: &[(&str, ConfigBuilder)] = &[
+            ("arista_eos", arista_config),
+            ("array", array_config),
+            ("aruba_aoscx", aruba_aoscx_config),
+            ("chaitin", chaitin_config),
+            ("cisco_ios", cisco_config),
+            ("cisco_asa", cisco_asa_config),
+            ("cisco_nxos", cisco_nxos_config),
+            ("dell_os10", dell_os10_config),
+            ("hillstone", hillstone_config),
+            ("maipu", maipu_config),
+            ("ruijie", ruijie_config),
+            ("venustech", venustech_config),
+            ("zte_zxros", zte_zxros_config),
+        ];
+
+        for (name, config_builder) in cases {
+            let mut handler = config_builder()
+                .build()
+                .unwrap_or_else(|err| panic!("failed to build {name}: {err}"));
+
+            handler.read("\rdevice#");
+            assert_eq!(handler.current_state(), "enable", "template: {name}");
+
+            for prompt in ["\rdevice(config)#", "\rdevice(config-if)#"] {
+                handler.read(prompt);
+                assert_eq!(
+                    handler.current_state(),
+                    "config",
+                    "template: {name}, prompt: {prompt:?}"
+                );
+            }
         }
     }
 

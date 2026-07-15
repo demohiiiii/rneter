@@ -804,7 +804,7 @@ This allows callers to distinguish a failed forward operation, a skipped rollbac
 
 ### Convenience Builder
 
-`templates::build_tx_block` converts a list of command strings into `TxStep` values. It still requires an explicit `RollbackPolicy` and does not classify commands as read-only or mutating:
+`templates::build_tx_block` only converts a list of command strings into `TxStep` values. The caller must explicitly select the transaction rollback behavior through `RollbackPolicy`:
 
 ```rust
 use rneter::session::{Command, RollbackPolicy};

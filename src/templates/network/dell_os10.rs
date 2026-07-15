@@ -9,14 +9,14 @@ pub fn dell_os10_config() -> DeviceHandlerConfig {
         true,
         "EnablePassword",
         true,
-        &[r"(?i)^\r{0,1}(Enable )?Password:"],
+        &[r"(?i)^(Enable )?Password:"],
     )];
 
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
-            prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
-            prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            prompt_rule("Login", &[r"^[^\s<]+>\s*$"]),
+            prompt_rule("Enable", &[r"^[^\s#()]+#\s*$"]),
+            prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
         ],
         write,
         more_regex: vec![r"\s*--More--\s*".to_string()],

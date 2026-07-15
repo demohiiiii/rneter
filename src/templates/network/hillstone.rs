@@ -9,8 +9,8 @@ use std::collections::HashMap;
 pub fn hillstone_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Enable", &[r"^.+#\s\r{0,1}$"]),
-            prompt_rule("Config", &[r"^.+\(config.*\)\s*#\s\r{0,1}$"]),
+            prompt_rule("Enable", &[r"^[^()]+#\s*$"]),
+            prompt_rule("Config", &[r"^.+\(config.*\)\s*#\s*$"]),
         ],
         write: vec![input_rule(
             "Save",

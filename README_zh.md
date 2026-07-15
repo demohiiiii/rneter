@@ -782,7 +782,7 @@ for block in &workflow_result.block_results {
 
 ### 便捷构建函数
 
-`templates::build_tx_block` 可以把命令字符串列表转换为 `TxStep`。它仍然要求显式传入 `RollbackPolicy`，不会判断命令是只读还是修改操作：
+`templates::build_tx_block` 仅负责将命令字符串列表转换为 `TxStep`。事务回滚策略必须由调用方通过 `RollbackPolicy` 显式指定：
 
 ```rust
 use rneter::session::{Command, RollbackPolicy};

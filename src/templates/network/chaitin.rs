@@ -16,9 +16,9 @@ pub fn chaitin_config() -> DeviceHandlerConfig {
 
     DeviceHandlerConfig {
         prompt: vec![
-            prompt_rule("Login", &[r"^\r{0,1}[^\s<]+>\s*$"]),
-            prompt_rule("Enable", &[r"^\r{0,1}[^\s#]+#\s*$"]),
-            prompt_rule("Config", &[r"^\r{0,1}\S+\(\S+\)#\s*$"]),
+            prompt_rule("Login", &[r"^[^\s<]+>\s*$"]),
+            prompt_rule("Enable", &[r"^[^\s#()]+#\s*$"]),
+            prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
         ],
         write,
         error_regex: vec![

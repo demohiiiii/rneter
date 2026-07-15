@@ -12,13 +12,15 @@ pub fn cisco_config() -> DeviceHandlerConfig {
         true,
         "EnablePassword",
         true,
-        &[r"^(Enable )?Password:"],
+        &[r"(Enable )?Password:"],
     )];
 
     DeviceHandlerConfig {
         prompt: vec![
             prompt_rule("Login", &[r"^[^\s<]+>\s*$"]),
-            prompt_rule("Enable", &[r"^[^\s#]+#\s*$"]),
+            // Parenthesized prompts belong to Config and must not also match
+            // the broader privileged-mode prompt.
+            prompt_rule("Enable", &[r"^[^\s#()]+#\s*$"]),
             prompt_rule("Config", &[r"^\S+\(\S+\)#\s*$"]),
         ],
         write,
@@ -80,6 +82,24 @@ mod tests {
                 handler.read_need_write(prompt),
                 Some(("secret\n".to_string(), true)),
                 "prompt should match: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_states_distinguish_config_from_enable() {
+        for (prompt, expected_state) in [
+            ("cisco-catalyst>", "login"),
+            ("cisco-catalyst#", "enable"),
+            ("cisco-catalyst(config)#", "config"),
+            ("cisco-catalyst(config-if)#", "config"),
+        ] {
+            let mut handler = cisco().expect("create cisco device handler");
+            handler.read(prompt);
+            assert_eq!(
+                handler.current_state(),
+                expected_state,
+                "prompt should resolve to the expected state: {prompt:?}"
             );
         }
     }
