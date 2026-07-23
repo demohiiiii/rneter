@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.7] - 2026-07-23
+
+### New Features
+- Added configurable SSH connection-establishment timeouts through `ExecutionContext::with_connect_timeout(...)` and `ExecutionContext::with_connect_timeout_secs(...)`, with a 60-second default and target-aware `ConnectError::ConnectTimeout` failures.
+- Added multiline command execution through `MultilineMode`, `Command::into_flow(...)`, `CommandFlow::expand_multiline(...)`, and `SshConnectionManager::execute_multiline_command_with_context(...)`; split-lines mode preserves one child output per concrete command.
+- Preserved the complete device transcript in `Output.all` and command-output recorder events, including echoed commands and syntax-error pointer context, while keeping cleaned parsing in `Output.content`.
+
+### Optimizations
+- Simplified command execution around concrete commands and linear command flows, applying multiline expansion consistently across direct operations, command flows, transactions, rollbacks, and legacy command jobs.
+- Improved Cisco-like prompt matching by making enable and configuration prompt patterns mutually exclusive and removing redundant carriage-return matching.
+- Reduced Linux template surface area by consolidating handler construction around declarative `DeviceHandlerConfig` and the shared command execution path.
+
+### API Changes
+- Added `Command.multiline_mode` with `MultilineMode::SplitLines` as the default and `MultilineMode::Whole` for callers that must preserve newline-separated text as one device command. Direct single-command entrypoints now reject commands that expand to multiple concrete steps; callers should use `execute_multiline_command_with_context(...)` for those commands.
+- Changed `templates::build_tx_block(...)` to accept an explicit `RollbackPolicy` and removed template-name and inferred-rollback parameters. Callers must provide the intended rollback policy directly.
+- Removed command-flow template APIs (`CommandFlowTemplate*`, `templates::cisco_like_copy_template()`, and `SessionOperation::Template`); callers must construct concrete `Command` or `CommandFlow` values and interaction rules.
+- Removed legacy Linux configuration and command-classification exports (`LinuxTemplateConfig`, `CustomPrompts`, `SudoMode`, `LinuxCommandType`, `classify_linux_command(...)`, and `linux_with_config(...)`), leaving `linux()` and `linux_handler_config()` as the supported Linux template entrypoints. `CommandDynamicParams::sudo_password` is also no longer available.
+- Added `ConnectError::ConnectTimeout` and the `ExecutionContext::connect_timeout` field; exhaustive `ConnectError` matches and serialized context consumers must account for the new timeout behavior.
+
+### Risks
+- This release contains breaking API removals and signature changes. Integrations using command-flow templates, inferred transaction rollback, legacy Linux configuration types, or `sudo_password` must migrate before upgrading.
+- Newline-separated commands now split into independent commands by default, which can change device behavior for callers that previously relied on whole-text execution; use `MultilineMode::Whole` explicitly when required.
+- `Output.all` and failure recorder events now retain raw device data, including command echoes, terminal control sequences, and potentially sensitive command text; downstream log storage and redaction policies should be reviewed.
+- Cisco prompt matching, multiline behavior, and raw transcript capture are covered by unit and integration tests, but validation against customized prompts, terminal emulators, and diverse device firmware remains a deployment risk.
+
 ## [0.4.6] - 2026-06-04
 
 ### New Features

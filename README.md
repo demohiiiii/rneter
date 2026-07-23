@@ -41,7 +41,8 @@
 - **Lifecycle Hooks**: Declarative setup and cleanup operations after connect, before disconnect, and around state transitions
 - **Template Autodetect**: Rank built-in templates by scored probe matches before creating a full state-machine session
 - **SFTP File Uploads**: Upload local files to remote hosts that expose the SSH `sftp` subsystem
-- **Built-in Copy Flow Templates**: Reuse structured templates for Cisco-like interactive `copy` workflows
+- **Multiline Commands**: Split newline-separated command text into independently tracked device operations or preserve it as one command
+- **Full Output Diagnostics**: Inspect echoed commands and device syntax-error context through `Output.all`
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
 - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 - **Error Handling**: Comprehensive error types with detailed context
@@ -52,7 +53,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.4.6"
+rneter = "0.4.7"
 ```
 
 ## Quick Start
