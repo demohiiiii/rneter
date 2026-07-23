@@ -464,6 +464,32 @@ fn extract_command_content(all: &str, sent_command: &str, prompt: Option<&str>) 
     trimmed.to_string()
 }
 
+fn build_command_output(
+    handler: &DeviceHandler,
+    clean_output: &str,
+    raw_output: &str,
+    fallback_success: bool,
+    capture_exit_status: bool,
+    sent_command: &str,
+    prompt: Option<String>,
+) -> Output {
+    // Parse success/content from the filtered stream, while exposing the unfiltered
+    // received transcript through `all` for troubleshooting command diagnostics.
+    let parsed =
+        handler.finalize_command_output(clean_output, fallback_success, capture_exit_status);
+    let parsed_all =
+        handler.finalize_command_output(raw_output, fallback_success, capture_exit_status);
+    let content = extract_command_content(&parsed.output, sent_command, prompt.as_deref());
+
+    Output {
+        success: parsed.success,
+        exit_code: parsed.exit_code,
+        content,
+        all: parsed_all.output,
+        prompt,
+    }
+}
+
 #[derive(Debug)]
 struct RuntimePromptMatcher {
     patterns: RegexSet,
@@ -696,6 +722,7 @@ impl SharedSshClient {
         self.sender.send(full_command).await?;
 
         let mut clean_output = String::new();
+        let mut raw_output = String::new();
         let mut line_buffer = String::new();
         let mut line = String::new();
         let mut pending_prompt_lines = Vec::new();
@@ -708,6 +735,7 @@ impl SharedSshClient {
                     if let Some(recorder) = self.recorder.as_ref() {
                         let _ = recorder.record_raw_chunk(data.clone());
                     }
+                    raw_output.push_str(&data);
                     line_buffer.push_str(&data);
 
                     while let Some(newline_pos) = line_buffer.find('\n') {
@@ -887,7 +915,7 @@ impl SharedSshClient {
                         success: false,
                         exit_code: None,
                         content: timeout_output.clone(),
-                        all: timeout_output.clone(),
+                        all: raw_output.clone(),
                     });
                 }
                 return Err(ConnectError::ExecTimeout(build_exec_timeout_message(
@@ -906,7 +934,7 @@ impl SharedSshClient {
                         success: false,
                         exit_code: None,
                         content: clean_output.clone(),
-                        all: clean_output.clone(),
+                        all: raw_output.clone(),
                     });
                 }
                 return Err(err);
@@ -914,22 +942,16 @@ impl SharedSshClient {
             Ok(Ok(success)) => success,
         };
 
-        let parsed =
-            self.handler
-                .finalize_command_output(&clean_output, success, capture_exit_status);
-        let success = parsed.success;
-        let exit_code = parsed.exit_code;
-        let all = parsed.output;
         let prompt_after = self.handler.current_prompt().map(|v| v.to_string());
-        let content = extract_command_content(&all, &sent_command, prompt_after.as_deref());
-
-        let output = Output {
+        let output = build_command_output(
+            &self.handler,
+            &clean_output,
+            &raw_output,
             success,
-            exit_code,
-            content,
-            all,
-            prompt: prompt_after,
-        };
+            capture_exit_status,
+            &sent_command,
+            prompt_after,
+        );
 
         if let Some(recorder) = self.recorder.as_ref() {
             let _ = recorder.record_event(SessionEvent::CommandOutput {
@@ -1495,6 +1517,32 @@ mod tests {
             content,
             "object-group service OG_SVC_WEB tcp\n service-object tcp destination eq www"
         );
+    }
+
+    #[test]
+    fn build_command_output_keeps_echo_for_error_pointer_diagnostics() {
+        let handler = crate::templates::cisco().expect("build cisco handler");
+        let sent_command = "access-list OUTSIDE extended permit tcp any host 192.0.2.1 eq 443";
+        let clean_output = concat!("% Invalid input detected at '^' marker.\n", "router#");
+        let raw_output = concat!(
+            "access-list OUTSIDE extended permit tcp any host 192.0.2.1 eq 443\n",
+            "                                      ^\n",
+            "% Invalid input detected at '^' marker.\n",
+            "router#"
+        );
+
+        let output = build_command_output(
+            &handler,
+            clean_output,
+            raw_output,
+            false,
+            false,
+            sent_command,
+            Some("router#".to_string()),
+        );
+
+        assert_eq!(output.content, "% Invalid input detected at '^' marker.");
+        assert_eq!(output.all, raw_output);
     }
 
     #[test]
