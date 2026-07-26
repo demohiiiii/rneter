@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{RwLock, oneshot};
@@ -39,8 +40,8 @@ use super::device::{DeviceHandler, IGNORE_START_LINE};
 pub(crate) use hooks::HookTrigger;
 pub use hooks::{HookAction, HookFailurePolicy, SessionHooks};
 pub use recording::{
-    NormalizeOptions, ReplayContext, SessionEvent, SessionRecordEntry, SessionRecordLevel,
-    SessionRecorder, SessionReplayer,
+    NormalizeOptions, ReplayContext, SessionEvent, SessionEventRedactor, SessionRecordEntry,
+    SessionRecordLevel, SessionRecorder, SessionReplayer,
 };
 pub use security::{ConnectionSecurityOptions, SecurityLevel};
 pub use transaction::{
@@ -187,6 +188,10 @@ pub struct SharedSshClient {
 
     /// Optional session recorder bound to this connection.
     recorder: Option<SessionRecorder>,
+
+    /// Set once `close()` has run, so the connection is never reused or
+    /// closed twice.
+    closed: bool,
 }
 
 /// Structured prompt-response overrides for a single command execution.
@@ -706,13 +711,41 @@ pub struct CommandFlowOutput {
     pub outputs: Vec<Output>,
 }
 
+/// Tuning options for the SSH connection pool.
+#[derive(Debug, Clone)]
+pub struct ConnectionPoolConfig {
+    /// Maximum number of connections kept in the pool.
+    pub max_connections: u64,
+    /// How long an idle connection stays pooled before it is closed.
+    ///
+    /// Keep this below the exec/idle timeout configured on the devices
+    /// themselves so the pool never hands out a connection the device
+    /// has already dropped.
+    pub idle_timeout: Duration,
+}
+
+impl Default for ConnectionPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 100,
+            idle_timeout: Duration::from_secs(5 * 60),
+        }
+    }
+}
+
 /// SSH connection pool manager.
 ///
 /// Manages a cache of SSH connections with automatic reconnection and
-/// connection pooling. Connections are cached for 5 minutes of inactivity.
+/// connection pooling. A connection is gracefully closed (running
+/// `before_disconnect` hooks) once its last command sender is gone — i.e.
+/// the pool evicted its handle and no caller still holds one.
 #[derive(Clone)]
 pub struct SshConnectionManager {
     cache: Cache<String, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
+    /// Whether the self-stopping pool maintenance task is currently running.
+    maintenance_running: Arc<AtomicBool>,
+    /// Interval between pending-task maintenance runs.
+    maintenance_period: Duration,
 }
 
 mod client;

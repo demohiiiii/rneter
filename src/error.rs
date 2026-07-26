@@ -7,7 +7,11 @@ use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
 /// Errors that can occur during SSH connection and device state management.
+///
+/// Marked `#[non_exhaustive]` so new error variants can be added without a
+/// breaking change; downstream `match` arms need a wildcard branch.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ConnectError {
     /// The target state cannot be reached from the current state.
     #[error("unreachable state {0}")]

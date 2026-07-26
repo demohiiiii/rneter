@@ -104,6 +104,9 @@ impl SharedSshClient {
 
     /// Safely closes the connection.
     pub async fn close(&mut self) -> Result<(), ConnectError> {
+        if self.closed {
+            return Ok(());
+        }
         debug!("Safely closing SSH connection...");
 
         let before_disconnect_hooks = self.hooks.before_disconnect.clone();
@@ -136,6 +139,7 @@ impl SharedSshClient {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
+        self.closed = true;
         debug!("SSH connection safely closed");
         Ok(())
     }
@@ -242,7 +246,12 @@ impl SharedSshClient {
                     }
                 }
             }
-            let _ = MANAGER.cache.invalidate(&io_task_device_addr).await;
+            // No cache invalidation here: this task may belong to any
+            // manager instance (not just the global MANAGER), and a stale
+            // invalidation could evict a healthy replacement connection
+            // cached under the same key. Dead connections are detected via
+            // `is_connected()` (the shell input channel closes when this
+            // task ends) and recreated on the next pool access.
             debug!("{} SSH I/O task ended.", io_task_device_addr);
         });
 
@@ -365,6 +374,7 @@ impl SharedSshClient {
             enable_password_hash,
             security_options,
             recorder,
+            closed: false,
         };
 
         if let Some(session_recorder) = shared.recorder.as_ref() {
@@ -384,8 +394,13 @@ impl SharedSshClient {
     }
 
     /// Checks if the underlying SSH connection is still active.
+    ///
+    /// Besides the SSH transport itself, this also detects a dead shell
+    /// session: when the I/O task ends (shell exit, EOF, channel failure)
+    /// it drops its receiver, closing the shell input channel even though
+    /// the TCP connection may still be alive.
     pub fn is_connected(&self) -> bool {
-        !self.client.is_closed()
+        !self.closed && !self.client.is_closed() && !self.sender.is_closed()
     }
 
     pub(crate) async fn run_hook_actions(

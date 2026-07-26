@@ -33,31 +33,38 @@ pub const LEGACY_KEX_ORDER: &[kex::Name] = &[
 ///
 /// Includes modern ciphers like AES-GCM and ChaCha20-Poly1305, as well as
 /// legacy CBC mode ciphers for compatibility with older devices.
+///
+/// SSH negotiation follows client preference order (RFC 4253), so the
+/// plaintext `clear`/`none` entries must stay last: they are a final
+/// fallback only, never preferred over an encrypted cipher.
 pub static LEGACY_CIPHERS: &[cipher::Name] = &[
+    cipher::CHACHA20_POLY1305,
+    cipher::AES_256_GCM,
+    cipher::AES_256_CTR,
+    cipher::AES_192_CTR,
+    cipher::AES_128_CTR,
+    cipher::AES_256_CBC,
+    cipher::AES_192_CBC,
+    cipher::AES_128_CBC,
     cipher::CLEAR,
     cipher::NONE,
-    cipher::AES_128_CTR,
-    cipher::AES_192_CTR,
-    cipher::AES_256_CTR,
-    cipher::AES_256_GCM,
-    cipher::AES_128_CBC,
-    cipher::AES_192_CBC,
-    cipher::AES_256_CBC,
-    cipher::CHACHA20_POLY1305,
 ];
 
 /// Legacy-compatible MAC (Message Authentication Code) algorithms.
 ///
 /// Includes both standard HMAC variants and ETM (Encrypt-then-MAC) variants
 /// for enhanced security.
+///
+/// `none` must stay last so an integrity-checked MAC always wins the
+/// negotiation when the server supports one.
 pub const LEGACY_MAC_ALGORITHMS: &[mac::Name] = &[
-    mac::NONE,
-    mac::HMAC_SHA1,
-    mac::HMAC_SHA256,
-    mac::HMAC_SHA512,
-    mac::HMAC_SHA1_ETM,
-    mac::HMAC_SHA256_ETM,
     mac::HMAC_SHA512_ETM,
+    mac::HMAC_SHA256_ETM,
+    mac::HMAC_SHA1_ETM,
+    mac::HMAC_SHA512,
+    mac::HMAC_SHA256,
+    mac::HMAC_SHA1,
+    mac::NONE,
 ];
 
 /// Compression algorithms shared by all security levels.
@@ -74,8 +81,12 @@ pub const DEFAULT_COMPRESSION_ALGORITHMS: &[compression::Name] = &[
 ///
 /// Includes modern algorithms like Ed25519 and ECDSA, as well as legacy
 /// RSA and DSA for compatibility with older devices.
+///
+/// Deprecated algorithms (SHA-1 RSA, 1024-bit DSA) stay at the end so a
+/// modern host key is always preferred when the server offers one.
 pub const LEGACY_KEY_TYPES: &[Algorithm] = &[
-    Algorithm::Dsa,
+    Algorithm::Ed25519,
+    Algorithm::SkEd25519,
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
     },
@@ -85,16 +96,15 @@ pub const LEGACY_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP521,
     },
-    Algorithm::Ed25519,
-    Algorithm::Rsa { hash: None },
-    Algorithm::Rsa {
-        hash: Some(HashAlg::Sha256),
-    },
+    Algorithm::SkEcdsaSha2NistP256,
     Algorithm::Rsa {
         hash: Some(HashAlg::Sha512),
     },
-    Algorithm::SkEcdsaSha2NistP256,
-    Algorithm::SkEd25519,
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha256),
+    },
+    Algorithm::Rsa { hash: None },
+    Algorithm::Dsa,
 ];
 
 /// Balanced key exchange algorithms (keeps broad compatibility while removing weak entries).

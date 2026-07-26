@@ -2,6 +2,7 @@
 name = "rneter"
 version = "0.4.7"
 edition = "2024"
+rust-version = "1.88"
 authors = ["demohiiiii"]
 license = "MIT"
 description = "SSH connection manager for network devices with intelligent state machine handling"

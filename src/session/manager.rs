@@ -1,15 +1,76 @@
 use super::*;
 
+/// Converts the shared init error produced by the single-flight cache entry
+/// back into a plain [`ConnectError`].
+///
+/// When several callers awaited the same failed connection attempt, only one
+/// of them can take ownership of the error; the others receive a copy that
+/// preserves the original message.
+fn unwrap_shared_connect_error(error: Arc<ConnectError>) -> ConnectError {
+    Arc::try_unwrap(error)
+        .unwrap_or_else(|shared| ConnectError::InternalServerError(shared.to_string()))
+}
+
 impl SshConnectionManager {
-    /// Creates a new SSH connection manager.
+    /// Creates a new SSH connection manager with the default pool settings.
     pub fn new() -> Self {
-        // Cache up to 100 connections. Evict after 5 minutes of inactivity.
+        Self::with_pool_config(ConnectionPoolConfig::default())
+    }
+
+    /// Creates a new SSH connection manager with custom pool settings.
+    ///
+    /// Connection shutdown is owned by each connection's worker task: it
+    /// gracefully closes the connection (running `before_disconnect` hooks
+    /// and sending `exit`) once the last command sender is gone — i.e. the
+    /// pool evicted its handle *and* no caller holds one. A connection that
+    /// is still in use by a caller-held sender is therefore never closed
+    /// underneath them by an idle eviction.
+    pub fn with_pool_config(config: ConnectionPoolConfig) -> Self {
         let cache = Cache::builder()
-            .max_capacity(100)
-            .time_to_idle(Duration::from_secs(5 * 60)) // Evict after 5 minutes idle
+            .max_capacity(config.max_connections)
+            .time_to_idle(config.idle_timeout)
             .build();
 
-        Self { cache }
+        // Pace pending-task maintenance well below the idle timeout so
+        // evictions (and thus graceful shutdown) are observed promptly.
+        let maintenance_period =
+            (config.idle_timeout / 4).clamp(Duration::from_secs(1), Duration::from_secs(60));
+
+        Self {
+            cache,
+            maintenance_running: Arc::new(AtomicBool::new(false)),
+            maintenance_period,
+        }
+    }
+
+    /// Starts the pool maintenance task if it is not already running.
+    ///
+    /// The moka future cache has no background threads: expired entries are
+    /// only evicted while the cache is being used. This task keeps evictions
+    /// flowing during quiet periods so idle connections actually get closed,
+    /// and stops itself once the pool is empty (it is restarted on demand by
+    /// the next pool access).
+    fn spawn_maintenance_if_needed(&self) {
+        if self
+            .maintenance_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let cache = self.cache.clone();
+        let running = self.maintenance_running.clone();
+        let period = self.maintenance_period;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                cache.run_pending_tasks().await;
+                if cache.entry_count() == 0 {
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
     }
 
     /// Gets a cached SSH client using a structured request/context pair.
@@ -18,13 +79,14 @@ impl SshConnectionManager {
         request: ConnectionRequest,
         context: ExecutionContext,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
-        self.get_with_request_and_recording(
+        self.get_client_with_request_and_recording(
             request,
             context.security_options,
             context.connect_timeout,
             None,
         )
         .await
+        .map(|(sender, _client)| sender)
     }
 
     /// Execute a single command directly using a structured connection/context pair.
@@ -82,34 +144,24 @@ impl SshConnectionManager {
         operation: SessionOperation,
         context: ExecutionContext,
     ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
-        let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(
-            request,
-            context.security_options,
-            context.connect_timeout,
-            None,
-        )
-        .await
-        .map_err(|err| {
-            SessionOperationExecutionError::new(
-                err,
-                SessionOperationOutput {
-                    success: false,
-                    steps: Vec::new(),
-                },
+        let (_sender, client) = self
+            .get_client_with_request_and_recording(
+                request,
+                context.security_options,
+                context.connect_timeout,
+                None,
             )
-        })?;
-
-        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            SessionOperationExecutionError::new(
-                ConnectError::InternalServerError("connection cache miss".to_string()),
-                SessionOperationOutput {
-                    success: false,
-                    steps: Vec::new(),
-                },
-            )
-        })?;
+            .await
+            .map_err(|err| {
+                SessionOperationExecutionError::new(
+                    err,
+                    SessionOperationOutput {
+                        success: false,
+                        steps: Vec::new(),
+                    },
+                )
+            })?;
 
         let mut client_guard = client.write().await;
         client_guard
@@ -141,19 +193,15 @@ impl SshConnectionManager {
         block: TxBlock,
         context: ExecutionContext,
     ) -> Result<TxResult, ConnectError> {
-        let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(
-            request,
-            context.security_options,
-            context.connect_timeout,
-            None,
-        )
-        .await?;
-
-        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            ConnectError::InternalServerError("connection cache miss".to_string())
-        })?;
+        let (_sender, client) = self
+            .get_client_with_request_and_recording(
+                request,
+                context.security_options,
+                context.connect_timeout,
+                None,
+            )
+            .await?;
 
         let mut client_guard = client.write().await;
         client_guard.execute_tx_block(&block, sys.as_ref()).await
@@ -166,19 +214,15 @@ impl SshConnectionManager {
         workflow: TxWorkflow,
         context: ExecutionContext,
     ) -> Result<TxWorkflowResult, ConnectError> {
-        let device_addr = request.device_addr();
         let sys = context.sys.clone();
-        self.get_with_request_and_recording(
-            request,
-            context.security_options,
-            context.connect_timeout,
-            None,
-        )
-        .await?;
-
-        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            ConnectError::InternalServerError("connection cache miss".to_string())
-        })?;
+        let (_sender, client) = self
+            .get_client_with_request_and_recording(
+                request,
+                context.security_options,
+                context.connect_timeout,
+                None,
+            )
+            .await?;
 
         let mut client_guard = client.write().await;
         client_guard
@@ -193,18 +237,14 @@ impl SshConnectionManager {
         upload: FileUploadRequest,
         context: ExecutionContext,
     ) -> Result<(), ConnectError> {
-        let device_addr = request.device_addr();
-        self.get_with_request_and_recording(
-            request,
-            context.security_options,
-            context.connect_timeout,
-            None,
-        )
-        .await?;
-
-        let (_sender, client) = self.cache.get(&device_addr).await.ok_or_else(|| {
-            ConnectError::InternalServerError("connection cache miss".to_string())
-        })?;
+        let (_sender, client) = self
+            .get_client_with_request_and_recording(
+                request,
+                context.security_options,
+                context.connect_timeout,
+                None,
+            )
+            .await?;
 
         let mut client_guard = client.write().await;
         client_guard.upload_file(&upload).await
@@ -229,9 +269,23 @@ impl SshConnectionManager {
         context: ExecutionContext,
         level: SessionRecordLevel,
     ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
-        let recorder = SessionRecorder::new(level);
-        let sender = self
-            .get_with_request_and_recording(
+        self.get_with_recorder_and_context(request, context, SessionRecorder::new(level))
+            .await
+    }
+
+    /// Gets a cached SSH client bound to a caller-provided recorder.
+    ///
+    /// Use this to attach a pre-configured recorder, e.g. one carrying a
+    /// redactor ([`SessionRecorder::with_redactor`]) that scrubs secrets
+    /// before events are stored.
+    pub async fn get_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
+        let (sender, _client) = self
+            .get_client_with_request_and_recording(
                 request,
                 context.security_options,
                 context.connect_timeout,
@@ -241,13 +295,21 @@ impl SshConnectionManager {
         Ok((sender, recorder))
     }
 
-    async fn get_with_request_and_recording(
+    /// Returns a healthy pooled connection, creating one when necessary.
+    ///
+    /// Concurrent callers for the same device share one connection attempt
+    /// (single-flight) instead of racing to create duplicate connections.
+    /// The pooled client is returned directly so callers never need a
+    /// second cache lookup.
+    async fn get_client_with_request_and_recording(
         &self,
         request: ConnectionRequest,
         security_options: ConnectionSecurityOptions,
         connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
-    ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
+    ) -> Result<(mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>), ConnectError> {
+        self.spawn_maintenance_if_needed();
+
         let device_addr = request.device_addr();
         let ConnectionRequest {
             user,
@@ -258,59 +320,86 @@ impl SshConnectionManager {
             handler,
         } = request;
 
-        // Check if a healthy, usable connection exists in the cache
-        if let Some((sender, client)) = self.cache.get(&device_addr).await {
-            debug!("Cache hit: {}", device_addr);
+        // One retry: the first pass may find a stale or mismatched entry,
+        // invalidate it, and create a fresh connection on the second pass.
+        for _attempt in 0..2 {
+            let entry = self
+                .cache
+                .entry(device_addr.clone())
+                .or_try_insert_with(Self::create_connection(
+                    device_addr.clone(),
+                    user.clone(),
+                    addr.clone(),
+                    port,
+                    password.clone(),
+                    enable_password.clone(),
+                    handler.clone(),
+                    security_options.clone(),
+                    connect_timeout,
+                    recorder.clone(),
+                ))
+                .await
+                .map_err(unwrap_shared_connect_error)?;
 
-            let client_guard = client.read().await;
-            if client_guard.is_connected() {
-                // Check if connection parameters match
-                if client_guard.matches_connection_params(
-                    &password,
-                    &enable_password,
-                    &handler,
-                    &security_options,
-                ) {
-                    debug!("Cached connection params match, reusing: {}", device_addr);
-                    if recorder.is_some() {
-                        drop(client_guard);
-                        let mut client_guard = client.write().await;
-                        client_guard.recorder = recorder.clone();
-                    }
-                    return Ok(sender);
-                } else {
-                    debug!(
-                        "Cached connection params mismatch, recreating: {}",
-                        device_addr
-                    );
-                    // Release read lock
-                    drop(client_guard);
+            let is_fresh = entry.is_fresh();
+            let (sender, client) = entry.into_value();
 
-                    // Safely disconnect the old connection
-                    match self
-                        .safely_disconnect_cached_connection(&device_addr, client.clone())
-                        .await
-                    {
-                        Ok(_) => debug!("Old connection safely disconnected: {}", device_addr),
-                        Err(e) => debug!(
-                            "Error disconnecting old connection: {} - {}",
-                            device_addr, e
-                        ),
-                    }
-
-                    // Remove from cache
-                    self.cache.invalidate(&device_addr).await;
-                }
-            } else {
-                // If connection is closed, remove from cache
-                debug!("Cached connection {} is closed. Removing.", device_addr);
-                self.cache.invalidate(&device_addr).await;
+            if is_fresh {
+                debug!("New connection for {} has been cached.", device_addr);
+                return Ok((sender, client));
             }
-        } else {
-            debug!("Cache miss, creating new connection for {}...", device_addr);
+
+            debug!("Cache hit: {}", device_addr);
+            let reusable = {
+                let client_guard = client.read().await;
+                client_guard.is_connected()
+                    && client_guard.matches_connection_params(
+                        &password,
+                        &enable_password,
+                        &handler,
+                        &security_options,
+                    )
+            };
+
+            if reusable {
+                debug!("Cached connection params match, reusing: {}", device_addr);
+                if recorder.is_some() {
+                    client.write().await.recorder = recorder.clone();
+                }
+                return Ok((sender, client));
+            }
+
+            debug!(
+                "Cached connection {} is stale or params mismatch, recreating.",
+                device_addr
+            );
+            // Eviction drops the pool's sender; the old connection's worker
+            // closes it once the last sender is gone.
+            self.cache.invalidate(&device_addr).await;
         }
 
-        // Create a new client. `new` automatically detects prompt and ensures shell is ready.
+        Err(ConnectError::InternalServerError(format!(
+            "failed to establish a usable pooled connection for {device_addr}"
+        )))
+    }
+
+    /// Establishes a new SSH connection and spawns its command worker.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_connection(
+        device_addr: String,
+        user: String,
+        addr: String,
+        port: u16,
+        password: String,
+        enable_password: Option<String>,
+        handler: DeviceHandler,
+        security_options: ConnectionSecurityOptions,
+        connect_timeout: Duration,
+        recorder: Option<SessionRecorder>,
+    ) -> Result<(mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>), ConnectError> {
+        debug!("Creating new connection for {}...", device_addr);
+
+        // `new` automatically detects prompt and ensures shell is ready.
         let ssh_client = SharedSshClient::new(
             user,
             addr,
@@ -328,7 +417,7 @@ impl SshConnectionManager {
         let (tx, mut rx) = mpsc::channel::<CmdJob>(32);
 
         let client_clone = client_arc.clone();
-        let worker_device_addr = device_addr.clone();
+        let worker_device_addr = device_addr;
 
         tokio::spawn(async move {
             loop {
@@ -373,52 +462,27 @@ impl SshConnectionManager {
 
                     let _ = job.responder.send(res);
                 } else {
+                    // All senders are gone: the pool evicted its handle and
+                    // no caller holds one. This is the single owner of
+                    // connection shutdown — close gracefully so
+                    // `before_disconnect` hooks run and the device-side VTY
+                    // session is released instead of leaking.
                     debug!(
-                        "Command channel closed for {}, stopping worker.",
+                        "Command channel closed for {}, closing connection and stopping worker.",
                         worker_device_addr
                     );
+                    let mut client_guard = client_clone.write().await;
+                    if client_guard.is_connected()
+                        && let Err(error) = client_guard.close().await
+                    {
+                        debug!("Error closing connection {}: {}", worker_device_addr, error);
+                    }
                     break;
                 }
             }
         });
 
-        self.cache
-            .insert(device_addr.clone(), (tx.clone(), client_arc))
-            .await;
-        debug!("New connection for {} has been cached.", device_addr);
-
-        Ok(tx)
-    }
-
-    /// Safely disconnects a cached connection.
-    async fn safely_disconnect_cached_connection(
-        &self,
-        device_addr: &str,
-        client_arc: Arc<RwLock<SharedSshClient>>,
-    ) -> Result<(), ConnectError> {
-        debug!("Safely disconnecting cached connection: {}", device_addr);
-
-        // Get write lock to ensure exclusive access
-        let mut client_guard = client_arc.write().await;
-
-        // Check if connection is still active
-        if !client_guard.is_connected() {
-            debug!("Connection {} already disconnected, skipping", device_addr);
-            return Ok(());
-        }
-
-        // Safely close connection
-        match client_guard.close().await {
-            Ok(_) => {
-                debug!("Connection {} safely closed", device_addr);
-                Ok(())
-            }
-            Err(e) => {
-                debug!("Error closing connection {}: {}", device_addr, e);
-                // Consider success even on error as connection will be dropped
-                Ok(())
-            }
-        }
+        Ok((tx, client_arc))
     }
 }
 

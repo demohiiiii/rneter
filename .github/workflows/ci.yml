@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  clippy-and-test:
+  lint-and-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -14,11 +14,41 @@ jobs:
 
       - name: Set up Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
 
+      - name: Check Formatting
+        run: cargo fmt --check
+
       - name: Run Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run Tests
         run: cargo test
+
+  msrv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSRV Rust
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          rustup default 1.88
+
+      - name: Check Build on MSRV
+        run: cargo check --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit Dependencies
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

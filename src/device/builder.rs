@@ -246,6 +246,7 @@ impl DeviceHandler {
                 },
             },
             hooks,
+            adjacency: super::OnceCell::new(),
         })
     }
 }

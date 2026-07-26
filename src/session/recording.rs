@@ -187,12 +187,25 @@ pub enum SessionEvent {
     },
 }
 
+/// Transformation applied to every event before it is recorded.
+pub type SessionEventRedactor = dyn Fn(SessionEvent) -> SessionEvent + Send + Sync;
+
 /// In-memory session recorder.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionRecorder {
     level: SessionRecordLevel,
     entries: Arc<Mutex<Vec<SessionRecordEntry>>>,
     subscribers: broadcast::Sender<SessionRecordEntry>,
+    redactor: Option<Arc<SessionEventRedactor>>,
+}
+
+impl std::fmt::Debug for SessionRecorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRecorder")
+            .field("level", &self.level)
+            .field("has_redactor", &self.redactor.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionRecorder {
@@ -203,7 +216,23 @@ impl SessionRecorder {
             level,
             entries: Arc::new(Mutex::new(Vec::new())),
             subscribers,
+            redactor: None,
         }
+    }
+
+    /// Attach a redactor applied to every event before it is stored or
+    /// broadcast.
+    ///
+    /// Recordings capture command text and device output verbatim, which may
+    /// include secrets typed into configuration commands (passwords, SNMP
+    /// communities, keys). A redactor lets callers scrub or mask such values
+    /// before they ever reach the in-memory log or exported JSONL.
+    pub fn with_redactor(
+        mut self,
+        redactor: impl Fn(SessionEvent) -> SessionEvent + Send + Sync + 'static,
+    ) -> Self {
+        self.redactor = Some(Arc::new(redactor));
+        self
     }
 
     /// Current recording level.
@@ -224,6 +253,10 @@ impl SessionRecorder {
         if self.level == SessionRecordLevel::Off {
             return Ok(());
         }
+        let event = match self.redactor.as_ref() {
+            Some(redactor) => redactor(event),
+            None => event,
+        };
         let entry = SessionRecordEntry {
             ts_ms: now_ms(),
             event,
@@ -502,6 +535,64 @@ mod tests {
             entries[0].event,
             SessionEvent::PromptChanged { .. }
         ));
+    }
+
+    #[test]
+    fn recorder_redactor_scrubs_events_before_storage_and_broadcast() {
+        let recorder =
+            SessionRecorder::new(SessionRecordLevel::Full).with_redactor(|event| match event {
+                SessionEvent::CommandOutput {
+                    command,
+                    mode,
+                    prompt_before,
+                    prompt_after,
+                    fsm_prompt_before,
+                    fsm_prompt_after,
+                    success,
+                    exit_code,
+                    content,
+                    all,
+                } => SessionEvent::CommandOutput {
+                    command: command.replace("s3cret", "***"),
+                    mode,
+                    prompt_before,
+                    prompt_after,
+                    fsm_prompt_before,
+                    fsm_prompt_after,
+                    success,
+                    exit_code,
+                    content: content.replace("s3cret", "***"),
+                    all: all.replace("s3cret", "***"),
+                },
+                other => other,
+            });
+        let mut subscription = recorder.subscribe();
+
+        recorder
+            .record_event(SessionEvent::CommandOutput {
+                command: "username admin password s3cret".to_string(),
+                mode: "config".to_string(),
+                prompt_before: None,
+                prompt_after: None,
+                fsm_prompt_before: None,
+                fsm_prompt_after: None,
+                success: true,
+                exit_code: None,
+                content: "password s3cret accepted".to_string(),
+                all: "username admin password s3cret\nrouter(config)#".to_string(),
+            })
+            .expect("record command output");
+
+        let entries = recorder.entries().expect("entries");
+        assert_eq!(entries.len(), 1);
+        let jsonl = recorder.to_jsonl().expect("encode jsonl");
+        assert!(!jsonl.contains("s3cret"), "stored jsonl leaked the secret");
+        assert!(jsonl.contains("***"));
+
+        // Broadcast subscribers must also only ever see redacted events.
+        let broadcast_entry = subscription.try_recv().expect("broadcast entry");
+        let encoded = serde_json::to_string(&broadcast_entry).expect("encode broadcast entry");
+        assert!(!encoded.contains("s3cret"), "broadcast leaked the secret");
     }
 
     #[test]

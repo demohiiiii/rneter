@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use log::trace;
 
-use super::{DeviceHandler, ExitPath};
+use super::{AdjacencyList, DeviceHandler, ExitPath};
 use crate::error::ConnectError;
 
 impl DeviceHandler {
@@ -21,7 +21,7 @@ impl DeviceHandler {
         loop {
             if let Some((cmd, end, format)) = edge_map.get(current) {
                 path.push((
-                    Self::format_cmd(**format, cmd, sys.map(|s| s.as_str())),
+                    Self::format_cmd(**format, cmd, sys.map(|s| s.as_str()))?,
                     (*end).to_string(),
                 ));
                 if let Some(index) = self.all_states.iter().position(|v| v.eq(*end)) {
@@ -39,16 +39,42 @@ impl DeviceHandler {
     }
 
     /// Formats a command string with system name substitution.
-    fn format_cmd(format: bool, cmd: &str, sys: Option<&str>) -> String {
+    ///
+    /// A transition edge marked as needing formatting requires a system name;
+    /// returning an error here (instead of silently producing an empty
+    /// command) prevents the state machine from believing a transition
+    /// succeeded when only a bare newline was sent to the device.
+    fn format_cmd(format: bool, cmd: &str, sys: Option<&str>) -> Result<String, ConnectError> {
         if format {
-            if let Some(s) = sys {
-                cmd.replace("{}", s)
-            } else {
-                String::new()
+            match sys {
+                Some(s) => Ok(cmd.replace("{}", s)),
+                None => Err(ConnectError::InvalidCommandFlow(format!(
+                    "transition command '{cmd}' requires a system name (sys), but none was provided"
+                ))),
             }
         } else {
-            cmd.to_string()
+            Ok(cmd.to_string())
         }
+    }
+
+    /// Returns the cached adjacency list over the transition edges.
+    ///
+    /// The edge set is immutable after construction, so the list is built
+    /// once and reused by every subsequent transition computation. Commands
+    /// are kept unformatted here; system-name substitution happens only for
+    /// the edges actually chosen for a path.
+    fn adjacency_list(&self) -> &AdjacencyList {
+        self.adjacency.get_or_init(|| {
+            let mut adj_list: AdjacencyList = HashMap::new();
+            for (from, label, to, _, format) in &self.edges {
+                adj_list.entry(from.clone()).or_default().push((
+                    to.clone(),
+                    label.clone(),
+                    *format,
+                ));
+            }
+            adj_list
+        })
     }
 
     /// Calculates the commands needed to transition to a target state.
@@ -75,13 +101,7 @@ impl DeviceHandler {
             return Ok(switch_path);
         }
 
-        let mut adj_list: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for (from, label, to, _, format) in &self.edges {
-            adj_list.entry(from.clone()).or_default().push((
-                to.clone(),
-                Self::format_cmd(*format, label, sys.map(|s| s.as_str())),
-            ));
-        }
+        let adj_list = self.adjacency_list();
 
         let mut queue = VecDeque::new();
         queue.push_back(start_node.clone());
@@ -89,7 +109,10 @@ impl DeviceHandler {
         let mut visited = HashSet::new();
         visited.insert(start_node.clone());
 
-        let mut predecessors: HashMap<String, (String, String)> = HashMap::new();
+        // Maps a node to (parent, raw_command, needs_format); formatting is
+        // deferred until the final path is known so unrelated edges that
+        // need a system name never abort an independent transition.
+        let mut predecessors: HashMap<String, (String, String, bool)> = HashMap::new();
 
         while let Some(current_node) = queue.pop_front() {
             trace!("Current node: '{:?}'", current_node);
@@ -98,12 +121,12 @@ impl DeviceHandler {
             }
 
             if let Some(neighbors) = adj_list.get(&current_node) {
-                for (neighbor_node, edge_label) in neighbors {
+                for (neighbor_node, edge_label, needs_format) in neighbors {
                     if !visited.contains(neighbor_node) {
                         visited.insert(neighbor_node.clone());
                         predecessors.insert(
                             neighbor_node.clone(),
-                            (current_node.clone(), edge_label.clone()),
+                            (current_node.clone(), edge_label.clone(), *needs_format),
                         );
                         queue.push_back(neighbor_node.clone());
                     }
@@ -119,8 +142,11 @@ impl DeviceHandler {
         let mut path = Vec::new();
 
         while current != start_node {
-            if let Some((parent, edge_label)) = predecessors.get(&current) {
-                path.push((edge_label.clone(), current.clone()));
+            if let Some((parent, edge_label, needs_format)) = predecessors.get(&current) {
+                path.push((
+                    Self::format_cmd(*needs_format, edge_label, sys.map(|s| s.as_str()))?,
+                    current.clone(),
+                ));
                 current = parent.clone();
             } else {
                 return Err(ConnectError::InternalServerError(format!(
@@ -139,7 +165,11 @@ impl DeviceHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::build_test_handler;
+    use std::collections::HashMap;
+
+    use super::super::{
+        DeviceHandler, DeviceHandlerConfig, build_test_handler, prompt_rule, transition_rule,
+    };
     use crate::error::ConnectError;
 
     #[test]
@@ -172,5 +202,71 @@ mod tests {
             ConnectError::UnreachableState(s) => assert_eq!(s, "does-not-exist"),
             other => panic!("unexpected error type: {other}"),
         }
+    }
+
+    fn build_sys_edge_handler() -> DeviceHandler {
+        DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![
+                prompt_rule("Enable", &[r"^dev#\s*$"]),
+                prompt_rule("Config", &[r"^dev\(cfg\)#\s*$"]),
+                prompt_rule("VSite", &[r"^dev\(vsite\)#\s*$"]),
+            ],
+            edges: vec![
+                transition_rule("Enable", "configure terminal", "Config", false, false),
+                transition_rule("Config", "exit", "Enable", true, false),
+                transition_rule("Enable", "switch {}", "VSite", false, true),
+                transition_rule("VSite", "switch back", "Enable", true, false),
+            ],
+            dyn_param: HashMap::new(),
+            ..Default::default()
+        })
+        .expect("sys edge handler config should be valid")
+    }
+
+    #[test]
+    fn transition_over_sys_edge_without_sys_returns_error() {
+        let mut handler = build_sys_edge_handler();
+        handler.read("dev#");
+
+        let err = handler
+            .trans_state_write("vsite", None)
+            .expect_err("sys-formatted edge without sys must not send an empty command");
+        match err {
+            ConnectError::InvalidCommandFlow(message) => {
+                assert!(message.contains("switch {}"), "message: {message}");
+            }
+            other => panic!("unexpected error type: {other}"),
+        }
+    }
+
+    #[test]
+    fn transition_over_sys_edge_with_sys_substitutes_name() {
+        let mut handler = build_sys_edge_handler();
+        handler.read("dev#");
+
+        let sys = "site-a".to_string();
+        let path = handler
+            .trans_state_write("vsite", Some(&sys))
+            .expect("sys-formatted edge with sys should succeed");
+        assert_eq!(
+            path,
+            vec![("switch site-a".to_string(), "vsite".to_string())]
+        );
+    }
+
+    #[test]
+    fn transition_avoiding_sys_edge_still_works_without_sys() {
+        // The path Enable -> Config never touches the sys-formatted edge, so
+        // a missing system name must not abort this unrelated transition.
+        let mut handler = build_sys_edge_handler();
+        handler.read("dev#");
+
+        let path = handler
+            .trans_state_write("config", None)
+            .expect("path without sys edges should not require sys");
+        assert_eq!(
+            path,
+            vec![("configure terminal".to_string(), "config".to_string())]
+        );
     }
 }

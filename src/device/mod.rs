@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::session::SessionHooks;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use regex::{Regex, RegexSet};
 
 mod builder;
@@ -33,6 +33,7 @@ pub(crate) enum CommandExecutionStrategy {
     },
 }
 
+#[derive(Clone)]
 pub struct DeviceHandler {
     /// Index of the current state in the `all_states` vector
     current_state_index: usize,
@@ -91,9 +92,15 @@ pub struct DeviceHandler {
 
     /// Declarative lifecycle hooks retained from configuration for later runtime use.
     hooks: SessionHooks,
+
+    /// Lazily built adjacency list over `edges`, cached because the edge set
+    /// is immutable after construction and transitions run on every command.
+    /// Values are `(to_state, raw_command, needs_format)`.
+    adjacency: OnceCell<AdjacencyList>,
 }
 
 type ExitPath = Option<(String, Vec<(String, String)>)>;
+type AdjacencyList = HashMap<String, Vec<(String, String, bool)>>;
 pub(crate) const PRIVATE_USE_PLACEHOLDER: &str = "<PUA>";
 
 pub(crate) fn is_private_use(ch: char) -> bool {
