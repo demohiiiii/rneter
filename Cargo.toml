@@ -13,8 +13,17 @@ readme = "README.md"
 keywords = ["ssh", "network", "device", "automation", "cisco"]
 categories = ["network-programming", "asynchronous"]
 
+[features]
+# In-process fake SSH devices for testing rneter-based automation.
+# Downstream crates enable this in dev-dependencies to simulate devices.
+testkit = ["dep:rand_core"]
+
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 russh = { version = "0.55.0", features = ["des", "dsa"] }
+rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 async-ssh2-tokio = { version = "0.12.2" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 moka = { version = "0.12.13", features = ["future"] }
@@ -27,3 +36,18 @@ thiserror = "2.0.12"
 anyhow = "1.0.98"
 schemars = { version = "0.9.0" }
 sha2 = "0.10.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "net", "time", "io-util", "sync"] }
+
+[[example]]
+name = "virtual_device"
+required-features = ["testkit"]
+
+[[test]]
+name = "fake_device_e2e"
+required-features = ["testkit"]
+
+[[test]]
+name = "builtin_templates_e2e"
+required-features = ["testkit"]

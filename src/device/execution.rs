@@ -1,6 +1,6 @@
 use super::{CommandExecutionStrategy, DeviceHandler, DeviceShellFlavor};
 
-const EXIT_STATUS_SUFFIX: &str = ":__";
+pub(crate) const EXIT_STATUS_SUFFIX: &str = ":__";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedCommandOutput {

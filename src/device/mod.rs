@@ -23,6 +23,8 @@ pub use config::{
     prompt_with_sys_rule, transition_rule,
 };
 pub use diagnostics::StateMachineDiagnostics;
+#[cfg(feature = "testkit")]
+pub(crate) use execution::EXIT_STATUS_SUFFIX;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandExecutionStrategy {

@@ -11,6 +11,8 @@ mod network;
 mod registry;
 mod transaction;
 
+#[cfg(feature = "testkit")]
+pub(crate) use catalog::canonical_template_name;
 pub use catalog::{
     BUILTIN_TEMPLATES, TemplateCapability, TemplateMetadata, available_templates, template_catalog,
     template_metadata,

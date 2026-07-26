@@ -19,6 +19,7 @@
 - [命令流与交互](#命令流与交互)
 - [会话录制与回放](#会话录制与回放)
 - [事务工作流](#事务工作流)
+- [虚拟设备测试能力（testkit）](#虚拟设备测试能力testkit)
 - [模板与状态机生态](#模板与状态机生态)
 - [架构](#架构)
 - [生命周期 Hook](#生命周期-hook)
@@ -46,6 +47,7 @@
 - **最大兼容性**：支持广泛的 SSH 算法，包括用于旧设备的传统协议
 - **异步/等待**：基于 Tokio 构建，提供高性能异步操作
 - **错误处理**：全面的错误类型和详细的上下文信息
+- **虚拟设备测试套件**：可选的 `testkit` feature 提供进程内虚拟 SSH 设备，模仿全部内置模板，无需真实硬件即可测试基于 rneter 的自动化
 
 ## 安装
 
@@ -833,6 +835,123 @@ let block = templates::build_tx_block(
 ```
 
 如果只需要审计生命周期结果，可以使用 `SessionRecordLevel::KeyEventsOnly`；需要排查原始数据块和详细命令输出时，使用 `Full`。
+
+## 虚拟设备测试能力（testkit）
+
+可选的 `testkit` feature 提供进程内虚拟 SSH 设备，让基于 `rneter` 的上层应用无需真实硬件即可测试自动化逻辑。虚拟设备是一个真正的 SSH 服务器（基于 `russh`，启动时生成一次性主机密钥），提供脚本化的 CLI，因此完整链路都会被真实执行：SSH 握手、提示符探测、状态机转换、生命周期 Hook、会话录制与事务。
+
+在 `dev-dependencies` 中启用：
+
+```toml
+[dev-dependencies]
+rneter = { version = "0.4.7", features = ["testkit"] }
+```
+
+每个内置模板都有现成的 persona。模拟设备的状态机与客户端模板派生自同一份 `DeviceHandlerConfig`，模板变更永远不会与模拟实现悄悄脱节：
+
+```rust
+use rneter::session::{Command, SshConnectionManager};
+use rneter::testkit::{DevicePersona, FakeSshDevice};
+
+#[tokio::test]
+async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>> {
+    let device = FakeSshDevice::spawn(DevicePersona::builtin("cisco_ios")?).await?;
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device.connection_request()?,
+            Command {
+                mode: "Enable".to_string(),
+                command: "show version".to_string(),
+                ..Command::default()
+            },
+            device.execution_context(),
+        )
+        .await?;
+    assert!(output.success);
+
+    // 从设备视角断言：哪些命令真正到达了设备
+    assert!(device.received_commands().contains(&"show version".to_string()));
+    Ok(())
+}
+```
+
+常用入口：
+
+- `DevicePersona::builtin(name)`——全部内置模板的现成 persona，模仿真实设备：主机名风格的提示符（`Router#`、`<HUAWEI>`、`FGT60F #` 等）、厂商版本命令的真实回显（`show version`、`display version`、`get system status` 等）、enable/sudo 密码质询，以及厂商风格的错误输出（发送 `testkit::ERROR_COMMAND` 触发）。
+- `DevicePersona::with_canned_reply(command, output)`——为任意 persona 追加更多真实命令回显。
+- `DevicePersona::for_config(...)`——模拟自定义 `DeviceHandlerConfig`，可通过 builder 方法追加质询和错误文案。
+- `FakeSshDevice::received_commands()`——设备侧命令日志，适合断言状态转换顺序与事务回滚顺序。
+- `device.connection_request()` / `device.execution_context()`——为已启动的虚拟设备预接线的连接参数。
+- `FakeSshDevice::spawn_on(persona, addr)`——绑定到固定端口，让外部进程（或原生 `ssh` 客户端）直接连接。
+- `builtin_personas()`——一次性获取全部内置 persona，用于批量起舰队或矩阵测试。
+
+### 默认凭据
+
+| 项目 | 常量 | 值 |
+| --- | --- | --- |
+| 登录用户名 | `DEFAULT_USERNAME` | `admin` |
+| 登录密码 | `DEFAULT_PASSWORD` | `testkit-login-pw` |
+| enable/sudo 密码 | `DEFAULT_ENABLE_PASSWORD` | `testkit-enable-pw` |
+
+以上均为 persona 的公开字段，可按需覆盖。
+
+### 虚拟设备的行为规则
+
+- **状态机转换**：收到模板转换命令（`enable`、`system-view`、`configure terminal` 等）时按状态机切换提示符；需要密码的转换会先发出质询（`Password:`、`[sudo] password for admin:` 等），并校验应答。
+- **仿真命令**：命中 persona 内置（或 `with_canned_reply` 追加）的命令时，返回厂商真实格式的多行回显。
+- **未知命令**：返回 `benign_reply`（默认 `testkit-ok sample output`），判定为执行成功——上层测试可以放心发送任意配置命令。
+- **`make-error`**（`testkit::ERROR_COMMAND`）：返回该厂商风格的错误文案（linux 为退出码 1），用于测试错误检测与事务回滚路径。
+- **行终止符**：同时兼容自动化客户端的 `\n` 和交互式 SSH 终端的 `\r`，因此可以直接用 `ssh` 人工登录调试。
+- 注意：与命令文本相同或互为前缀的输出行会被 rneter 的回显过滤器从 `Output.content` 中滤除（如 NX-OS 的 `!Command: ...` 首行），需要原始数据时请读取 `Output.all`。
+
+### 各内置 persona 的提示符与仿真命令
+
+| 模板 | 提示符风格 | 仿真命令 |
+| --- | --- | --- |
+| `cisco_ios` / `cisco_xe` | `Router>` `Router#` `Router(config)#` | `show version` · `show running-config` · `show ip interface brief` |
+| `cisco_asa` | `ciscoasa>` `ciscoasa#` | `show version` · `show running-config` · `show interface ip brief` |
+| `cisco_nxos` | `switch>` `switch#` | `show version` · `show running-config` · `show interface brief` |
+| `arista_eos` | `switch>` `switch#` | `show version` · `show running-config` · `show interfaces status` |
+| `aruba_aoscx` | `switch>` `switch#` | `show version` · `show running-config` · `show interface brief` |
+| `dell_os10` | `OS10>` `OS10#` | `show version` · `show running-configuration` · `show interface status` |
+| `juniper_junos` | `admin@SRX>` `admin@SRX#` | `show version` · `show configuration` · `show interfaces terse` |
+| `fortinet` | `FGT60F #` | `get system status` · `show system interface` · `get system performance status` |
+| `paloalto_panos` | `admin@PA-3220>` `admin@PA-3220#` | `show system info` · `show config running` · `show interface all` |
+| `checkpoint_gaia` | `gw-13800b>` | `show version all` · `show configuration` · `show interfaces all` |
+| `huawei` | `<HUAWEI>` `[HUAWEI]` | `display version` · `display current-configuration` · `display interface brief` |
+| `h3c_comware` / `hp_comware` | `<H3C>` `[H3C]` | `display version` · `display current-configuration` · `display interface brief` |
+| `hillstone_stoneos` | `SG-6000#` `SG-6000(config)#` | `show version` · `show configuration` · `show interface` |
+| `topsec` | `TopsecOS#` | `system version show` · `system config show` · `network interface show` |
+| `dptech` | `<DPTECH>` `[DPTECH]` | `show version` · `show running-config` · `show interface brief` |
+| `qianxin` | `QiAnXin>` `QiAnXin-config]` | `show version` · `show running-config` · `show interface` |
+| `venustech` | `USG>` `USG#` | `show version` · `show running-config` · `show interface` |
+| `chaitin` | `safeline>` `safeline#` | `show version` · `show running-config` · `show interface` |
+| `zte_zxros` | `ZXR10>` `ZXR10#` | `show version` · `show running-config` · `show ip interface brief` |
+| `maipu` | `MyPower>` `MyPower#` | `show version` · `show running-config` · `show ip interface brief` |
+| `ruijie_os` | `Ruijie>` `Ruijie#` | `show version` · `show running-config` · `show ip interface brief` |
+| `array` | `AN>` `AN#` + 虚拟站点 `vs1$` | `show version` · `show running-config` · `show interface` |
+| `linux` | `admin@debian:~$` `root@debian:~#` | `uname -a` · `ip -brief address` · `cat /etc/os-release` |
+
+虚拟设备也可以通过自带的 example 作为独立服务运行——每个内置模板一台，或自定义一台：
+
+```bash
+# 列出全部内置设备 persona
+cargo run --example virtual_device --features testkit -- --list
+
+# 在固定端口运行一台虚拟设备
+cargo run --example virtual_device --features testkit -- cisco_ios 2201
+
+# 运行舰队：每个内置模板一台（端口 2200..2224）
+cargo run --example virtual_device --features testkit -- --all 2200
+
+# 运行自定义设备类型（自定义提示符/转换/错误风格）
+cargo run --example virtual_device --features testkit -- --custom 2300
+
+# 然后在任意终端：
+ssh -p 2201 admin@127.0.0.1   # 密码: testkit-login-pw
+```
 
 ## 模板与状态机生态
 

@@ -19,6 +19,7 @@
 - [Connection Security](#connection-security)
 - [Session Recording and Replay](#session-recording-and-replay)
 - [Transaction Workflows](#transaction-workflows)
+- [Testing With Fake Devices (testkit)](#testing-with-fake-devices-testkit)
 - [Template and State-Machine Ecosystem](#template-and-state-machine-ecosystem)
 - [Architecture](#architecture)
 - [Lifecycle Hooks](#lifecycle-hooks)
@@ -46,6 +47,7 @@
 - **Maximum Compatibility**: Supports a wide range of SSH algorithms including legacy protocols for older devices
 - **Async/Await**: Built on Tokio for high-performance asynchronous operations
 - **Error Handling**: Comprehensive error types with detailed context
+- **Virtual Device Testkit**: Optional `testkit` feature with in-process fake SSH devices imitating every built-in template, for testing rneter-based automation without real hardware
 
 ## Installation
 
@@ -855,6 +857,156 @@ When session recording is enabled, transaction execution emits block, step, roll
 ```
 
 Use `SessionRecordLevel::KeyEventsOnly` when lifecycle outcomes are sufficient, or `Full` when raw chunks and detailed command output are required for diagnosis.
+
+## Testing With Fake Devices (testkit)
+
+The optional `testkit` feature ships an in-process fake SSH device so that
+applications built on `rneter` can test their automation logic without real
+hardware. The fake device is a real SSH server (powered by `russh`, with a
+throwaway host key generated at spawn) that serves a scripted CLI, so the
+full stack is exercised: handshake, prompt detection, state transitions,
+lifecycle hooks, recording, and transactions.
+
+Enable it in your `dev-dependencies`:
+
+```toml
+[dev-dependencies]
+rneter = { version = "0.4.7", features = ["testkit"] }
+```
+
+Every built-in template has a ready-made persona. The simulated state machine
+is derived from the same `DeviceHandlerConfig` as the client template, so the
+fake device can never silently diverge from the template it impersonates:
+
+```rust
+use rneter::session::{Command, SshConnectionManager};
+use rneter::testkit::{DevicePersona, FakeSshDevice};
+
+#[tokio::test]
+async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>> {
+    let device = FakeSshDevice::spawn(DevicePersona::builtin("cisco_ios")?).await?;
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device.connection_request()?,
+            Command {
+                mode: "Enable".to_string(),
+                command: "show version".to_string(),
+                ..Command::default()
+            },
+            device.execution_context(),
+        )
+        .await?;
+    assert!(output.success);
+
+    // Assert from the device's point of view: which commands actually arrived.
+    assert!(device.received_commands().contains(&"show version".to_string()));
+    Ok(())
+}
+```
+
+Useful entry points:
+
+- `DevicePersona::builtin(name)` — personas for all built-in templates that
+  imitate the real device: hostname-styled prompts (`Router#`, `<HUAWEI>`,
+  `FGT60F #`, ...), realistic replies for the vendor's version command
+  (`show version`, `display version`, `get system status`, ...),
+  enable/sudo password challenges, and vendor-styled error output
+  (triggered by sending `testkit::ERROR_COMMAND`).
+- `DevicePersona::with_canned_reply(command, output)` — add more realistic
+  command replies to any persona.
+- `DevicePersona::for_config(...)` — simulate a custom
+  `DeviceHandlerConfig`; add challenges and error text with the builder
+  methods.
+- `FakeSshDevice::received_commands()` — the device-side command log, ideal
+  for asserting transition ordering and transaction rollbacks.
+- `device.connection_request()` / `device.execution_context()` — pre-wired
+  connection parameters for the spawned device.
+- `FakeSshDevice::spawn_on(persona, addr)` — bind to a well-known port so
+  external processes (or a plain `ssh` client) can connect.
+- `builtin_personas()` — every built-in persona at once, for fleets and
+  matrix tests.
+
+### Default Credentials
+
+| Item | Constant | Value |
+| --- | --- | --- |
+| Login username | `DEFAULT_USERNAME` | `admin` |
+| Login password | `DEFAULT_PASSWORD` | `testkit-login-pw` |
+| Enable/sudo password | `DEFAULT_ENABLE_PASSWORD` | `testkit-enable-pw` |
+
+All of these are public persona fields and can be overridden.
+
+### How a Virtual Device Behaves
+
+- **State transitions**: template transition commands (`enable`,
+  `system-view`, `configure terminal`, ...) switch the prompt according to
+  the state machine; password-protected transitions issue a challenge
+  first (`Password:`, `[sudo] password for admin:`, ...) and verify the
+  response.
+- **Simulated commands**: commands known to the persona (built-in or added
+  via `with_canned_reply`) return realistic multi-line vendor output.
+- **Unknown commands**: return `benign_reply`
+  (default `testkit-ok sample output`) and count as successful, so tests
+  can send arbitrary configuration commands.
+- **`make-error`** (`testkit::ERROR_COMMAND`): returns the vendor-styled
+  error line (exit code 1 on the linux persona) for exercising error
+  detection and transaction rollback paths.
+- **Line endings**: both the `\n` sent by automation clients and the bare
+  `\r` sent by interactive SSH terminals are accepted, so you can log in
+  with plain `ssh` for manual debugging.
+- Note: output lines equal to (or a prefix of) the sent command are
+  filtered from `Output.content` by rneter's echo filter (e.g. the leading
+  `!Command: ...` line of NX-OS); read `Output.all` for raw data.
+
+### Prompts and Simulated Commands per Built-in Persona
+
+| Template | Prompt style | Simulated commands |
+| --- | --- | --- |
+| `cisco_ios` / `cisco_xe` | `Router>` `Router#` `Router(config)#` | `show version` · `show running-config` · `show ip interface brief` |
+| `cisco_asa` | `ciscoasa>` `ciscoasa#` | `show version` · `show running-config` · `show interface ip brief` |
+| `cisco_nxos` | `switch>` `switch#` | `show version` · `show running-config` · `show interface brief` |
+| `arista_eos` | `switch>` `switch#` | `show version` · `show running-config` · `show interfaces status` |
+| `aruba_aoscx` | `switch>` `switch#` | `show version` · `show running-config` · `show interface brief` |
+| `dell_os10` | `OS10>` `OS10#` | `show version` · `show running-configuration` · `show interface status` |
+| `juniper_junos` | `admin@SRX>` `admin@SRX#` | `show version` · `show configuration` · `show interfaces terse` |
+| `fortinet` | `FGT60F #` | `get system status` · `show system interface` · `get system performance status` |
+| `paloalto_panos` | `admin@PA-3220>` `admin@PA-3220#` | `show system info` · `show config running` · `show interface all` |
+| `checkpoint_gaia` | `gw-13800b>` | `show version all` · `show configuration` · `show interfaces all` |
+| `huawei` | `<HUAWEI>` `[HUAWEI]` | `display version` · `display current-configuration` · `display interface brief` |
+| `h3c_comware` / `hp_comware` | `<H3C>` `[H3C]` | `display version` · `display current-configuration` · `display interface brief` |
+| `hillstone_stoneos` | `SG-6000#` `SG-6000(config)#` | `show version` · `show configuration` · `show interface` |
+| `topsec` | `TopsecOS#` | `system version show` · `system config show` · `network interface show` |
+| `dptech` | `<DPTECH>` `[DPTECH]` | `show version` · `show running-config` · `show interface brief` |
+| `qianxin` | `QiAnXin>` `QiAnXin-config]` | `show version` · `show running-config` · `show interface` |
+| `venustech` | `USG>` `USG#` | `show version` · `show running-config` · `show interface` |
+| `chaitin` | `safeline>` `safeline#` | `show version` · `show running-config` · `show interface` |
+| `zte_zxros` | `ZXR10>` `ZXR10#` | `show version` · `show running-config` · `show ip interface brief` |
+| `maipu` | `MyPower>` `MyPower#` | `show version` · `show running-config` · `show ip interface brief` |
+| `ruijie_os` | `Ruijie>` `Ruijie#` | `show version` · `show running-config` · `show ip interface brief` |
+| `array` | `AN>` `AN#` + virtual site `vs1$` | `show version` · `show running-config` · `show interface` |
+| `linux` | `admin@debian:~$` `root@debian:~#` | `uname -a` · `ip -brief address` · `cat /etc/os-release` |
+
+Virtual devices can also run as standalone servers via the bundled example —
+one per built-in template, or a self-defined one:
+
+```bash
+# List every built-in device persona
+cargo run --example virtual_device --features testkit -- --list
+
+# Run one virtual device on a fixed port
+cargo run --example virtual_device --features testkit -- cisco_ios 2201
+
+# Run a fleet: one virtual device per built-in template (ports 2200..2224)
+cargo run --example virtual_device --features testkit -- --all 2200
+
+# Run a self-defined device type (custom prompts/transitions/errors)
+cargo run --example virtual_device --features testkit -- --custom 2300
+
+# Then, from any terminal:
+ssh -p 2201 admin@127.0.0.1   # password: testkit-login-pw
+```
 
 ## Template and State-Machine Ecosystem
 

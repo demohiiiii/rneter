@@ -71,12 +71,15 @@
 //! - [`session::SessionOperationExecutionError`] - Operation-level execution error with partial outputs
 //! - [`config`] - SSH configuration constants
 //! - [`templates`] - Predefined device configurations for common vendors for maximum compatibility
+//! - `testkit` - In-process fake SSH devices for testing (enable the `testkit` cargo feature)
 
 pub mod config;
 pub mod device;
 pub mod error;
 pub mod session;
 pub mod templates;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 
 pub use session::{HookAction, HookFailurePolicy, SessionHooks};
 pub use templates::{
