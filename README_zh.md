@@ -16,6 +16,7 @@
 - [Linux 主机管理](#linux-主机管理)
 - [连接安全](#连接安全)
 - [SSH 认证方式](#ssh-认证方式)
+- [重连与重试](#重连与重试)
 - [Fleet 批量执行](#fleet-批量执行)
 - [文件传输](#文件传输)
 - [命令流与交互](#命令流与交互)
@@ -40,6 +41,7 @@
 - **连接池管理**：自动缓存和重用 SSH 连接以提高性能
 - **Fleet 批量执行**：以受控并发在多台独立配置的设备上执行同一命令或流程，并隔离单设备错误
 - **灵活的 SSH 认证**：通过 `SshAuthMethod` 支持密码、私钥（内联或文件）、ssh-agent 与键盘交互认证
+- **有界重试**：为瞬态故障提供显式开启的重连与封顶指数退避，并支持命令流续跑
 - **状态机管理**：智能设备状态跟踪和自动状态转换
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
@@ -288,6 +290,35 @@ let auth = SshAuthMethod::keyboard_interactive(vec![
 
 自动识别同样支持 `DetectRequest::new_with_auth(...)`。
 连接池会把认证方式纳入参数指纹，因此更换凭据一定会重建连接。
+
+## 重连与重试
+
+普通命令和 `SessionOperation` 执行入口可以通过 `ExecutionContext` 显式开启
+有界重试，默认不进行任何重试：
+
+```rust
+use std::time::Duration;
+use rneter::session::{ExecutionContext, RetryPolicy};
+
+let context = ExecutionContext::new().with_retry_policy(
+    RetryPolicy::new(2).with_backoff(
+        Duration::from_millis(200),
+        Duration::from_secs(2),
+    ),
+);
+```
+
+manager 会重试连接超时、初始化超时、传输错误和 channel 断开等瞬态故障，
+并在每次重试前逐出失效的池化连接。退避时间从 `initial_backoff` 开始翻倍，
+但不会超过 `max_backoff`。认证拒绝默认不可重试，只有显式调用
+`.with_authentication_retries(true)` 后才会进入重试。
+
+多步骤 flow 重连后会保留已完成步骤的输出，并从第一个未完成步骤继续，步骤索引
+仍对应原始 flow。`ExecTimeout`、设备返回的命令失败、事务、工作流和上传不会被
+自动重试。
+
+重试采用 at-least-once 语义：设备可能已经应用命令，只是在返回提示符前断开。
+因此只能对可安全重复执行的命令开启该策略。
 
 ## Fleet 批量执行
 
@@ -991,6 +1022,7 @@ async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>
 - `DevicePersona::builtin(name)`——全部内置模板的现成 persona，模仿真实设备：主机名风格的提示符（`Router#`、`<HUAWEI>`、`FGT60F #` 等）、厂商版本命令的真实回显（`show version`、`display version`、`get system status` 等）、enable/sudo 密码质询，以及厂商风格的错误输出（发送 `testkit::ERROR_COMMAND` 触发）。
 - `DevicePersona::with_canned_reply(command, output)`——为任意 persona 追加更多真实命令回显。
 - `DevicePersona::for_config(...)`——模拟自定义 `DeviceHandlerConfig`，可通过 builder 方法追加质询和错误文案。
+- `DevicePersona::with_faults(FaultInjection::new()...)`——注入认证或命令延迟、拒绝前 N 次有效认证，或在指定命令到达时断开连接。故障次数预算在重连后仍然共享。
 - `FakeSshDevice::received_commands()`——设备侧命令日志，适合断言状态转换顺序与事务回滚顺序。
 - `device.connection_request()` / `device.execution_context()`——为已启动的虚拟设备预接线的连接参数。
 - `FakeSshDevice::spawn_on(persona, addr)`——绑定到固定端口，让外部进程（或原生 `ssh` 客户端）直接连接。
@@ -1012,6 +1044,7 @@ async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>
 - **仿真命令**：命中 persona 内置（或 `with_canned_reply` 追加）的命令时，返回厂商真实格式的多行回显。
 - **未知命令**：返回 `benign_reply`（默认 `testkit-ok sample output`），判定为执行成功——上层测试可以放心发送任意配置命令。
 - **`make-error`**（`testkit::ERROR_COMMAND`）：返回该厂商风格的错误文案（linux 为退出码 1），用于测试错误检测与事务回滚路径。
+- **故障注入**：`FaultInjection` 可确定性地延迟认证或命令响应、拒绝指定次数的有效认证，并在收到精确匹配的命令时关闭 shell channel。计数器属于设备级状态，因此重连不会重置预算。
 - **行终止符**：同时兼容自动化客户端的 `\n` 和交互式 SSH 终端的 `\r`，因此可以直接用 `ssh` 人工登录调试。
 - 注意：与命令文本相同或互为前缀的输出行会被 rneter 的回显过滤器从 `Output.content` 中滤除（如 NX-OS 的 `!Command: ...` 首行），需要原始数据时请读取 `Output.all`。
 

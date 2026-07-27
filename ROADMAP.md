@@ -35,11 +35,14 @@ section; nothing here is a commitment, and feedback via issues is welcome.
 
 ## Tier 2 — Reliability & Usability
 
-- [ ] **Reconnect & retry policies** — backoff retry for transient failures
-  and resumable flows after disconnects.
-- [ ] **Testkit fault injection** — latency, dropped connections, slow
-  banners, and flaky authentication on virtual devices; pairs with the
-  reconnect/retry work to close the resilience test loop.
+- [x] **Reconnect & retry policies** — opt-in bounded retries with capped
+  exponential backoff, conservative transient-error classification, pooled
+  connection eviction, explicit authentication retry, and flow resume from
+  the first unfinished step while retaining partial output.
+- [x] **Testkit fault injection** — deterministic authentication/command
+  latency, command-triggered dropped shell channels, and flaky
+  authentication on virtual devices, with attempt budgets shared across
+  reconnects. This provides the failure harness for reconnect/retry work.
 - [ ] **Playbook runner CLI** — `Command`/`TxWorkflow` already derive serde;
   a `rneter run playbook.yml` binary plus record/replay gives a
   no-device-rehearsal → real-execution workflow.

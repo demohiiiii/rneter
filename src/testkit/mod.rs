@@ -6,7 +6,8 @@
 //! automation logic against it — no real hardware, no network, no mocks of
 //! `rneter` itself. The full stack is exercised: SSH handshake, prompt
 //! detection, state transitions, lifecycle hooks, recording, and
-//! transactions.
+//! transactions. [`FaultInjection`] adds deterministic authentication and
+//! command delays, flaky authentication, and command-triggered disconnects.
 //!
 //! The fake device derives its state machine directly from the same
 //! [`DeviceHandlerConfig`] the client template uses, so template changes can
@@ -40,6 +41,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,6 +81,54 @@ pub struct PersonaChallenge {
     pub response: String,
 }
 
+/// Deterministic failures and delays injected by a fake device.
+///
+/// Attempt budgets are shared by every connection to the device, so a new
+/// SSH connection does not reset a flaky-authentication or dropped-command
+/// scenario.
+#[derive(Debug, Clone, Default)]
+pub struct FaultInjection {
+    /// Delay applied before each logical authentication attempt.
+    pub auth_delay: Duration,
+    /// Number of otherwise valid authentication attempts to reject.
+    pub reject_auth_attempts: usize,
+    /// Delay applied before responding to each complete command line.
+    pub command_delay: Duration,
+    /// Exact logical commands to disconnect on, mapped to remaining attempts.
+    pub disconnect_commands: HashMap<String, usize>,
+}
+
+impl FaultInjection {
+    /// Creates a fault configuration with no active faults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Delays each logical authentication attempt by `duration`.
+    pub fn with_auth_delay(mut self, duration: Duration) -> Self {
+        self.auth_delay = duration;
+        self
+    }
+
+    /// Rejects the first `attempts` otherwise valid authentication attempts.
+    pub fn with_rejected_auth_attempts(mut self, attempts: usize) -> Self {
+        self.reject_auth_attempts = attempts;
+        self
+    }
+
+    /// Delays the response to every complete command line by `duration`.
+    pub fn with_command_delay(mut self, duration: Duration) -> Self {
+        self.command_delay = duration;
+        self
+    }
+
+    /// Closes the SSH shell channel the first `times` this exact command is received.
+    pub fn with_disconnect_command(mut self, command: impl Into<String>, times: usize) -> Self {
+        self.disconnect_commands.insert(command.into(), times);
+        self
+    }
+}
+
 /// Blueprint describing how a fake device impersonates one device type.
 ///
 /// The state machine (states, transition commands, exit-status strategy) is
@@ -114,6 +164,8 @@ pub struct DevicePersona {
     pub authorized_public_keys: Vec<String>,
     /// Optional keyboard-interactive challenge `(prompt, expected response)`.
     pub keyboard_interactive: Option<(String, String)>,
+    /// Deterministic delays and failures applied by the virtual device.
+    pub faults: FaultInjection,
 }
 
 impl DevicePersona {
@@ -145,6 +197,7 @@ impl DevicePersona {
             enable_password: None,
             authorized_public_keys: Vec::new(),
             keyboard_interactive: None,
+            faults: FaultInjection::default(),
         }
     }
 
@@ -219,6 +272,12 @@ impl DevicePersona {
         self.keyboard_interactive = Some((prompt.into(), response.into()));
         self
     }
+
+    /// Applies deterministic delays and failures to this persona.
+    pub fn with_faults(mut self, faults: FaultInjection) -> Self {
+        self.faults = faults;
+        self
+    }
 }
 
 /// Ready-made personas for every built-in template.
@@ -284,6 +343,10 @@ struct EngineSpec {
     /// Marker used by shell exit-status templates (e.g. the Linux template).
     exit_marker: Option<String>,
     banner: String,
+    auth_delay: Duration,
+    command_delay: Duration,
+    remaining_auth_rejections: AtomicUsize,
+    remaining_command_disconnects: Mutex<HashMap<String, usize>>,
 }
 
 impl EngineSpec {
@@ -330,6 +393,10 @@ impl EngineSpec {
             keyboard_interactive: persona.keyboard_interactive.clone(),
             exit_marker,
             banner: format!("Welcome to fake {} device", persona.name),
+            auth_delay: persona.faults.auth_delay,
+            command_delay: persona.faults.command_delay,
+            remaining_auth_rejections: AtomicUsize::new(persona.faults.reject_auth_attempts),
+            remaining_command_disconnects: Mutex::new(persona.faults.disconnect_commands.clone()),
         })
     }
 
@@ -339,6 +406,34 @@ impl EngineSpec {
             .map(String::as_str)
             .unwrap_or("testkit-missing-prompt>")
     }
+
+    async fn accepts_auth(&self, credentials_valid: bool) -> bool {
+        if !self.auth_delay.is_zero() {
+            tokio::time::sleep(self.auth_delay).await;
+        }
+        credentials_valid
+            && self
+                .remaining_auth_rejections
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_err()
+    }
+
+    fn should_disconnect_command(&self, command: &str) -> bool {
+        let mut remaining = self
+            .remaining_command_disconnects
+            .lock()
+            .expect("fake device command fault state");
+        let Some(attempts) = remaining.get_mut(command) else {
+            return false;
+        };
+        if *attempts == 0 {
+            return false;
+        }
+        *attempts -= 1;
+        true
+    }
 }
 
 /// Pending interactive challenge on one connection.
@@ -346,6 +441,11 @@ impl EngineSpec {
 struct PendingChallenge {
     response: String,
     target_state: Option<String>,
+}
+
+enum LineAction {
+    Reply(String),
+    Disconnect,
 }
 
 /// Per-connection scripted CLI session.
@@ -415,17 +515,22 @@ impl ScriptedHandler {
         format!("{marker}{code}{EXIT_STATUS_SUFFIX}\r\n")
     }
 
-    /// Processes one received line; returns the reply text.
-    fn handle_line(&mut self, raw_line: &str) -> String {
+    /// Processes one received line and returns the device action.
+    fn handle_line(&mut self, raw_line: &str) -> LineAction {
         let line = raw_line.trim_end_matches(['\r', '\n']);
         let (core, wants_marker) = self.unwrap_exit_status_command(line);
+        let core = core.to_string();
         self.log
             .lock()
             .expect("fake device command log")
-            .push(core.to_string());
+            .push(core.clone());
+
+        if self.spec.should_disconnect_command(&core) {
+            return LineAction::Disconnect;
+        }
 
         if let Some(pending) = self.pending.take() {
-            return if core == pending.response {
+            return LineAction::Reply(if core == pending.response {
                 if let Some(target) = pending.target_state {
                     self.state = target;
                 }
@@ -436,13 +541,13 @@ impl ScriptedHandler {
                     self.spec.error_reply,
                     self.spec.prompt(&self.state)
                 )
-            };
+            });
         }
 
         let echo = format!("{line}\r\n");
 
         if core.is_empty() {
-            return format!("\r\n{}", self.spec.prompt(&self.state));
+            return LineAction::Reply(format!("\r\n{}", self.spec.prompt(&self.state)));
         }
 
         // Transition edges win over canned replies so mode switching stays
@@ -451,27 +556,27 @@ impl ScriptedHandler {
             .spec
             .edges
             .get(&self.state)
-            .and_then(|edges| edges.iter().find(|edge| edge.matches(core)))
+            .and_then(|edges| edges.iter().find(|edge| edge.matches(&core)))
             .cloned();
         if let Some(edge) = matched_edge {
-            if let Some(challenge) = self.spec.challenges.get(core) {
+            if let Some(challenge) = self.spec.challenges.get(&core) {
                 self.pending = Some(PendingChallenge {
                     response: challenge.response.clone(),
                     target_state: Some(edge.target),
                 });
-                return format!("{echo}{}", challenge.prompt);
+                return LineAction::Reply(format!("{echo}{}", challenge.prompt));
             }
             self.state = edge.target;
-            return format!("{echo}{}", self.spec.prompt(&self.state));
+            return LineAction::Reply(format!("{echo}{}", self.spec.prompt(&self.state)));
         }
 
         // Challenges not tied to an edge (e.g. save confirmations).
-        if let Some(challenge) = self.spec.challenges.get(core) {
+        if let Some(challenge) = self.spec.challenges.get(&core) {
             self.pending = Some(PendingChallenge {
                 response: challenge.response.clone(),
                 target_state: None,
             });
-            return format!("{echo}{}", challenge.prompt);
+            return LineAction::Reply(format!("{echo}{}", challenge.prompt));
         }
 
         if core == ERROR_COMMAND {
@@ -480,22 +585,25 @@ impl ScriptedHandler {
             } else {
                 String::new()
             };
-            return format!(
+            return LineAction::Reply(format!(
                 "{echo}{}\r\n{marker}{}",
                 self.spec.error_reply,
                 self.spec.prompt(&self.state)
-            );
+            ));
         }
 
         // Realistic vendor output for known commands (e.g. `show version`).
-        if let Some(reply) = self.spec.canned.get(core) {
+        if let Some(reply) = self.spec.canned.get(&core) {
             let marker = if wants_marker {
                 self.marker_line(0)
             } else {
                 String::new()
             };
             let body = reply.replace('\n', "\r\n");
-            return format!("{echo}{body}\r\n{marker}{}", self.spec.prompt(&self.state));
+            return LineAction::Reply(format!(
+                "{echo}{body}\r\n{marker}{}",
+                self.spec.prompt(&self.state)
+            ));
         }
 
         let marker = if wants_marker {
@@ -503,11 +611,11 @@ impl ScriptedHandler {
         } else {
             String::new()
         };
-        format!(
+        LineAction::Reply(format!(
             "{echo}{}\r\n{marker}{}",
             self.spec.benign_reply,
             self.spec.prompt(&self.state)
-        )
+        ))
     }
 }
 
@@ -515,7 +623,8 @@ impl server::Handler for ScriptedHandler {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        if user == self.spec.username && password == self.spec.password {
+        let credentials_valid = user == self.spec.username && password == self.spec.password;
+        if self.spec.accepts_auth(credentials_valid).await {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -523,6 +632,24 @@ impl server::Handler for ScriptedHandler {
     }
 
     async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let credentials_valid = user == self.spec.username
+            && self
+                .spec
+                .authorized_public_keys
+                .iter()
+                .any(|authorized| authorized == public_key);
+        if self.spec.accepts_auth(credentials_valid).await {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
         &mut self,
         user: &str,
         public_key: &PublicKey,
@@ -540,37 +667,41 @@ impl server::Handler for ScriptedHandler {
         }
     }
 
-    async fn auth_publickey(
-        &mut self,
-        user: &str,
-        public_key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
-        self.auth_publickey_offered(user, public_key).await
-    }
-
     async fn auth_keyboard_interactive(
         &mut self,
         user: &str,
         _submethods: &str,
         response: Option<server::Response<'_>>,
     ) -> Result<Auth, Self::Error> {
-        if user != self.spec.username {
-            return Ok(Auth::reject());
-        }
-        let Some((prompt, expected)) = self.spec.keyboard_interactive.as_ref() else {
-            return Ok(Auth::reject());
-        };
-
         match response {
-            None => Ok(Auth::Partial {
-                name: std::borrow::Cow::Borrowed("rneter-testkit"),
-                instructions: std::borrow::Cow::Borrowed(""),
-                prompts: std::borrow::Cow::Owned(vec![(
-                    std::borrow::Cow::Owned(prompt.clone()),
-                    false,
-                )]),
-            }),
+            None => {
+                let credentials_valid =
+                    user == self.spec.username && self.spec.keyboard_interactive.is_some();
+                if !self.spec.accepts_auth(credentials_valid).await {
+                    Ok(Auth::reject())
+                } else {
+                    let (prompt, _) = self
+                        .spec
+                        .keyboard_interactive
+                        .as_ref()
+                        .expect("validated keyboard-interactive challenge");
+                    Ok(Auth::Partial {
+                        name: std::borrow::Cow::Borrowed("rneter-testkit"),
+                        instructions: std::borrow::Cow::Borrowed(""),
+                        prompts: std::borrow::Cow::Owned(vec![(
+                            std::borrow::Cow::Owned(prompt.clone()),
+                            false,
+                        )]),
+                    })
+                }
+            }
             Some(mut answers) => {
+                if user != self.spec.username {
+                    return Ok(Auth::reject());
+                }
+                let Some((_, expected)) = self.spec.keyboard_interactive.as_ref() else {
+                    return Ok(Auth::reject());
+                };
                 let Some(answer) = answers.next() else {
                     return Ok(Auth::reject());
                 };
@@ -633,8 +764,21 @@ impl server::Handler for ScriptedHandler {
     ) -> Result<(), Self::Error> {
         self.line_buffer.push_str(&String::from_utf8_lossy(data));
         while let Some(line) = self.take_line() {
-            let reply = self.handle_line(&line);
-            session.data(channel, CryptoVec::from(reply))?;
+            let action = self.handle_line(&line);
+            if !self.spec.command_delay.is_zero() {
+                tokio::time::sleep(self.spec.command_delay).await;
+            }
+            match action {
+                LineAction::Reply(reply) => {
+                    session.data(channel, CryptoVec::from(reply))?;
+                }
+                LineAction::Disconnect => {
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                    self.line_buffer.clear();
+                    break;
+                }
+            }
         }
         Ok(())
     }

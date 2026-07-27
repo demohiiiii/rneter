@@ -69,6 +69,18 @@ pub enum ConnectError {
     #[error("invalid fleet options: {0}")]
     InvalidFleetOptions(String),
 
+    /// Retry policy options are invalid.
+    #[error("invalid retry policy: {0}")]
+    InvalidRetryPolicy(String),
+
+    /// A shared connection attempt failed with a transient transport error.
+    #[error("SSH connection establishment failed: {0}")]
+    ConnectionEstablishmentFailed(String),
+
+    /// A shared connection attempt failed authentication.
+    #[error("SSH authentication failed: {0}")]
+    AuthenticationFailed(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),
@@ -154,5 +166,144 @@ impl ConnectError {
             stage,
             target: target.into(),
         }
+    }
+
+    /// Whether this error represents a transient connection or channel failure.
+    ///
+    /// Command execution timeouts and authentication failures are deliberately
+    /// excluded because retrying them can duplicate a remote side effect or
+    /// repeatedly submit invalid credentials.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::ChannelDisconnectError
+            | Self::ChannelDisconnectStageError { .. }
+            | Self::ConnectClosedError
+            | Self::InitTimeout(_)
+            | Self::ConnectTimeout(_)
+            | Self::ConnectionEstablishmentFailed(_)
+            | Self::SendDataError(_) => true,
+            Self::RusshError(source) | Self::RusshStageError { source, .. } => {
+                russh_error_is_transient(source)
+            }
+            Self::Ssh2Error(source) | Self::Ssh2StageError { source, .. } => {
+                ssh2_error_is_transient(source)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this error is an SSH authentication rejection.
+    pub fn is_authentication_failure(&self) -> bool {
+        match self {
+            Self::AuthenticationFailed(_) => true,
+            Self::Ssh2Error(source) | Self::Ssh2StageError { source, .. } => {
+                ssh2_error_is_authentication_failure(source)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn from_shared_connection_error(error: &Self) -> Self {
+        match error {
+            Self::ConnectTimeout(target) => Self::ConnectTimeout(target.clone()),
+            Self::InitTimeout(message) => Self::InitTimeout(message.clone()),
+            _ if error.is_authentication_failure() => Self::AuthenticationFailed(error.to_string()),
+            _ if error.is_transient() => Self::ConnectionEstablishmentFailed(error.to_string()),
+            _ => Self::InternalServerError(error.to_string()),
+        }
+    }
+}
+
+fn ssh2_error_is_transient(error: &async_ssh2_tokio::Error) -> bool {
+    match error {
+        async_ssh2_tokio::Error::SshError(source) => russh_error_is_transient(source),
+        async_ssh2_tokio::Error::SendError(_)
+        | async_ssh2_tokio::Error::IoError(_)
+        | async_ssh2_tokio::Error::ChannelSendError(_) => true,
+        _ => false,
+    }
+}
+
+fn russh_error_is_transient(error: &russh::Error) -> bool {
+    matches!(
+        error,
+        russh::Error::Disconnect
+            | russh::Error::HUP
+            | russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
+            | russh::Error::SendError
+            | russh::Error::IO(_)
+            | russh::Error::Elapsed(_)
+            | russh::Error::RecvError
+    )
+}
+
+fn ssh2_error_is_authentication_failure(error: &async_ssh2_tokio::Error) -> bool {
+    matches!(
+        error,
+        async_ssh2_tokio::Error::KeyboardInteractiveAuthFailed
+            | async_ssh2_tokio::Error::KeyAuthFailed
+            | async_ssh2_tokio::Error::PasswordWrong
+            | async_ssh2_tokio::Error::AgentAuthenticationFailed
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_classification_is_conservative() {
+        assert!(ConnectError::ConnectTimeout("device".to_string()).is_transient());
+        assert!(ConnectError::ChannelDisconnectError.is_transient());
+        assert!(!ConnectError::ExecTimeout("show version".to_string()).is_transient());
+        assert!(!ConnectError::InvalidSshAuth("bad key".to_string()).is_transient());
+        assert!(ConnectError::RusshError(russh::Error::HUP).is_transient());
+        assert!(
+            ConnectError::Ssh2Error(async_ssh2_tokio::Error::SshError(russh::Error::Disconnect))
+                .is_transient()
+        );
+    }
+
+    #[test]
+    fn permanent_russh_errors_are_not_transient() {
+        let errors = [
+            russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Kex,
+                ours: vec!["curve25519-sha256".to_string()],
+                theirs: vec!["diffie-hellman-group1-sha1".to_string()],
+            },
+            russh::Error::KeyChanged { line: 1 },
+            russh::Error::WrongServerSig,
+            russh::Error::UnsupportedAuthMethod,
+            russh::Error::InvalidConfig("bad config".to_string()),
+        ];
+
+        for error in errors {
+            assert!(
+                !ConnectError::RusshError(error).is_transient(),
+                "permanent russh error must not be retried"
+            );
+        }
+
+        let wrapped = ConnectError::Ssh2Error(async_ssh2_tokio::Error::SshError(
+            russh::Error::UnsupportedAuthMethod,
+        ));
+        assert!(!wrapped.is_transient());
+    }
+
+    #[test]
+    fn authentication_rejections_are_classified_separately() {
+        let error = ConnectError::Ssh2StageError {
+            stage: "connect",
+            target: "device".to_string(),
+            source: async_ssh2_tokio::Error::PasswordWrong,
+        };
+
+        assert!(error.is_authentication_failure());
+        assert!(!error.is_transient());
+        let shared = ConnectError::from_shared_connection_error(&error);
+        assert!(matches!(shared, ConnectError::AuthenticationFailed(_)));
     }
 }

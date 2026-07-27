@@ -10,6 +10,7 @@
 //! - [`SharedSshClient`] - Individual SSH connection with state tracking
 //! - [`Command`] - Command configuration for device execution
 //! - [`CommandFlow`] - Multi-step interactive command flow
+//! - [`RetryPolicy`] - Opt-in bounded reconnect and backoff behavior
 //! - [`SessionOperationOutput`] - Generic execution result for any session operation
 //! - [`FileUploadRequest`] - SFTP upload configuration
 //! - [`Output`] - Command execution results
@@ -283,6 +284,7 @@ impl DetectRequest {
 }
 
 /// Connection request describing how to reach a device and which handler to use.
+#[derive(Clone)]
 pub struct ConnectionRequest {
     pub user: String,
     pub addr: String,
@@ -337,6 +339,80 @@ impl ConnectionRequest {
     }
 }
 
+/// Bounded retry behavior for ordinary session operations.
+///
+/// Retries have at-least-once semantics: a device may apply a command and
+/// disconnect before returning its prompt. Only enable retries for operations
+/// whose commands are safe to repeat. Transaction, workflow, and upload APIs
+/// do not consume this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Maximum number of retries after the initial attempt.
+    pub max_retries: usize,
+    /// Delay before the first retry. Later retries double this duration.
+    pub initial_backoff: Duration,
+    /// Upper bound for exponential backoff delays.
+    pub max_backoff: Duration,
+    /// Whether server authentication rejections may be retried.
+    pub retry_authentication_errors: bool,
+}
+
+impl RetryPolicy {
+    /// Creates a retry policy with the requested number of retries.
+    pub const fn new(max_retries: usize) -> Self {
+        Self {
+            max_retries,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(5),
+            retry_authentication_errors: false,
+        }
+    }
+
+    /// Sets the initial and maximum exponential backoff durations.
+    pub const fn with_backoff(mut self, initial: Duration, maximum: Duration) -> Self {
+        self.initial_backoff = initial;
+        self.max_backoff = maximum;
+        self
+    }
+
+    /// Controls whether authentication rejections are eligible for retries.
+    pub const fn with_authentication_retries(mut self, enabled: bool) -> Self {
+        self.retry_authentication_errors = enabled;
+        self
+    }
+
+    fn validate(&self) -> Result<(), ConnectError> {
+        if self.max_retries > 0 && self.initial_backoff > self.max_backoff {
+            return Err(ConnectError::InvalidRetryPolicy(
+                "initial_backoff must not exceed max_backoff".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn backoff_before_retry(&self, retry_index: usize) -> Duration {
+        let mut backoff = self.initial_backoff.min(self.max_backoff);
+        for _ in 1..retry_index.min(128) {
+            backoff = backoff.saturating_mul(2).min(self.max_backoff);
+            if backoff == self.max_backoff {
+                break;
+            }
+        }
+        backoff
+    }
+
+    fn retries_error(&self, error: &ConnectError) -> bool {
+        error.is_transient()
+            || (self.retry_authentication_errors && error.is_authentication_failure())
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 /// Execution context shared by manager entrypoints.
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -346,6 +422,8 @@ pub struct ExecutionContext {
     pub sys: Option<String>,
     /// Maximum time allowed for the underlying SSH connection to establish.
     pub connect_timeout: Duration,
+    /// Bounded retry behavior for ordinary command/session operations.
+    pub retry_policy: RetryPolicy,
 }
 
 impl Default for ExecutionContext {
@@ -354,6 +432,7 @@ impl Default for ExecutionContext {
             security_options: ConnectionSecurityOptions::default(),
             sys: None,
             connect_timeout: Duration::from_secs(60),
+            retry_policy: RetryPolicy::default(),
         }
     }
 }
@@ -385,6 +464,12 @@ impl ExecutionContext {
     /// Override the SSH connection establishment timeout in seconds.
     pub fn with_connect_timeout_secs(self, timeout_secs: u64) -> Self {
         self.with_connect_timeout(Duration::from_secs(timeout_secs))
+    }
+
+    /// Applies a bounded retry policy to ordinary command/session operations.
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
     }
 }
 
@@ -1088,16 +1173,21 @@ mod tests {
 
     #[test]
     fn execution_context_builder_overrides_defaults() {
+        let retry_policy = RetryPolicy::new(3)
+            .with_backoff(Duration::from_millis(25), Duration::from_millis(100))
+            .with_authentication_retries(true);
         let context = ExecutionContext::new()
             .with_security_options(ConnectionSecurityOptions::legacy_compatible())
             .with_sys(Some("vsys1".to_string()))
-            .with_connect_timeout(Duration::from_secs(12));
+            .with_connect_timeout(Duration::from_secs(12))
+            .with_retry_policy(retry_policy);
         assert_eq!(
             context.security_options,
             ConnectionSecurityOptions::legacy_compatible()
         );
         assert_eq!(context.sys.as_deref(), Some("vsys1"));
         assert_eq!(context.connect_timeout, Duration::from_secs(12));
+        assert_eq!(context.retry_policy, retry_policy);
     }
 
     #[test]
@@ -1112,6 +1202,18 @@ mod tests {
                 .connect_timeout,
             Duration::from_secs(7)
         );
+        assert_eq!(ExecutionContext::new().retry_policy, RetryPolicy::default());
+    }
+
+    #[test]
+    fn retry_policy_uses_capped_exponential_backoff() {
+        let policy = RetryPolicy::new(4)
+            .with_backoff(Duration::from_millis(100), Duration::from_millis(250));
+
+        assert_eq!(policy.backoff_before_retry(1), Duration::from_millis(100));
+        assert_eq!(policy.backoff_before_retry(2), Duration::from_millis(200));
+        assert_eq!(policy.backoff_before_retry(3), Duration::from_millis(250));
+        assert_eq!(policy.backoff_before_retry(4), Duration::from_millis(250));
     }
 
     #[test]

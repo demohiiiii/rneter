@@ -8,7 +8,54 @@ use super::*;
 /// preserves the original message.
 fn unwrap_shared_connect_error(error: Arc<ConnectError>) -> ConnectError {
     Arc::try_unwrap(error)
-        .unwrap_or_else(|shared| ConnectError::InternalServerError(shared.to_string()))
+        .unwrap_or_else(|shared| ConnectError::from_shared_connection_error(&shared))
+}
+
+fn operation_command_flow(operation: SessionOperation) -> Result<CommandFlow, ConnectError> {
+    match operation {
+        SessionOperation::Command(command) => command.into_flow(),
+        SessionOperation::Flow(flow) => flow.expand_multiline(),
+    }
+}
+
+fn append_operation_steps(
+    accumulated: &mut Vec<SessionOperationStepOutput>,
+    mut attempt: SessionOperationOutput,
+) {
+    let offset = accumulated.len();
+    for step in &mut attempt.steps {
+        step.step_index += offset;
+    }
+    accumulated.extend(attempt.steps);
+}
+
+struct OperationAttemptError {
+    error: SessionOperationExecutionError,
+    client: Option<Arc<RwLock<SharedSshClient>>>,
+}
+
+async fn invalidate_cache_client_if_current<T>(
+    cache: &Cache<String, (mpsc::Sender<CmdJob>, Arc<T>)>,
+    device_addr: &str,
+    failed_client: &Arc<T>,
+) where
+    T: Send + Sync + 'static,
+{
+    let failed_client = failed_client.clone();
+    cache
+        .entry_by_ref(device_addr)
+        .and_compute_with(move |entry| {
+            let should_remove = entry.as_ref().is_some_and(|entry| {
+                let (_sender, current_client) = entry.value();
+                Arc::ptr_eq(current_client, &failed_client)
+            });
+            std::future::ready(if should_remove {
+                moka::ops::compute::Op::Remove
+            } else {
+                moka::ops::compute::Op::Nop
+            })
+        })
+        .await;
 }
 
 impl SshConnectionManager {
@@ -137,40 +184,150 @@ impl SshConnectionManager {
     /// Execute any supported session operation using a structured connection/context pair.
     ///
     /// Returns the generic operation-level result model so future operation kinds
-    /// do not need to be flattened into the legacy command-flow shape.
+    /// do not need to be flattened into the legacy command-flow shape. When the
+    /// context enables retries, completed flow steps are retained and execution
+    /// resumes from the first unfinished step after a transient disconnect.
     pub async fn execute_operation_with_context(
         &self,
         request: ConnectionRequest,
         operation: SessionOperation,
         context: ExecutionContext,
     ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
+        context.retry_policy.validate().map_err(|error| {
+            SessionOperationExecutionError::new(
+                error,
+                SessionOperationOutput {
+                    success: false,
+                    steps: Vec::new(),
+                },
+            )
+        })?;
+        let mut remaining_flow = operation_command_flow(operation).map_err(|error| {
+            SessionOperationExecutionError::new(
+                error,
+                SessionOperationOutput {
+                    success: false,
+                    steps: Vec::new(),
+                },
+            )
+        })?;
+        let device_addr = request.device_addr();
+        let mut accumulated_steps = Vec::new();
+        let mut retries_used = 0usize;
+
+        loop {
+            let result = self
+                .execute_operation_once(
+                    request.clone(),
+                    SessionOperation::Flow(remaining_flow.clone()),
+                    &context,
+                )
+                .await;
+            match result {
+                Ok(output) => {
+                    append_operation_steps(&mut accumulated_steps, output);
+                    let success = accumulated_steps.iter().all(|step| step.success);
+                    return Ok(SessionOperationOutput {
+                        success,
+                        steps: accumulated_steps,
+                    });
+                }
+                Err(attempt_error) => {
+                    let failed_client = attempt_error.client;
+                    let (error, partial_output) = attempt_error.error.into_parts();
+                    let completed = partial_output.steps.len();
+                    append_operation_steps(&mut accumulated_steps, partial_output);
+
+                    if completed > remaining_flow.steps.len() {
+                        return Err(SessionOperationExecutionError::new(
+                            ConnectError::InternalServerError(
+                                "operation returned more partial steps than were pending"
+                                    .to_string(),
+                            ),
+                            SessionOperationOutput {
+                                success: false,
+                                steps: accumulated_steps,
+                            },
+                        ));
+                    }
+                    remaining_flow.steps.drain(..completed);
+                    if let Some(max_steps) = remaining_flow.max_steps.as_mut() {
+                        *max_steps = max_steps.saturating_sub(completed);
+                    }
+
+                    if retries_used >= context.retry_policy.max_retries
+                        || !context.retry_policy.retries_error(&error)
+                    {
+                        return Err(SessionOperationExecutionError::new(
+                            error,
+                            SessionOperationOutput {
+                                success: false,
+                                steps: accumulated_steps,
+                            },
+                        ));
+                    }
+
+                    retries_used += 1;
+                    if let Some(failed_client) = failed_client {
+                        invalidate_cache_client_if_current(
+                            &self.cache,
+                            &device_addr,
+                            &failed_client,
+                        )
+                        .await;
+                    }
+                    let backoff = context.retry_policy.backoff_before_retry(retries_used);
+                    debug!(
+                        "Retrying operation for {} after attempt {} failed: {}; backoff={:?}",
+                        device_addr, retries_used, error, backoff
+                    );
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn execute_operation_once(
+        &self,
+        request: ConnectionRequest,
+        operation: SessionOperation,
+        context: &ExecutionContext,
+    ) -> Result<SessionOperationOutput, OperationAttemptError> {
         let sys = context.sys.clone();
         let (_sender, client) = self
             .get_client_with_request_and_recording(
                 request,
-                context.security_options,
+                context.security_options.clone(),
                 context.connect_timeout,
                 None,
             )
             .await
-            .map_err(|err| {
-                SessionOperationExecutionError::new(
-                    err,
+            .map_err(|error| OperationAttemptError {
+                error: SessionOperationExecutionError::new(
+                    error,
                     SessionOperationOutput {
                         success: false,
                         steps: Vec::new(),
                     },
-                )
+                ),
+                client: None,
             })?;
 
-        let mut client_guard = client.write().await;
-        client_guard
-            .execute_operation_detailed(&operation, sys.as_ref())
-            .await
-            .map_err(|err| {
-                let (error, partial_output) = err.into_parts();
-                SessionOperationExecutionError::new(error, partial_output)
-            })
+        let result = {
+            let mut client_guard = client.write().await;
+            client_guard
+                .execute_operation_detailed(&operation, sys.as_ref())
+                .await
+        };
+        result.map_err(|error| {
+            let (error, partial_output) = error.into_parts();
+            OperationAttemptError {
+                error: SessionOperationExecutionError::new(error, partial_output),
+                client: Some(client),
+            }
+        })
     }
 
     /// Execute a multi-step command flow on one live connection.
@@ -493,5 +650,32 @@ impl SshConnectionManager {
 impl Default for SshConnectionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conditional_invalidation_preserves_replacement_client() {
+        let cache = Cache::new(2);
+        let (sender, _receiver) = mpsc::channel::<CmdJob>(1);
+        let stale_client = Arc::new(1u8);
+        let replacement_client = Arc::new(2u8);
+        let device_addr = "admin@127.0.0.1:22".to_string();
+        cache
+            .insert(device_addr.clone(), (sender, replacement_client.clone()))
+            .await;
+
+        invalidate_cache_client_if_current(&cache, &device_addr, &stale_client).await;
+        let (_sender, current_client) = cache
+            .get(&device_addr)
+            .await
+            .expect("replacement must remain cached");
+        assert!(Arc::ptr_eq(&current_client, &replacement_client));
+
+        invalidate_cache_client_if_current(&cache, &device_addr, &replacement_client).await;
+        assert!(cache.get(&device_addr).await.is_none());
     }
 }

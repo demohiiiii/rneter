@@ -18,6 +18,7 @@
 - [Command Flows and Interaction](#command-flows-and-interaction)
 - [Connection Security](#connection-security)
 - [SSH Authentication](#ssh-authentication)
+- [Reconnect and Retry](#reconnect-and-retry)
 - [Fleet Execution](#fleet-execution)
 - [Session Recording and Replay](#session-recording-and-replay)
 - [Transaction Workflows](#transaction-workflows)
@@ -40,6 +41,7 @@
 - **Connection Pooling**: Automatically caches and reuses SSH connections for better performance
 - **Fleet Execution**: Execute one command or flow across many independently configured devices with bounded concurrency and isolated errors
 - **Flexible SSH Authentication**: Password, private key (inline or file), ssh-agent, and keyboard-interactive authentication through `SshAuthMethod`
+- **Bounded Retry**: Opt-in reconnect and capped exponential backoff for transient failures, with resumable command flows
 - **State Machine Management**: Intelligent device state tracking and automatic transitions
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
@@ -542,6 +544,38 @@ Autodetect uses the same model through `DetectRequest::new_with_auth(...)`.
 Cached connections include the authentication method in their parameter
 fingerprint, so changing credentials always forces a fresh connection.
 
+## Reconnect and Retry
+
+Ordinary command and `SessionOperation` entrypoints can opt into bounded
+retries through `ExecutionContext`. Retries are disabled by default:
+
+```rust
+use std::time::Duration;
+use rneter::session::{ExecutionContext, RetryPolicy};
+
+let context = ExecutionContext::new().with_retry_policy(
+    RetryPolicy::new(2).with_backoff(
+        Duration::from_millis(200),
+        Duration::from_secs(2),
+    ),
+);
+```
+
+The manager retries transient connection, initialization, transport, and
+channel-disconnect errors. It evicts the failed pooled connection before each
+retry. Backoff doubles from `initial_backoff` and is capped by `max_backoff`.
+Authentication rejections remain non-retryable unless explicitly enabled with
+`.with_authentication_retries(true)`.
+
+For a multi-step flow, outputs from completed steps are retained and execution
+resumes at the first unfinished step after reconnecting. Step indexes remain
+relative to the original flow. `ExecTimeout`, device-reported command failures,
+transactions, workflows, and uploads are not automatically retried.
+
+Retries have at-least-once semantics: a device may apply a command and drop the
+connection before returning its prompt. Enable this policy only for commands
+that are safe to repeat.
+
 ## Fleet Execution
 
 `execute_on_fleet(...)` runs one `SessionOperation` against independently
@@ -1031,6 +1065,9 @@ Useful entry points:
 - `DevicePersona::for_config(...)` — simulate a custom
   `DeviceHandlerConfig`; add challenges and error text with the builder
   methods.
+- `DevicePersona::with_faults(FaultInjection::new()...)` — inject auth or
+  command latency, reject the first N valid auth attempts, or disconnect on
+  selected commands. Attempt budgets are shared across reconnects.
 - `FakeSshDevice::received_commands()` — the device-side command log, ideal
   for asserting transition ordering and transaction rollbacks.
 - `device.connection_request()` / `device.execution_context()` — pre-wired
@@ -1065,6 +1102,10 @@ All of these are public persona fields and can be overridden.
 - **`make-error`** (`testkit::ERROR_COMMAND`): returns the vendor-styled
   error line (exit code 1 on the linux persona) for exercising error
   detection and transaction rollback paths.
+- **Fault injection**: `FaultInjection` deterministically delays
+  authentication or command responses, rejects a configured number of valid
+  auth attempts, and closes the shell channel for selected exact commands.
+  Counters live at device scope, so reconnecting does not reset them.
 - **Line endings**: both the `\n` sent by automation clients and the bare
   `\r` sent by interactive SSH terminals are accepted, so you can log in
   with plain `ssh` for manual debugging.

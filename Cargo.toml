@@ -55,3 +55,11 @@ required-features = ["testkit"]
 [[test]]
 name = "fleet_e2e"
 required-features = ["testkit"]
+
+[[test]]
+name = "testkit_faults_e2e"
+required-features = ["testkit"]
+
+[[test]]
+name = "retry_e2e"
+required-features = ["testkit"]
