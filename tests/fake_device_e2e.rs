@@ -6,12 +6,46 @@
 //! session recording with redaction, offline replay (dry-run), and
 //! transaction rollback.
 
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use rneter::device::{DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use rneter::session::{
     Command, RollbackPolicy, SessionEvent, SessionRecordLevel, SessionRecorder, SessionReplayer,
     SshConnectionManager, TxBlock, TxStep,
 };
 use rneter::testkit::{DEFAULT_ENABLE_PASSWORD, DevicePersona, ERROR_COMMAND, FakeSshDevice};
+
+struct TempKeyFile {
+    path: PathBuf,
+}
+
+impl TempKeyFile {
+    fn new(contents: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("rneter-test-key-{}-{nonce}", std::process::id()));
+        std::fs::write(&path, contents).expect("write temporary private key");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn replace(&self, contents: &str) {
+        std::fs::write(&self.path, contents).expect("replace temporary private key");
+    }
+}
+
+impl Drop for TempKeyFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 fn custom_config() -> DeviceHandlerConfig {
     DeviceHandlerConfig {
@@ -294,5 +328,192 @@ async fn rolls_back_transaction_when_forward_step_fails() {
     assert!(
         failing_pos < rollback_pos,
         "rollback must run after the failing step; device saw: {commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn authenticates_with_private_key() {
+    use rand_core::OsRng;
+    use rneter::session::SshAuthMethod;
+    use russh::keys::{Algorithm, PrivateKey};
+
+    let private_key =
+        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate client key");
+    let public_key = private_key
+        .public_key()
+        .to_openssh()
+        .expect("encode public key");
+    let key_data = private_key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("encode private key")
+        .to_string();
+
+    let persona = custom_persona().with_authorized_public_key(public_key);
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn key-auth device");
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::private_key(key_data, None))
+                .expect("request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("private-key login should succeed");
+    assert!(output.success);
+    assert!(output.content.contains("testkit-ok sample output"));
+}
+
+#[tokio::test]
+async fn private_key_file_rotation_recreates_pooled_connection() {
+    use rand_core::OsRng;
+    use rneter::session::SshAuthMethod;
+    use russh::keys::{Algorithm, PrivateKey};
+
+    let first_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("first client key");
+    let second_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("second client key");
+    let first_public_key = first_key
+        .public_key()
+        .to_openssh()
+        .expect("first public key");
+    let second_public_key = second_key
+        .public_key()
+        .to_openssh()
+        .expect("second public key");
+    let first_key_data = first_key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("first private key")
+        .to_string();
+    let second_key_data = second_key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("second private key")
+        .to_string();
+
+    let key_file = TempKeyFile::new(&first_key_data);
+    let persona = custom_persona()
+        .with_authorized_public_key(first_public_key)
+        .with_authorized_public_key(second_public_key);
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn key-auth device");
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::private_key_file(
+                    key_file.path(),
+                    None,
+                ))
+                .expect("first request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("first key-file login");
+    assert!(output.success);
+
+    key_file.replace(&second_key_data);
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::private_key_file(
+                    key_file.path(),
+                    None,
+                ))
+                .expect("second request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("second key-file login");
+    assert!(output.success);
+
+    let enables = device
+        .received_commands()
+        .iter()
+        .filter(|command| command.as_str() == "enable")
+        .count();
+    assert_eq!(enables, 2, "rotated key file should force reconnection");
+}
+
+#[tokio::test]
+async fn authenticates_with_keyboard_interactive() {
+    use rneter::session::SshAuthMethod;
+
+    let persona = custom_persona().with_keyboard_interactive("One-Time Password: ", "otp-token");
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn ki-auth device");
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::keyboard_interactive(vec![(
+                    "One-Time Password".to_string(),
+                    "otp-token".to_string(),
+                )]))
+                .expect("request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("keyboard-interactive login should succeed");
+    assert!(output.success);
+}
+
+#[tokio::test]
+async fn auth_method_change_recreates_pooled_connection() {
+    use rneter::session::SshAuthMethod;
+
+    let persona = custom_persona().with_keyboard_interactive("OTP: ", "token-a");
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn multi-auth device");
+    let manager = SshConnectionManager::new();
+
+    // First connection via password.
+    let output = manager
+        .execute_command_with_context(
+            device.connection_request().expect("password request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("password login");
+    assert!(output.success);
+
+    // Different auth method must not reuse the pooled password connection.
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::keyboard_interactive(vec![(
+                    "OTP".to_string(),
+                    "token-a".to_string(),
+                )]))
+                .expect("ki request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("keyboard-interactive login after password");
+    assert!(output.success);
+
+    // Enable should have been authenticated twice (once per connection).
+    let enables = device
+        .received_commands()
+        .iter()
+        .filter(|c| c.as_str() == "enable")
+        .count();
+    assert_eq!(
+        enables,
+        2,
+        "auth change should force a fresh connection; commands={:?}",
+        device.received_commands()
     );
 }

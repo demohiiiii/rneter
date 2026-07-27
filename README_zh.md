@@ -15,6 +15,7 @@
 - [快速开始](#快速开始)
 - [Linux 主机管理](#linux-主机管理)
 - [连接安全](#连接安全)
+- [SSH 认证方式](#ssh-认证方式)
 - [文件传输](#文件传输)
 - [命令流与交互](#命令流与交互)
 - [会话录制与回放](#会话录制与回放)
@@ -36,6 +37,7 @@
 ## 特性
 
 - **连接池管理**：自动缓存和重用 SSH 连接以提高性能
+- **灵活的 SSH 认证**：通过 `SshAuthMethod` 支持密码、私钥（内联或文件）、ssh-agent 与键盘交互认证
 - **状态机管理**：智能设备状态跟踪和自动状态转换
 - **提示符检测**：自动识别和处理不同设备类型的提示符
 - **模式切换**：在设备模式（用户模式、特权模式、配置模式等）之间无缝转换
@@ -237,6 +239,53 @@ let _sender = MANAGER
     )
     .await?;
 ```
+
+## SSH 认证方式
+
+密码认证仍是默认路径：`ConnectionRequest::new(...)`。
+其他方式通过 `ConnectionRequest::new_with_auth(...)` 和 `SshAuthMethod` 构造：
+
+```rust
+use rneter::session::{
+    ConnectionRequest, ExecutionContext, MANAGER, SshAuthMethod,
+};
+use rneter::templates;
+
+// 私钥（内联 OpenSSH/PEM 内容）
+let auth = SshAuthMethod::private_key(
+    std::fs::read_to_string("/home/ops/.ssh/id_ed25519")?,
+    None, // 可选口令
+);
+let _sender = MANAGER
+    .get_with_context(
+        ConnectionRequest::new_with_auth(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            auth,
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    )
+    .await?;
+
+// 私钥文件路径（连接时加载）
+let auth = SshAuthMethod::private_key_file("/home/ops/.ssh/id_ed25519", None);
+
+// 本地 ssh-agent（仅 Unix）
+#[cfg(not(target_os = "windows"))]
+let auth = SshAuthMethod::agent();
+
+// 键盘交互：匹配任意包含该片段的服务端提示
+let auth = SshAuthMethod::keyboard_interactive(vec![
+    ("Password".to_string(), "secret".to_string()),
+    ("OTP".to_string(), "123456".to_string()),
+]);
+```
+
+自动识别同样支持 `DetectRequest::new_with_auth(...)`。
+连接池会把认证方式纳入参数指纹，因此更换凭据一定会重建连接。
 
 ## 文件传输
 

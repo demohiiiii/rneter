@@ -45,3 +45,8 @@ async fn array_switches_into_virtual_site_with_sys() {
         "sys-formatted transition must reach the device: {commands:?}"
     );
 }
+
+#[tokio::test]
+async fn array_autodetected_from_virtual_device() {
+    support::run_autodetect_scenario("array").await;
+}

@@ -600,11 +600,11 @@ fn build_detected_connection_request_from_templates(
         .ok_or_else(|| ConnectError::TemplateNotFound(best.template_name.clone()))?;
     let handler = template.handler_config.build()?;
 
-    Ok(ConnectionRequest::new(
+    Ok(ConnectionRequest::new_with_auth(
         request.user,
         request.addr,
         request.port,
-        request.password,
+        request.auth,
         enable_password,
         handler,
     ))
@@ -929,7 +929,7 @@ mod tests {
             user,
             addr,
             port,
-            password,
+            auth,
             enable_password,
             handler,
         } = built;
@@ -937,7 +937,10 @@ mod tests {
         assert_eq!(user, "adam");
         assert_eq!(addr, "127.0.0.1");
         assert_eq!(port, 22);
-        assert_eq!(password, "secret");
+        assert_eq!(
+            auth,
+            crate::session::SshAuthMethod::Password("secret".to_string())
+        );
         assert_eq!(enable_password, None);
         let expected = by_name_config("linux")
             .expect("linux config")

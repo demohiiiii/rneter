@@ -61,6 +61,10 @@ pub enum ConnectError {
     #[error("invalid command flow: {0}")]
     InvalidCommandFlow(String),
 
+    /// SSH authentication material could not be loaded or fingerprinted.
+    #[error("invalid SSH authentication configuration: {0}")]
+    InvalidSshAuth(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),

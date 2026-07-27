@@ -6,3 +6,8 @@ use crate::support;
 async fn juniper_junos_full_scenario() {
     support::run_full_scenario("juniper_junos").await;
 }
+
+#[tokio::test]
+async fn juniper_junos_autodetected_from_virtual_device() {
+    support::run_autodetect_scenario("juniper_junos").await;
+}

@@ -17,6 +17,7 @@
 - [File Transfers](#file-transfers)
 - [Command Flows and Interaction](#command-flows-and-interaction)
 - [Connection Security](#connection-security)
+- [SSH Authentication](#ssh-authentication)
 - [Session Recording and Replay](#session-recording-and-replay)
 - [Transaction Workflows](#transaction-workflows)
 - [Testing With Fake Devices (testkit)](#testing-with-fake-devices-testkit)
@@ -36,6 +37,7 @@
 ## Features
 
 - **Connection Pooling**: Automatically caches and reuses SSH connections for better performance
+- **Flexible SSH Authentication**: Password, private key (inline or file), ssh-agent, and keyboard-interactive authentication through `SshAuthMethod`
 - **State Machine Management**: Intelligent device state tracking and automatic transitions
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
 - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
@@ -488,6 +490,55 @@ let _sender = MANAGER
     )
     .await?;
 ```
+
+## SSH Authentication
+
+Password authentication remains the default through `ConnectionRequest::new(...)`.
+For other methods, build the request with `ConnectionRequest::new_with_auth(...)`
+and an `SshAuthMethod`:
+
+```rust
+use rneter::session::{
+    ConnectionRequest, ExecutionContext, MANAGER, SshAuthMethod,
+};
+use rneter::templates;
+
+// Private key (inline OpenSSH/PEM contents)
+let auth = SshAuthMethod::private_key(
+    std::fs::read_to_string("/home/ops/.ssh/id_ed25519")?,
+    None, // optional passphrase
+);
+let _sender = MANAGER
+    .get_with_context(
+        ConnectionRequest::new_with_auth(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            auth,
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    )
+    .await?;
+
+// Private key file path (loaded at connect time)
+let auth = SshAuthMethod::private_key_file("/home/ops/.ssh/id_ed25519", None);
+
+// Local ssh-agent (Unix only)
+#[cfg(not(target_os = "windows"))]
+let auth = SshAuthMethod::agent();
+
+// Keyboard-interactive: answer any server prompt that contains the fragment
+let auth = SshAuthMethod::keyboard_interactive(vec![
+    ("Password".to_string(), "secret".to_string()),
+    ("OTP".to_string(), "123456".to_string()),
+]);
+```
+
+Autodetect uses the same model through `DetectRequest::new_with_auth(...)`.
+Cached connections include the authentication method in their parameter
+fingerprint, so changing credentials always forces a fresh connection.
 
 ## Session Recording and Replay
 

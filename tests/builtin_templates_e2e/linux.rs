@@ -47,3 +47,8 @@ async fn linux_reports_shell_exit_codes() {
         device.received_commands()
     );
 }
+
+#[tokio::test]
+async fn linux_autodetected_from_virtual_device() {
+    support::run_autodetect_scenario("linux").await;
+}

@@ -45,14 +45,15 @@ use std::time::Duration;
 
 use async_ssh2_tokio::ServerCheckMethod;
 use rand_core::OsRng;
-use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec};
 
 use crate::device::{DeviceCommandExecutionConfig, DeviceHandlerConfig, EXIT_STATUS_SUFFIX};
 use crate::error::ConnectError;
 use crate::session::{
-    ConnectionRequest, ConnectionSecurityOptions, ExecutionContext, SecurityLevel,
+    ConnectionRequest, ConnectionSecurityOptions, DetectRequest, ExecutionContext, SecurityLevel,
+    SshAuthMethod,
 };
 use crate::templates;
 
@@ -109,6 +110,10 @@ pub struct DevicePersona {
     pub password: String,
     /// Enable/sudo password used by challenge-based personas.
     pub enable_password: Option<String>,
+    /// Authorized OpenSSH public keys accepted for public-key login.
+    pub authorized_public_keys: Vec<String>,
+    /// Optional keyboard-interactive challenge `(prompt, expected response)`.
+    pub keyboard_interactive: Option<(String, String)>,
 }
 
 impl DevicePersona {
@@ -138,6 +143,8 @@ impl DevicePersona {
             username: DEFAULT_USERNAME.to_string(),
             password: DEFAULT_PASSWORD.to_string(),
             enable_password: None,
+            authorized_public_keys: Vec::new(),
+            keyboard_interactive: None,
         }
     }
 
@@ -190,6 +197,28 @@ impl DevicePersona {
         self.enable_password = Some(enable_password.into());
         self
     }
+
+    /// Authorizes an OpenSSH public key for public-key authentication.
+    ///
+    /// `public_key` may be a full `ssh-ed25519 AAAA... comment` line or just
+    /// the base64 key body.
+    pub fn with_authorized_public_key(mut self, public_key: impl Into<String>) -> Self {
+        self.authorized_public_keys.push(public_key.into());
+        self
+    }
+
+    /// Configures keyboard-interactive authentication.
+    ///
+    /// On first challenge the device sends `prompt`; the client must answer
+    /// with `response` (matched by exact equality).
+    pub fn with_keyboard_interactive(
+        mut self,
+        prompt: impl Into<String>,
+        response: impl Into<String>,
+    ) -> Self {
+        self.keyboard_interactive = Some((prompt.into(), response.into()));
+        self
+    }
 }
 
 /// Ready-made personas for every built-in template.
@@ -206,6 +235,16 @@ struct EdgeSpec {
     command: String,
     target: String,
     needs_format: bool,
+}
+
+fn parse_authorized_public_key(key: &str) -> Result<PublicKey, String> {
+    let trimmed = key.trim();
+    if let Ok(public_key) = PublicKey::from_openssh(trimmed) {
+        return Ok(public_key);
+    }
+    // Accept a bare base64 key body without the algorithm prefix.
+    russh::keys::parse_public_key_base64(trimmed)
+        .map_err(|error| format!("failed to parse public key: {error}"))
 }
 
 impl EdgeSpec {
@@ -238,13 +277,17 @@ struct EngineSpec {
     canned: HashMap<String, String>,
     username: String,
     password: String,
+    /// Parsed authorized public keys for public-key authentication.
+    authorized_public_keys: Vec<PublicKey>,
+    /// Keyboard-interactive challenge, if configured.
+    keyboard_interactive: Option<(String, String)>,
     /// Marker used by shell exit-status templates (e.g. the Linux template).
     exit_marker: Option<String>,
     banner: String,
 }
 
 impl EngineSpec {
-    fn from_persona(persona: &DevicePersona) -> Self {
+    fn from_persona(persona: &DevicePersona) -> Result<Self, ConnectError> {
         let mut edges: HashMap<String, Vec<EdgeSpec>> = HashMap::new();
         for rule in &persona.config.edges {
             edges
@@ -260,7 +303,16 @@ impl EngineSpec {
             DeviceCommandExecutionConfig::ShellExitStatus { marker, .. } => Some(marker.clone()),
             DeviceCommandExecutionConfig::PromptDriven => None,
         };
-        Self {
+        let mut authorized_public_keys = Vec::new();
+        for key in &persona.authorized_public_keys {
+            authorized_public_keys.push(parse_authorized_public_key(key).map_err(|error| {
+                ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "persona '{}': invalid authorized public key: {error}",
+                    persona.name
+                ))
+            })?);
+        }
+        Ok(Self {
             prompts: persona.prompts.clone(),
             edges,
             challenges: persona
@@ -274,9 +326,11 @@ impl EngineSpec {
             canned: persona.canned_replies.iter().cloned().collect(),
             username: persona.username.clone(),
             password: persona.password.clone(),
+            authorized_public_keys,
+            keyboard_interactive: persona.keyboard_interactive.clone(),
             exit_marker,
             banner: format!("Welcome to fake {} device", persona.name),
-        }
+        })
     }
 
     fn prompt(&self, state: &str) -> &str {
@@ -468,6 +522,68 @@ impl server::Handler for ScriptedHandler {
         }
     }
 
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if user == self.spec.username
+            && self
+                .spec
+                .authorized_public_keys
+                .iter()
+                .any(|authorized| authorized == public_key)
+        {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        self.auth_publickey_offered(user, public_key).await
+    }
+
+    async fn auth_keyboard_interactive(
+        &mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'_>>,
+    ) -> Result<Auth, Self::Error> {
+        if user != self.spec.username {
+            return Ok(Auth::reject());
+        }
+        let Some((prompt, expected)) = self.spec.keyboard_interactive.as_ref() else {
+            return Ok(Auth::reject());
+        };
+
+        match response {
+            None => Ok(Auth::Partial {
+                name: std::borrow::Cow::Borrowed("rneter-testkit"),
+                instructions: std::borrow::Cow::Borrowed(""),
+                prompts: std::borrow::Cow::Owned(vec![(
+                    std::borrow::Cow::Owned(prompt.clone()),
+                    false,
+                )]),
+            }),
+            Some(mut answers) => {
+                let Some(answer) = answers.next() else {
+                    return Ok(Auth::reject());
+                };
+                let answer = String::from_utf8_lossy(&answer);
+                if answer == expected.as_str() {
+                    Ok(Auth::Accept)
+                } else {
+                    Ok(Auth::reject())
+                }
+            }
+        }
+    }
+
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
@@ -580,7 +696,7 @@ impl FakeSshDevice {
             ..Default::default()
         });
 
-        let spec = Arc::new(EngineSpec::from_persona(&persona));
+        let spec = Arc::new(EngineSpec::from_persona(&persona)?);
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let accept_log = log.clone();
         let accept_task = tokio::spawn(async move {
@@ -661,13 +777,33 @@ impl FakeSshDevice {
         self.log.lock().expect("fake device command log").clone()
     }
 
-    /// Builds a connection request wired to this device and its persona.
-    pub fn connection_request(&self) -> Result<ConnectionRequest, ConnectError> {
-        Ok(ConnectionRequest::new(
+    /// Builds an autodetect request wired to this device and its persona.
+    pub fn detect_request(&self) -> DetectRequest {
+        DetectRequest::new(
             self.persona.username.clone(),
             self.addr.ip().to_string(),
             self.addr.port(),
             self.persona.password.clone(),
+        )
+    }
+
+    /// Builds a connection request wired to this device and its persona.
+    ///
+    /// Uses password authentication by default.
+    pub fn connection_request(&self) -> Result<ConnectionRequest, ConnectError> {
+        self.connection_request_with_auth(SshAuthMethod::password(self.persona.password.clone()))
+    }
+
+    /// Builds a connection request with an explicit authentication method.
+    pub fn connection_request_with_auth(
+        &self,
+        auth: SshAuthMethod,
+    ) -> Result<ConnectionRequest, ConnectError> {
+        Ok(ConnectionRequest::new_with_auth(
+            self.persona.username.clone(),
+            self.addr.ip().to_string(),
+            self.addr.port(),
+            auth,
             self.persona.enable_password.clone(),
             self.persona.config.build()?,
         ))

@@ -53,13 +53,6 @@ fn hook_output_summary(output: &SessionOperationOutput) -> Option<String> {
 }
 
 impl SharedSshClient {
-    /// Calculates SHA-256 hash of the password.
-    fn calculate_password_hash(password: &str) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        hasher.finalize().into()
-    }
-
     /// Calculates SHA-256 hash of the enable password (if present).
     fn calculate_enable_password_hash(enable_password: &Option<String>) -> Option<[u8; 32]> {
         enable_password.as_ref().map(|pwd| {
@@ -72,14 +65,13 @@ impl SharedSshClient {
     /// Checks if connection parameters match (used for cache validation).
     pub fn matches_connection_params(
         &self,
-        password: &str,
+        auth_digest: &[u8; 32],
         enable_password: &Option<String>,
         handler: &DeviceHandler,
         security_options: &ConnectionSecurityOptions,
     ) -> bool {
-        let password_hash = Self::calculate_password_hash(password);
-        if self.password_hash != password_hash {
-            debug!("Password hash mismatch");
+        if &self.auth_digest != auth_digest {
+            debug!("Authentication method digest mismatch");
             return false;
         }
 
@@ -149,7 +141,8 @@ impl SharedSshClient {
         user: String,
         addr: String,
         port: u16,
-        password: String,
+        auth: SshAuthMethod,
+        auth_digest: [u8; 32],
         enable_password: Option<String>,
         mut handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
@@ -170,7 +163,7 @@ impl SharedSshClient {
             Client::connect_with_config(
                 (addr, port),
                 &user,
-                AuthMethod::with_password(&password),
+                auth.to_transport(),
                 security_options.server_check.clone(),
                 config,
             ),
@@ -359,7 +352,6 @@ impl SharedSshClient {
             }
         }
 
-        let password_hash = Self::calculate_password_hash(&password);
         let enable_password_hash = Self::calculate_enable_password_hash(&enable_password);
         let mut shared = Self {
             client,
@@ -370,7 +362,7 @@ impl SharedSshClient {
             in_hook: false,
             handler,
             prompt,
-            password_hash,
+            auth_digest,
             enable_password_hash,
             security_options,
             recorder,

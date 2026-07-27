@@ -4,7 +4,9 @@ use rneter::session::{
     Command, RollbackPolicy, SessionEvent, SessionRecordLevel, SessionRecorder,
     SshConnectionManager, TxBlock, TxStep,
 };
+use rneter::templates;
 use rneter::testkit::{DevicePersona, ERROR_COMMAND, FakeSshDevice};
+use rneter::{DetectConfidence, autodetect_with_context};
 
 pub fn command(mode: &str, text: &str) -> Command {
     Command {
@@ -26,6 +28,62 @@ fn position_from(commands: &[String], from: usize, needle: &str, name: &str) -> 
         .unwrap_or_else(|| {
             panic!("[{name}] device never received '{needle}' after index {from}: {commands:?}")
         })
+}
+
+/// Runs SSH autodetect against the virtual device of one built-in template.
+///
+/// Templates with a detect profile must be identified as themselves with
+/// high confidence — the personas' realistic prompts and version-command
+/// replies are exactly what the built-in probes score against, so this
+/// doubles as a fidelity audit. Templates without a profile cannot be
+/// identified, but their devices must never be mistaken for another
+/// template with high confidence.
+pub async fn run_autodetect_scenario(template: &str) {
+    let persona = DevicePersona::builtin(template)
+        .unwrap_or_else(|error| panic!("[{template}] build persona: {error}"));
+    let name = persona.name.clone();
+    let has_profile = templates::template_metadata(&name)
+        .unwrap_or_else(|error| panic!("[{name}] template metadata: {error}"))
+        .detect_profile
+        .is_some();
+
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] spawn virtual device: {error}"));
+
+    let report = autodetect_with_context(device.detect_request(), device.execution_context())
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] autodetect: {error}"));
+
+    if has_profile {
+        let best = report
+            .best_match
+            .unwrap_or_else(|| panic!("[{name}] autodetect produced no candidate"));
+        assert_eq!(
+            best.template_name,
+            name,
+            "[{name}] autodetect picked the wrong template (score {}, candidates: {:?})",
+            best.score,
+            report
+                .candidates
+                .iter()
+                .map(|c| format!("{}:{}", c.template_name, c.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            best.confidence,
+            DetectConfidence::High,
+            "[{name}] autodetect should identify its own virtual device with high confidence; score {}",
+            best.score
+        );
+    } else if let Some(best) = report.best_match {
+        assert_ne!(
+            best.confidence,
+            DetectConfidence::High,
+            "[{name}] has no detect profile, but its device was identified as '{}' with high confidence",
+            best.template_name
+        );
+    }
 }
 
 /// Runs the full end-to-end scenario against the virtual device of one

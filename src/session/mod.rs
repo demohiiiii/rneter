@@ -53,23 +53,225 @@ pub use transaction::{
 /// Global singleton SSH connection manager.
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
 
+/// Authentication method used to establish an SSH session.
+///
+/// Marked `#[non_exhaustive]` so further methods can be added without a
+/// breaking change; downstream `match` arms need a wildcard branch.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SshAuthMethod {
+    /// Password authentication.
+    Password(String),
+    /// Private key provided inline (full OpenSSH/PEM file contents).
+    PrivateKey {
+        key_data: String,
+        passphrase: Option<String>,
+    },
+    /// Private key loaded from a file at connect time.
+    PrivateKeyFile {
+        path: std::path::PathBuf,
+        passphrase: Option<String>,
+    },
+    /// Authenticate through the local ssh-agent.
+    #[cfg(not(target_os = "windows"))]
+    Agent,
+    /// Keyboard-interactive authentication. Each server prompt that
+    /// *contains* a configured prompt fragment is answered with the paired
+    /// response.
+    KeyboardInteractive(Vec<(String, String)>),
+}
+
+impl std::fmt::Debug for SshAuthMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password(_) => formatter.write_str("Password(<redacted>)"),
+            Self::PrivateKey { passphrase, .. } => formatter
+                .debug_struct("PrivateKey")
+                .field("key_data", &"<redacted>")
+                .field("has_passphrase", &passphrase.is_some())
+                .finish(),
+            Self::PrivateKeyFile { path, passphrase } => formatter
+                .debug_struct("PrivateKeyFile")
+                .field("path", path)
+                .field("has_passphrase", &passphrase.is_some())
+                .finish(),
+            #[cfg(not(target_os = "windows"))]
+            Self::Agent => formatter.write_str("Agent"),
+            Self::KeyboardInteractive(responses) => formatter
+                .debug_struct("KeyboardInteractive")
+                .field("response_count", &responses.len())
+                .finish(),
+        }
+    }
+}
+
+impl SshAuthMethod {
+    /// Password authentication.
+    pub fn password(password: impl Into<String>) -> Self {
+        Self::Password(password.into())
+    }
+
+    /// Private key authentication from inline key contents.
+    pub fn private_key(key_data: impl Into<String>, passphrase: Option<String>) -> Self {
+        Self::PrivateKey {
+            key_data: key_data.into(),
+            passphrase,
+        }
+    }
+
+    /// Private key authentication from a key file path.
+    pub fn private_key_file(
+        path: impl Into<std::path::PathBuf>,
+        passphrase: Option<String>,
+    ) -> Self {
+        Self::PrivateKeyFile {
+            path: path.into(),
+            passphrase,
+        }
+    }
+
+    /// Authentication through the local ssh-agent.
+    #[cfg(not(target_os = "windows"))]
+    pub fn agent() -> Self {
+        Self::Agent
+    }
+
+    /// Keyboard-interactive authentication with `(prompt fragment, response)`
+    /// pairs.
+    pub fn keyboard_interactive(responses: Vec<(String, String)>) -> Self {
+        Self::KeyboardInteractive(responses)
+    }
+
+    /// Digest of the effective authentication material used for cached-
+    /// connection parameter comparison.
+    ///
+    /// File-backed keys are read and hashed by content, while agent
+    /// authentication hashes the agent's current public identities. Only the
+    /// resulting digest is retained by pooled connections.
+    pub(crate) async fn fingerprint(&self) -> Result<[u8; 32], ConnectError> {
+        fn update_bytes(hasher: &mut Sha256, value: &[u8]) {
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value);
+        }
+
+        fn update_optional_str(hasher: &mut Sha256, value: Option<&str>) {
+            match value {
+                Some(value) => {
+                    hasher.update([1u8]);
+                    update_bytes(hasher, value.as_bytes());
+                }
+                None => hasher.update([0u8]),
+            }
+        }
+
+        let mut hasher = Sha256::new();
+        match self {
+            Self::Password(password) => {
+                hasher.update([0u8]);
+                update_bytes(&mut hasher, password.as_bytes());
+            }
+            Self::PrivateKey {
+                key_data,
+                passphrase,
+            } => {
+                hasher.update([1u8]);
+                update_bytes(&mut hasher, key_data.as_bytes());
+                update_optional_str(&mut hasher, passphrase.as_deref());
+            }
+            Self::PrivateKeyFile { path, passphrase } => {
+                let key_data = tokio::fs::read(path).await.map_err(|error| {
+                    ConnectError::InvalidSshAuth(format!(
+                        "read private key file '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+                hasher.update([2u8]);
+                update_bytes(&mut hasher, &key_data);
+                update_optional_str(&mut hasher, passphrase.as_deref());
+            }
+            #[cfg(not(target_os = "windows"))]
+            Self::Agent => {
+                hasher.update([3u8]);
+                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
+                    .await
+                    .map_err(|error| {
+                        ConnectError::InvalidSshAuth(format!("connect to ssh-agent: {error}"))
+                    })?;
+                let identities = agent.request_identities().await.map_err(|error| {
+                    ConnectError::InvalidSshAuth(format!("read identities from ssh-agent: {error}"))
+                })?;
+                let mut encoded_identities = identities
+                    .into_iter()
+                    .map(|identity| {
+                        identity.to_bytes().map_err(|error| {
+                            ConnectError::InvalidSshAuth(format!(
+                                "encode ssh-agent identity: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                encoded_identities.sort();
+                for identity in encoded_identities {
+                    update_bytes(&mut hasher, &identity);
+                }
+            }
+            Self::KeyboardInteractive(responses) => {
+                hasher.update([4u8]);
+                for (prompt, response) in responses {
+                    update_bytes(&mut hasher, prompt.as_bytes());
+                    update_bytes(&mut hasher, response.as_bytes());
+                }
+            }
+        }
+        Ok(hasher.finalize().into())
+    }
+
+    /// Maps to the transport-level authentication method.
+    pub(crate) fn to_transport(&self) -> AuthMethod {
+        match self {
+            Self::Password(password) => AuthMethod::with_password(password),
+            Self::PrivateKey {
+                key_data,
+                passphrase,
+            } => AuthMethod::with_key(key_data, passphrase.as_deref()),
+            Self::PrivateKeyFile { path, passphrase } => {
+                AuthMethod::with_key_file(path, passphrase.as_deref())
+            }
+            #[cfg(not(target_os = "windows"))]
+            Self::Agent => AuthMethod::with_agent(),
+            Self::KeyboardInteractive(responses) => {
+                let interactive = responses.iter().fold(
+                    async_ssh2_tokio::client::AuthKeyboardInteractive::new(),
+                    |interactive, (prompt, response)| interactive.with_response(prompt, response),
+                );
+                AuthMethod::with_keyboard_interactive(interactive)
+            }
+        }
+    }
+}
+
 /// Lightweight request used by template autodetection before a concrete handler is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectRequest {
     pub user: String,
     pub addr: String,
     pub port: u16,
-    pub password: String,
+    pub auth: SshAuthMethod,
 }
 
 impl DetectRequest {
-    /// Build a new autodetect request.
+    /// Build a new password-authenticated autodetect request.
     pub fn new(user: String, addr: String, port: u16, password: String) -> Self {
+        Self::new_with_auth(user, addr, port, SshAuthMethod::Password(password))
+    }
+
+    /// Build a new autodetect request with an explicit authentication method.
+    pub fn new_with_auth(user: String, addr: String, port: u16, auth: SshAuthMethod) -> Self {
         Self {
             user,
             addr,
             port,
-            password,
+            auth,
         }
     }
 
@@ -84,13 +286,13 @@ pub struct ConnectionRequest {
     pub user: String,
     pub addr: String,
     pub port: u16,
-    pub password: String,
+    pub auth: SshAuthMethod,
     pub enable_password: Option<String>,
     pub handler: DeviceHandler,
 }
 
 impl ConnectionRequest {
-    /// Build a new connection request.
+    /// Build a new password-authenticated connection request.
     pub fn new(
         user: String,
         addr: String,
@@ -99,11 +301,30 @@ impl ConnectionRequest {
         enable_password: Option<String>,
         handler: DeviceHandler,
     ) -> Self {
+        Self::new_with_auth(
+            user,
+            addr,
+            port,
+            SshAuthMethod::Password(password),
+            enable_password,
+            handler,
+        )
+    }
+
+    /// Build a new connection request with an explicit authentication method.
+    pub fn new_with_auth(
+        user: String,
+        addr: String,
+        port: u16,
+        auth: SshAuthMethod,
+        enable_password: Option<String>,
+        handler: DeviceHandler,
+    ) -> Self {
         Self {
             user,
             addr,
             port,
-            password,
+            auth,
             enable_password,
             handler,
         }
@@ -177,8 +398,9 @@ pub struct SharedSshClient {
     hooks: SessionHooks,
     in_hook: bool,
 
-    /// SHA-256 hash of the password, used for connection parameter comparison
-    password_hash: [u8; 32],
+    /// SHA-256 digest of the authentication method, used for connection
+    /// parameter comparison (secrets themselves are never retained)
+    auth_digest: [u8; 32],
 
     /// SHA-256 hash of the enable password (if present)
     enable_password_hash: Option<[u8; 32]>,
@@ -771,6 +993,79 @@ mod tests {
             templates::cisco().expect("template"),
         );
         assert_eq!(request.device_addr(), "admin@192.168.1.1:22");
+        assert!(matches!(
+            request.auth,
+            SshAuthMethod::Password(ref password) if password == "password"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ssh_auth_method_fingerprint_distinguishes_methods() {
+        let password = SshAuthMethod::password("secret");
+        let other_password = SshAuthMethod::password("other");
+        let key = SshAuthMethod::private_key("-----BEGIN OPENSSH PRIVATE KEY-----\n", None);
+        let interactive = SshAuthMethod::keyboard_interactive(vec![(
+            "Password".to_string(),
+            "secret".to_string(),
+        )]);
+
+        assert_ne!(
+            password.fingerprint().await.expect("fingerprint"),
+            other_password.fingerprint().await.expect("fingerprint")
+        );
+        assert_ne!(
+            password.fingerprint().await.expect("fingerprint"),
+            key.fingerprint().await.expect("fingerprint")
+        );
+        assert_ne!(
+            password.fingerprint().await.expect("fingerprint"),
+            interactive.fingerprint().await.expect("fingerprint")
+        );
+        assert_eq!(
+            password.fingerprint().await.expect("fingerprint"),
+            SshAuthMethod::password("secret")
+                .fingerprint()
+                .await
+                .expect("fingerprint")
+        );
+    }
+
+    #[tokio::test]
+    async fn ssh_auth_method_fingerprint_distinguishes_absent_and_empty_passphrases() {
+        let without_passphrase = SshAuthMethod::private_key("key-data", None);
+        let empty_passphrase = SshAuthMethod::private_key("key-data", Some(String::new()));
+
+        assert_ne!(
+            without_passphrase.fingerprint().await.expect("fingerprint"),
+            empty_passphrase.fingerprint().await.expect("fingerprint")
+        );
+    }
+
+    #[test]
+    fn ssh_auth_method_debug_redacts_secrets() {
+        let auth_methods = [
+            SshAuthMethod::password("password-secret-value"),
+            SshAuthMethod::private_key(
+                "private-key-secret-value",
+                Some("passphrase-secret-value".to_string()),
+            ),
+            SshAuthMethod::keyboard_interactive(vec![(
+                "One-Time Password".to_string(),
+                "interactive-secret-value".to_string(),
+            )]),
+        ];
+
+        let debug_output = format!("{auth_methods:?}");
+        for secret in [
+            "password-secret-value",
+            "private-key-secret-value",
+            "passphrase-secret-value",
+            "interactive-secret-value",
+        ] {
+            assert!(!debug_output.contains(secret));
+        }
+        assert!(debug_output.contains("<redacted>"));
+        assert!(debug_output.contains("response_count: 1"));
     }
 
     #[test]

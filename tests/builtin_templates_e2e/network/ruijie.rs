@@ -6,3 +6,8 @@ use crate::support;
 async fn ruijie_os_full_scenario() {
     support::run_full_scenario("ruijie_os").await;
 }
+
+#[tokio::test]
+async fn ruijie_os_autodetected_from_virtual_device() {
+    support::run_autodetect_scenario("ruijie_os").await;
+}

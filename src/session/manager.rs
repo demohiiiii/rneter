@@ -315,10 +315,11 @@ impl SshConnectionManager {
             user,
             addr,
             port,
-            password,
+            auth,
             enable_password,
             handler,
         } = request;
+        let auth_digest = auth.fingerprint().await?;
 
         // One retry: the first pass may find a stale or mismatched entry,
         // invalidate it, and create a fresh connection on the second pass.
@@ -331,7 +332,8 @@ impl SshConnectionManager {
                     user.clone(),
                     addr.clone(),
                     port,
-                    password.clone(),
+                    auth.clone(),
+                    auth_digest,
                     enable_password.clone(),
                     handler.clone(),
                     security_options.clone(),
@@ -354,7 +356,7 @@ impl SshConnectionManager {
                 let client_guard = client.read().await;
                 client_guard.is_connected()
                     && client_guard.matches_connection_params(
-                        &password,
+                        &auth_digest,
                         &enable_password,
                         &handler,
                         &security_options,
@@ -390,7 +392,8 @@ impl SshConnectionManager {
         user: String,
         addr: String,
         port: u16,
-        password: String,
+        auth: SshAuthMethod,
+        auth_digest: [u8; 32],
         enable_password: Option<String>,
         handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
@@ -404,7 +407,8 @@ impl SshConnectionManager {
             user,
             addr,
             port,
-            password,
+            auth,
+            auth_digest,
             enable_password,
             handler,
             security_options,

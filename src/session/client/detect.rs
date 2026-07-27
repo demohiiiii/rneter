@@ -98,7 +98,7 @@ async fn collect_detect_snapshot(
     let client = Client::connect_with_config(
         (request.addr.as_str(), request.port),
         &request.user,
-        AuthMethod::with_password(&request.password),
+        request.auth.to_transport(),
         security_options.server_check.clone(),
         config,
     )
