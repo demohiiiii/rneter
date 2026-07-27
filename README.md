@@ -1381,29 +1381,33 @@ You can also continue directly into a live connection when the best candidate
 meets a minimum confidence threshold:
 
 ```rust
-use rneter::session::{ExecutionContext, DetectRequest};
-use rneter::templates::{
-    autodetect_and_connect_with_context, DetectConnectPolicy,
-};
+use rneter::session::{DetectRequest, ExecutionContext, SshConnectionManager};
+use rneter::templates::DetectConnectPolicy;
 
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-let connected = autodetect_and_connect_with_context(
-    DetectRequest::new(
-        "admin".to_string(),
-        "192.168.1.1".to_string(),
-        22,
-        "password".to_string(),
-    ),
-    None,
-    ExecutionContext::default(),
-    DetectConnectPolicy::default(), // default minimum confidence = Medium
-)
-.await?;
+let manager = SshConnectionManager::new();
+let connected = manager
+    .autodetect_and_connect_with_context(
+        DetectRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+        ),
+        None,
+        ExecutionContext::default(),
+        DetectConnectPolicy::default(), // default minimum confidence = Medium
+    )
+    .await?;
 
 println!("connected with template: {}", connected.template_name);
 # Ok(())
 # }
 ```
+
+Calling the method on a manager keeps the detected connection in that
+manager's pool. The free `autodetect_and_connect_*` functions remain convenient
+shortcuts backed by the global `MANAGER`.
 
 If you want caller-defined autodetect targets, provide your own handler config
 and detect profile:

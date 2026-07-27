@@ -11,7 +11,9 @@ use super::detect_profile::TemplateDetectProfile;
 use super::{by_name_config, detect_profile_by_name};
 use crate::device::DeviceHandlerConfig;
 use crate::error::ConnectError;
-use crate::session::{CmdJob, ConnectionRequest, DetectRequest, ExecutionContext, MANAGER};
+use crate::session::{
+    CmdJob, ConnectionRequest, DetectRequest, ExecutionContext, MANAGER, SshConnectionManager,
+};
 
 /// Confidence bucket derived from the total autodetect score.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -490,8 +492,88 @@ pub async fn autodetect_with_context(
     autodetect_with_profiles_and_context(request, context, builtin_detect_profiles()).await
 }
 
+impl SshConnectionManager {
+    /// Run autodetect against caller-supplied templates, enforce a confidence policy,
+    /// then connect using the winning handler config.
+    ///
+    /// The resulting connection is owned by this manager's pool.
+    pub async fn autodetect_and_connect_with_templates_and_context(
+        &self,
+        request: DetectRequest,
+        enable_password: Option<String>,
+        context: ExecutionContext,
+        policy: DetectConnectPolicy,
+        templates: Vec<DetectTemplateDefinition>,
+    ) -> Result<AutodetectedConnection, ConnectError> {
+        let report = autodetect_with_templates_and_context(
+            request.clone(),
+            context.clone(),
+            templates.clone(),
+        )
+        .await?;
+        let best = select_best_detected_template(&report, policy)?;
+        debug!(
+            "autodetect selected template='{}' score={} confidence={:?}; connecting",
+            best.template_name, best.score, best.confidence
+        );
+        let connection_request = build_detected_connection_request_from_templates(
+            request,
+            enable_password,
+            &best,
+            &templates,
+        )?;
+        let sender = self.get_with_context(connection_request, context).await?;
+
+        AutodetectedConnection::new(sender, report)
+    }
+
+    /// Run autodetect against built-in templates plus caller-supplied definitions,
+    /// then connect using the winning handler config.
+    ///
+    /// Caller-supplied templates override built-in definitions when `template_name`
+    /// matches case-insensitively. The resulting connection is owned by this
+    /// manager's pool.
+    pub async fn autodetect_and_connect_with_builtin_and_templates_and_context(
+        &self,
+        request: DetectRequest,
+        enable_password: Option<String>,
+        context: ExecutionContext,
+        policy: DetectConnectPolicy,
+        templates: Vec<DetectTemplateDefinition>,
+    ) -> Result<AutodetectedConnection, ConnectError> {
+        self.autodetect_and_connect_with_templates_and_context(
+            request,
+            enable_password,
+            context,
+            policy,
+            merge_with_builtin_detect_templates(templates),
+        )
+        .await
+    }
+
+    /// Run autodetect, enforce a minimum confidence policy, then connect using
+    /// the best template. The resulting connection is owned by this manager's
+    /// pool.
+    pub async fn autodetect_and_connect_with_context(
+        &self,
+        request: DetectRequest,
+        enable_password: Option<String>,
+        context: ExecutionContext,
+        policy: DetectConnectPolicy,
+    ) -> Result<AutodetectedConnection, ConnectError> {
+        self.autodetect_and_connect_with_templates_and_context(
+            request,
+            enable_password,
+            context,
+            policy,
+            builtin_detect_templates(),
+        )
+        .await
+    }
+}
+
 /// Run autodetect against caller-supplied templates, enforce a confidence policy,
-/// then connect using the winning handler config.
+/// then connect using the winning handler config in the global manager's pool.
 pub async fn autodetect_and_connect_with_templates_and_context(
     request: DetectRequest,
     enable_password: Option<String>,
@@ -499,25 +581,15 @@ pub async fn autodetect_and_connect_with_templates_and_context(
     policy: DetectConnectPolicy,
     templates: Vec<DetectTemplateDefinition>,
 ) -> Result<AutodetectedConnection, ConnectError> {
-    let report =
-        autodetect_with_templates_and_context(request.clone(), context.clone(), templates.clone())
-            .await?;
-    let best = select_best_detected_template(&report, policy)?;
-    debug!(
-        "autodetect selected template='{}' score={} confidence={:?}; connecting",
-        best.template_name, best.score, best.confidence
-    );
-    let connection_request = build_detected_connection_request_from_templates(
-        request,
-        enable_password,
-        &best,
-        &templates,
-    )?;
-    let sender = MANAGER
-        .get_with_context(connection_request, context)
-        .await?;
-
-    AutodetectedConnection::new(sender, report)
+    MANAGER
+        .autodetect_and_connect_with_templates_and_context(
+            request,
+            enable_password,
+            context,
+            policy,
+            templates,
+        )
+        .await
 }
 
 /// Run autodetect against built-in templates plus caller-supplied definitions,
@@ -532,14 +604,15 @@ pub async fn autodetect_and_connect_with_builtin_and_templates_and_context(
     policy: DetectConnectPolicy,
     templates: Vec<DetectTemplateDefinition>,
 ) -> Result<AutodetectedConnection, ConnectError> {
-    autodetect_and_connect_with_templates_and_context(
-        request,
-        enable_password,
-        context,
-        policy,
-        merge_with_builtin_detect_templates(templates),
-    )
-    .await
+    MANAGER
+        .autodetect_and_connect_with_builtin_and_templates_and_context(
+            request,
+            enable_password,
+            context,
+            policy,
+            templates,
+        )
+        .await
 }
 
 /// Run autodetect, enforce a minimum confidence policy, then connect using the best template.
@@ -549,14 +622,9 @@ pub async fn autodetect_and_connect_with_context(
     context: ExecutionContext,
     policy: DetectConnectPolicy,
 ) -> Result<AutodetectedConnection, ConnectError> {
-    autodetect_and_connect_with_templates_and_context(
-        request,
-        enable_password,
-        context,
-        policy,
-        builtin_detect_templates(),
-    )
-    .await
+    MANAGER
+        .autodetect_and_connect_with_context(request, enable_password, context, policy)
+        .await
 }
 
 fn select_best_detected_template(

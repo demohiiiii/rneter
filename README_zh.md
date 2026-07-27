@@ -1314,29 +1314,32 @@ for candidate in &report.candidates {
 如果最佳候选满足最小置信度阈值，也可以直接继续建立正式连接：
 
 ```rust
-use rneter::session::{ExecutionContext, DetectRequest};
-use rneter::templates::{
-    autodetect_and_connect_with_context, DetectConnectPolicy,
-};
+use rneter::session::{DetectRequest, ExecutionContext, SshConnectionManager};
+use rneter::templates::DetectConnectPolicy;
 
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-let connected = autodetect_and_connect_with_context(
-    DetectRequest::new(
-        "admin".to_string(),
-        "192.168.1.1".to_string(),
-        22,
-        "password".to_string(),
-    ),
-    None,
-    ExecutionContext::default(),
-    DetectConnectPolicy::default(), // 默认最小置信度 = Medium
-)
-.await?;
+let manager = SshConnectionManager::new();
+let connected = manager
+    .autodetect_and_connect_with_context(
+        DetectRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+        ),
+        None,
+        ExecutionContext::default(),
+        DetectConnectPolicy::default(), // 默认最小置信度 = Medium
+    )
+    .await?;
 
 println!("连接使用模板: {}", connected.template_name);
 # Ok(())
 # }
 ```
+
+在 manager 上调用该方法，会让探测后建立的连接归属于这个 manager 的连接池。
+原有的 `autodetect_and_connect_*` 自由函数仍可作为使用全局 `MANAGER` 的快捷入口。
 
 如果你希望调用方自己定义 autodetect 目标，也可以直接传入自己的
 `handler_config + detect_profile`：

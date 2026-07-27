@@ -58,5 +58,6 @@ section; nothing here is a commitment, and feedback via issues is welcome.
   non-transition challenges, only scenarios are missing.
 - [ ] Pager (`more_regex`) handling has no E2E coverage; virtual devices
   could simulate paged output.
-- [ ] `autodetect_and_connect_*` is bound to the global `MANAGER`; custom
-  manager users silently fall back to the global pool.
+- [x] `autodetect_and_connect_*` supports manager-owned connections; custom
+  managers retain the detected connection in their own pool, while the free
+  functions remain global-manager shortcuts.
