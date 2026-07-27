@@ -369,6 +369,49 @@ async fn authenticates_with_private_key() {
 }
 
 #[tokio::test]
+async fn rejects_an_incorrect_private_key_passphrase() {
+    use rand_core::OsRng;
+    use rneter::session::SshAuthMethod;
+    use russh::keys::{Algorithm, PrivateKey};
+
+    let private_key =
+        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate client key");
+    let public_key = private_key
+        .public_key()
+        .to_openssh()
+        .expect("encode public key");
+    let encrypted_key = private_key
+        .encrypt(&mut OsRng, "correct-passphrase")
+        .expect("encrypt private key")
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("encode private key")
+        .to_string();
+
+    let device = FakeSshDevice::spawn(custom_persona().with_authorized_public_key(public_key))
+        .await
+        .expect("spawn key-auth device");
+    let error = SshConnectionManager::new()
+        .execute_command_with_context(
+            device
+                .connection_request_with_auth(SshAuthMethod::private_key(
+                    encrypted_key,
+                    Some("wrong-passphrase".to_string()),
+                ))
+                .expect("request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect_err("wrong passphrase must fail");
+
+    assert!(
+        error.to_string().contains("Unable to load key"),
+        "unexpected error: {error:?}"
+    );
+    assert!(device.received_commands().is_empty());
+}
+
+#[tokio::test]
 async fn private_key_file_rotation_recreates_pooled_connection() {
     use rand_core::OsRng;
     use rneter::session::SshAuthMethod;

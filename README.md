@@ -18,6 +18,7 @@
 - [Command Flows and Interaction](#command-flows-and-interaction)
 - [Connection Security](#connection-security)
 - [SSH Authentication](#ssh-authentication)
+- [Fleet Execution](#fleet-execution)
 - [Session Recording and Replay](#session-recording-and-replay)
 - [Transaction Workflows](#transaction-workflows)
 - [Testing With Fake Devices (testkit)](#testing-with-fake-devices-testkit)
@@ -37,6 +38,7 @@
 ## Features
 
 - **Connection Pooling**: Automatically caches and reuses SSH connections for better performance
+- **Fleet Execution**: Execute one command or flow across many independently configured devices with bounded concurrency and isolated errors
 - **Flexible SSH Authentication**: Password, private key (inline or file), ssh-agent, and keyboard-interactive authentication through `SshAuthMethod`
 - **State Machine Management**: Intelligent device state tracking and automatic transitions
 - **Prompt Detection**: Automatic prompt recognition and handling across different device types
@@ -539,6 +541,65 @@ let auth = SshAuthMethod::keyboard_interactive(vec![
 Autodetect uses the same model through `DetectRequest::new_with_auth(...)`.
 Cached connections include the authentication method in their parameter
 fingerprint, so changing credentials always forces a fresh connection.
+
+## Fleet Execution
+
+`execute_on_fleet(...)` runs one `SessionOperation` against independently
+configured targets. The concurrency limit bounds active targets, one target's
+failure does not cancel the others, and returned results preserve input order:
+
+```rust
+use rneter::session::{
+    Command, ConnectionRequest, ExecutionContext, FleetOptions, FleetTarget,
+    MANAGER, SessionOperation,
+};
+use rneter::templates;
+
+let targets = vec![
+    FleetTarget::new(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.10".to_string(),
+            22,
+            "password-a".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    ),
+    FleetTarget::new(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.11".to_string(),
+            22,
+            "password-b".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    ),
+];
+let operation = SessionOperation::from(Command {
+    mode: "Enable".to_string(),
+    command: "show version".to_string(),
+    timeout: Some(60),
+    ..Command::default()
+});
+
+let results = MANAGER
+    .execute_on_fleet(targets, operation, FleetOptions::new(16))
+    .await?;
+for target in results {
+    match target.result {
+        Ok(output) => println!("{}: success={}", target.device_addr, output.success),
+        Err(error) => eprintln!("{}: {error}", target.device_addr),
+    }
+}
+```
+
+The outer `Result` reports invalid fleet/operation configuration or an
+internal task failure. Connection and execution failures remain attached to
+their individual `FleetExecutionResult` values, including partial flow output.
 
 ## Session Recording and Replay
 

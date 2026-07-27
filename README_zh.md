@@ -16,6 +16,7 @@
 - [Linux 主机管理](#linux-主机管理)
 - [连接安全](#连接安全)
 - [SSH 认证方式](#ssh-认证方式)
+- [Fleet 批量执行](#fleet-批量执行)
 - [文件传输](#文件传输)
 - [命令流与交互](#命令流与交互)
 - [会话录制与回放](#会话录制与回放)
@@ -37,6 +38,7 @@
 ## 特性
 
 - **连接池管理**：自动缓存和重用 SSH 连接以提高性能
+- **Fleet 批量执行**：以受控并发在多台独立配置的设备上执行同一命令或流程，并隔离单设备错误
 - **灵活的 SSH 认证**：通过 `SshAuthMethod` 支持密码、私钥（内联或文件）、ssh-agent 与键盘交互认证
 - **状态机管理**：智能设备状态跟踪和自动状态转换
 - **提示符检测**：自动识别和处理不同设备类型的提示符
@@ -286,6 +288,64 @@ let auth = SshAuthMethod::keyboard_interactive(vec![
 
 自动识别同样支持 `DetectRequest::new_with_auth(...)`。
 连接池会把认证方式纳入参数指纹，因此更换凭据一定会重建连接。
+
+## Fleet 批量执行
+
+`execute_on_fleet(...)` 会在一组独立配置的目标上执行同一个
+`SessionOperation`。并发上限控制同时执行的目标数量，单台设备失败不会
+取消其他设备，返回结果始终保持输入顺序：
+
+```rust
+use rneter::session::{
+    Command, ConnectionRequest, ExecutionContext, FleetOptions, FleetTarget,
+    MANAGER, SessionOperation,
+};
+use rneter::templates;
+
+let targets = vec![
+    FleetTarget::new(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.10".to_string(),
+            22,
+            "password-a".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    ),
+    FleetTarget::new(
+        ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.11".to_string(),
+            22,
+            "password-b".to_string(),
+            None,
+            templates::cisco()?,
+        ),
+        ExecutionContext::default(),
+    ),
+];
+let operation = SessionOperation::from(Command {
+    mode: "Enable".to_string(),
+    command: "show version".to_string(),
+    timeout: Some(60),
+    ..Command::default()
+});
+
+let results = MANAGER
+    .execute_on_fleet(targets, operation, FleetOptions::new(16))
+    .await?;
+for target in results {
+    match target.result {
+        Ok(output) => println!("{}: success={}", target.device_addr, output.success),
+        Err(error) => eprintln!("{}: {error}", target.device_addr),
+    }
+}
+```
+
+外层 `Result` 只报告 Fleet/操作配置错误或内部任务异常。连接和执行错误会
+保留在各自的 `FleetExecutionResult` 中，命令流已经产生的部分输出也不会丢失。
 
 ## 文件传输
 

@@ -8,6 +8,7 @@
 //! ## Features
 //!
 //! - **Connection Pooling**: Automatically caches and reuses SSH connections
+//! - **Fleet Execution**: Runs one operation across many devices with bounded concurrency
 //! - **State Machine Management**: Intelligent device state tracking and transitions
 //! - **Prompt Detection**: Automatic prompt recognition and handling
 //! - **Mode Switching**: Seamless transitions between device modes (user mode, enable mode, config mode, etc.)
@@ -66,6 +67,7 @@
 //! ## Main Components
 //!
 //! - [`session::SshConnectionManager`] - Manages SSH connection pool and lifecycle
+//! - [`session::FleetTarget`] - Carries per-device connection and execution settings
 //! - [`device::DeviceHandler`] - Handles device state machine and transitions
 //! - [`error::ConnectError`] - Error types for connection and state operations
 //! - [`session::SessionOperationExecutionError`] - Operation-level execution error with partial outputs

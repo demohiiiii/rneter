@@ -37,6 +37,7 @@ use crate::error::ConnectError;
 
 use super::device::{DeviceHandler, IGNORE_START_LINE};
 
+pub use fleet::{DEFAULT_FLEET_CONCURRENCY_LIMIT, FleetExecutionResult, FleetOptions, FleetTarget};
 pub(crate) use hooks::HookTrigger;
 pub use hooks::{HookAction, HookFailurePolicy, SessionHooks};
 pub use recording::{
@@ -971,6 +972,7 @@ pub struct SshConnectionManager {
 }
 
 mod client;
+mod fleet;
 mod hooks;
 mod manager;
 mod recording;
@@ -1039,6 +1041,22 @@ mod tests {
             without_passphrase.fingerprint().await.expect("fingerprint"),
             empty_passphrase.fingerprint().await.expect("fingerprint")
         );
+    }
+
+    #[tokio::test]
+    async fn missing_private_key_file_returns_auth_configuration_error() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let missing_path =
+            std::env::temp_dir().join(format!("rneter-missing-key-{}-{nonce}", std::process::id()));
+        let error = SshAuthMethod::private_key_file(missing_path, None)
+            .fingerprint()
+            .await
+            .expect_err("missing key file");
+
+        assert!(matches!(error, ConnectError::InvalidSshAuth(_)));
     }
 
     #[test]

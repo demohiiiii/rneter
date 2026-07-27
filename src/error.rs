@@ -65,6 +65,10 @@ pub enum ConnectError {
     #[error("invalid SSH authentication configuration: {0}")]
     InvalidSshAuth(String),
 
+    /// Fleet execution options are invalid.
+    #[error("invalid fleet options: {0}")]
+    InvalidFleetOptions(String),
+
     /// An error occurred in the async-ssh2-tokio library.
     #[error("async ssh2 error: {0}")]
     Ssh2Error(#[from] async_ssh2_tokio::Error),

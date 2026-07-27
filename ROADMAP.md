@@ -24,11 +24,11 @@ section; nothing here is a commitment, and feedback via issues is welcome.
   keyboard-interactive authentication via `SshAuthMethod`;
   `ConnectionRequest`/`DetectRequest` carry the method, and pooled
   connections fingerprint it so credential changes force a reconnect.
-- [ ] **Fleet execution API** — run one command/flow/transaction across many
+- [x] **Fleet execution API** — run one command/flow across many
   devices concurrently with a concurrency limit and per-device error
-  isolation (e.g. `execute_on_fleet(requests, op, FleetOptions)`), built on
-  the existing pool and Tokio. The testkit fleet (`--all`) provides the E2E
-  bed for free.
+  isolation via `execute_on_fleet(targets, operation, FleetOptions)`, built
+  on the existing pool and Tokio. Transaction/workflow fleet helpers can be
+  added after retry and resume semantics are defined.
 - [ ] **Structured output parsing** — first a lightweight named-capture
   regex table parser (`Output::parse_table(&spec)` returning rows), later
   evaluate a TextFSM/ntc-templates compatibility layer.

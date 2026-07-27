@@ -51,3 +51,7 @@ required-features = ["testkit"]
 [[test]]
 name = "builtin_templates_e2e"
 required-features = ["testkit"]
+
+[[test]]
+name = "fleet_e2e"
+required-features = ["testkit"]
