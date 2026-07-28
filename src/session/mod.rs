@@ -205,7 +205,15 @@ impl SshAuthMethod {
                 let mut encoded_identities = identities
                     .into_iter()
                     .map(|identity| {
-                        identity.to_bytes().map_err(|error| {
+                        match identity {
+                            russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
+                                key.to_bytes()
+                            }
+                            russh::keys::agent::AgentIdentity::Certificate {
+                                certificate, ..
+                            } => certificate.to_bytes(),
+                        }
+                        .map_err(|error| {
                             ConnectError::InvalidSshAuth(format!(
                                 "encode ssh-agent identity: {error}"
                             ))

@@ -59,11 +59,10 @@ async fn rejected_auth_budget_is_shared_across_connections() {
 
 #[tokio::test]
 async fn public_key_auth_consumes_one_rejection_per_connection() {
-    use rand_core::OsRng;
     use russh::keys::{Algorithm, PrivateKey};
 
     let private_key =
-        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate client key");
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client key");
     let public_key = private_key
         .public_key()
         .to_openssh()

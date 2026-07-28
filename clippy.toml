@@ -1,0 +1,3 @@
+# async-ssh2-tokio's public error type makes ConnectError roughly 136 bytes.
+# Keep the existing public error variants stable until the next breaking release.
+large-error-threshold = 160

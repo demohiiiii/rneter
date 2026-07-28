@@ -408,12 +408,11 @@ async fn rolls_back_transaction_when_forward_step_fails() {
 
 #[tokio::test]
 async fn authenticates_with_private_key() {
-    use rand_core::OsRng;
     use rneter::session::SshAuthMethod;
     use russh::keys::{Algorithm, PrivateKey};
 
     let private_key =
-        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate client key");
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client key");
     let public_key = private_key
         .public_key()
         .to_openssh()
@@ -445,18 +444,17 @@ async fn authenticates_with_private_key() {
 
 #[tokio::test]
 async fn rejects_an_incorrect_private_key_passphrase() {
-    use rand_core::OsRng;
     use rneter::session::SshAuthMethod;
     use russh::keys::{Algorithm, PrivateKey};
 
     let private_key =
-        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate client key");
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client key");
     let public_key = private_key
         .public_key()
         .to_openssh()
         .expect("encode public key");
     let encrypted_key = private_key
-        .encrypt(&mut OsRng, "correct-passphrase")
+        .encrypt(&mut rand::rng(), "correct-passphrase")
         .expect("encrypt private key")
         .to_openssh(russh::keys::ssh_key::LineEnding::LF)
         .expect("encode private key")
@@ -488,12 +486,13 @@ async fn rejects_an_incorrect_private_key_passphrase() {
 
 #[tokio::test]
 async fn private_key_file_rotation_recreates_pooled_connection() {
-    use rand_core::OsRng;
     use rneter::session::SshAuthMethod;
     use russh::keys::{Algorithm, PrivateKey};
 
-    let first_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("first client key");
-    let second_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("second client key");
+    let first_key =
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("first client key");
+    let second_key =
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("second client key");
     let first_public_key = first_key
         .public_key()
         .to_openssh()

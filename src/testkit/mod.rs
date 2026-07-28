@@ -46,10 +46,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_ssh2_tokio::ServerCheckMethod;
-use rand_core::OsRng;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Session};
-use russh::{Channel, ChannelId, CryptoVec};
+use russh::{Channel, ChannelId};
 
 use crate::device::{DeviceCommandExecutionConfig, DeviceHandlerConfig, EXIT_STATUS_SUFFIX};
 use crate::error::ConnectError;
@@ -834,9 +833,11 @@ impl server::Handler for ScriptedHandler {
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
+        reply: server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -863,11 +864,7 @@ impl server::Handler for ScriptedHandler {
         session.channel_success(channel)?;
         session.data(
             channel,
-            CryptoVec::from(format!(
-                "{}\r\n{}",
-                self.spec.banner,
-                self.spec.prompt(&self.state)
-            )),
+            format!("{}\r\n{}", self.spec.banner, self.spec.prompt(&self.state)),
         )?;
         Ok(())
     }
@@ -886,7 +883,7 @@ impl server::Handler for ScriptedHandler {
             }
             match action {
                 LineAction::Reply(reply) => {
-                    session.data(channel, CryptoVec::from(reply))?;
+                    session.data(channel, reply)?;
                 }
                 LineAction::Disconnect => {
                     session.eof(channel)?;
@@ -947,9 +944,10 @@ impl FakeSshDevice {
             ConnectError::InternalServerError(format!("fake device local addr: {error}"))
         })?;
 
-        let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).map_err(|error| {
-            ConnectError::InternalServerError(format!("generate fake host key: {error}"))
-        })?;
+        let host_key =
+            PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).map_err(|error| {
+                ConnectError::InternalServerError(format!("generate fake host key: {error}"))
+            })?;
         let config = Arc::new(server::Config {
             keys: vec![host_key],
             auth_rejection_time: Duration::from_millis(10),

@@ -1,0 +1,4 @@
+[advisories]
+# Transitive through russh's RSA key support. RUSTSEC reports no fixed rsa
+# release; remove this exception when russh moves to a patched implementation.
+ignore = ["RUSTSEC-2023-0071"]
