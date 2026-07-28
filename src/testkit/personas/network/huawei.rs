@@ -12,6 +12,7 @@ pub(crate) fn huawei() -> Result<DevicePersona, ConnectError> {
         &[("enable", "<HUAWEI>"), ("config", "[HUAWEI]")],
     )
     .with_error_reply("Error: forced failure")
+    .with_challenge("save", "Are you sure to continue?[Y/N]: ", "y")
     .with_canned_reply(
         "display version",
         "Huawei Versatile Routing Platform Software\n\

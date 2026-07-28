@@ -86,6 +86,44 @@ pub async fn run_autodetect_scenario(template: &str) {
     }
 }
 
+/// Verifies that a built-in template answers a device-side confirmation
+/// challenge with its configured static response.
+pub async fn run_confirmation_scenario(
+    template: &str,
+    mode: &str,
+    command_text: &str,
+    expected_response: &str,
+) {
+    let persona = DevicePersona::builtin(template)
+        .unwrap_or_else(|error| panic!("[{template}] build persona: {error}"));
+    let name = persona.name.clone();
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] spawn virtual device: {error}"));
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request()
+                .unwrap_or_else(|error| panic!("[{name}] build request: {error}")),
+            command(mode, command_text),
+            device.execution_context(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] execute confirmation command: {error}"));
+    assert!(output.success, "[{name}] confirmation command failed");
+
+    let commands = device.received_commands();
+    let command_index = position_from(&commands, 0, command_text, &name);
+    let response_index = position_from(&commands, command_index + 1, expected_response, &name);
+    assert_eq!(
+        response_index,
+        command_index + 1,
+        "[{name}] confirmation response must immediately follow its command: {commands:?}"
+    );
+}
+
 /// Runs the full end-to-end scenario against the virtual device of one
 /// built-in template.
 ///

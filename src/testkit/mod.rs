@@ -499,6 +499,17 @@ impl ScriptedHandler {
         Some(line)
     }
 
+    /// Takes an exact response to a pending immediate challenge even when the
+    /// client correctly sends it without a line terminator.
+    fn take_pending_response(&mut self) -> Option<String> {
+        let pending = self.pending.as_ref()?;
+        if self.line_buffer == pending.response {
+            Some(std::mem::take(&mut self.line_buffer))
+        } else {
+            None
+        }
+    }
+
     /// Splits a shell exit-status wrapped line into its core command.
     fn unwrap_exit_status_command<'a>(&self, line: &'a str) -> (&'a str, bool) {
         if let Some(marker) = self.spec.exit_marker.as_deref()
@@ -763,7 +774,7 @@ impl server::Handler for ScriptedHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.line_buffer.push_str(&String::from_utf8_lossy(data));
-        while let Some(line) = self.take_line() {
+        while let Some(line) = self.take_line().or_else(|| self.take_pending_response()) {
             let action = self.handle_line(&line);
             if !self.spec.command_delay.is_zero() {
                 tokio::time::sleep(self.spec.command_delay).await;

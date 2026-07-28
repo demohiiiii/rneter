@@ -15,6 +15,7 @@ pub(crate) fn hillstone_stoneos() -> Result<DevicePersona, ConnectError> {
         &[("enable", "SG-6000#"), ("config", "SG-6000(config)#")],
     )
     .with_error_reply("testkit % forced failure")
+    .with_challenge("save", "Save configuration, are you sure? [y]/n: ", "y")
     .with_canned_reply(
         "show version",
         "Hillstone StoneOS software, Version 5.5R9\n\

@@ -53,9 +53,8 @@ section; nothing here is a commitment, and feedback via issues is welcome.
 
 ## Quality & Coverage Debt
 
-- [ ] Save-confirmation interactions (huawei / hillstone / juniper Y-N
-  input rules) are never exercised end-to-end; personas already support
-  non-transition challenges, only scenarios are missing.
+- [x] Save-confirmation interactions for Huawei, Hillstone, and Juniper are
+  exercised end-to-end against device-side Y/N challenges.
 - [ ] Pager (`more_regex`) handling has no E2E coverage; virtual devices
   could simulate paged output.
 - [x] `autodetect_and_connect_*` supports manager-owned connections; custom

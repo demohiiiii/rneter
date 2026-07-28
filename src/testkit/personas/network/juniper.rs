@@ -12,6 +12,11 @@ pub(crate) fn juniper_junos() -> Result<DevicePersona, ConnectError> {
         &[("enable", "admin@SRX>"), ("config", "admin@SRX#")],
     )
     .with_error_reply("syntax error, unexpected input")
+    .with_challenge(
+        "exit",
+        "Exit with uncommitted changes? [yes,no] (yes) ",
+        "yes",
+    )
     .with_canned_reply(
         "show version",
         "Hostname: SRX\n\
