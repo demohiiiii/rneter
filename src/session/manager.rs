@@ -34,6 +34,18 @@ struct OperationAttemptError {
     client: Option<Arc<RwLock<SharedSshClient>>>,
 }
 
+struct MaintenanceTaskGuard {
+    inner: std::sync::Weak<ConnectionPoolInner>,
+}
+
+impl Drop for MaintenanceTaskGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.maintenance_started.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 async fn invalidate_cache_client_if_current<T>(
     cache: &Cache<String, (mpsc::Sender<CmdJob>, Arc<T>)>,
     device_addr: &str,
@@ -84,38 +96,42 @@ impl SshConnectionManager {
             (config.idle_timeout / 4).clamp(Duration::from_secs(1), Duration::from_secs(60));
 
         Self {
-            cache,
-            maintenance_running: Arc::new(AtomicBool::new(false)),
-            maintenance_period,
+            inner: Arc::new(ConnectionPoolInner {
+                cache,
+                maintenance_started: AtomicBool::new(false),
+                maintenance_period,
+            }),
         }
     }
 
-    /// Starts the pool maintenance task if it is not already running.
+    /// Ensures one pool maintenance task is running for this shared pool.
     ///
     /// The moka future cache has no background threads: expired entries are
     /// only evicted while the cache is being used. This task keeps evictions
-    /// flowing during quiet periods so idle connections actually get closed,
-    /// and stops itself once the pool is empty (it is restarted on demand by
-    /// the next pool access).
+    /// flowing during quiet periods so idle connections actually get closed.
+    /// It holds only a weak pool reference, allowing the cache and its
+    /// connections to be released as soon as the last manager clone is dropped.
     fn spawn_maintenance_if_needed(&self) {
         if self
-            .maintenance_running
+            .inner
+            .maintenance_started
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
             return;
         }
-        let cache = self.cache.clone();
-        let running = self.maintenance_running.clone();
-        let period = self.maintenance_period;
+        let inner = Arc::downgrade(&self.inner);
+        let period = self.inner.maintenance_period;
         tokio::spawn(async move {
+            let _guard = MaintenanceTaskGuard {
+                inner: inner.clone(),
+            };
             loop {
                 tokio::time::sleep(period).await;
-                cache.run_pending_tasks().await;
-                if cache.entry_count() == 0 {
-                    running.store(false, Ordering::SeqCst);
+                let Some(inner) = inner.upgrade() else {
                     break;
-                }
+                };
+                inner.cache.run_pending_tasks().await;
             }
         });
     }
@@ -270,7 +286,7 @@ impl SshConnectionManager {
                     retries_used += 1;
                     if let Some(failed_client) = failed_client {
                         invalidate_cache_client_if_current(
-                            &self.cache,
+                            &self.inner.cache,
                             &device_addr,
                             &failed_client,
                         )
@@ -482,6 +498,7 @@ impl SshConnectionManager {
         // invalidate it, and create a fresh connection on the second pass.
         for _attempt in 0..2 {
             let entry = self
+                .inner
                 .cache
                 .entry(device_addr.clone())
                 .or_try_insert_with(Self::create_connection(
@@ -534,7 +551,7 @@ impl SshConnectionManager {
             );
             // Eviction drops the pool's sender; the old connection's worker
             // closes it once the last sender is gone.
-            self.cache.invalidate(&device_addr).await;
+            self.inner.cache.invalidate(&device_addr).await;
         }
 
         Err(ConnectError::InternalServerError(format!(

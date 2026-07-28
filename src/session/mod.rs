@@ -1041,6 +1041,14 @@ impl Default for ConnectionPoolConfig {
     }
 }
 
+struct ConnectionPoolInner {
+    cache: Cache<String, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
+    /// Whether the pool maintenance task has been started.
+    maintenance_started: AtomicBool,
+    /// Interval between pending-task maintenance runs.
+    maintenance_period: Duration,
+}
+
 /// SSH connection pool manager.
 ///
 /// Manages a cache of SSH connections with automatic reconnection and
@@ -1049,11 +1057,7 @@ impl Default for ConnectionPoolConfig {
 /// the pool evicted its handle and no caller still holds one.
 #[derive(Clone)]
 pub struct SshConnectionManager {
-    cache: Cache<String, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
-    /// Whether the self-stopping pool maintenance task is currently running.
-    maintenance_running: Arc<AtomicBool>,
-    /// Interval between pending-task maintenance runs.
-    maintenance_period: Duration,
+    inner: Arc<ConnectionPoolInner>,
 }
 
 mod client;

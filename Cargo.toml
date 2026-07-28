@@ -25,6 +25,8 @@ all-features = true
 russh = { version = "0.55.0", features = ["des", "dsa"] }
 rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 async-ssh2-tokio = { version = "0.12.2" }
+# async-ssh2-tokio 0.12.2 uses APIs removed in russh-sftp 2.2 and later.
+russh-sftp = "=2.1.1"
 tokio = { version = "1", features = ["fs", "rt-multi-thread"] }
 moka = { version = "0.12.13", features = ["future"] }
 once_cell = "1.21.3"

@@ -7,14 +7,16 @@
 //! transaction rollback.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rneter::device::{DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use rneter::session::{
-    Command, RollbackPolicy, SessionEvent, SessionRecordLevel, SessionRecorder, SessionReplayer,
-    SshConnectionManager, TxBlock, TxStep,
+    Command, ConnectionPoolConfig, RollbackPolicy, SessionEvent, SessionRecordLevel,
+    SessionRecorder, SessionReplayer, SshConnectionManager, TxBlock, TxStep,
 };
-use rneter::testkit::{DEFAULT_ENABLE_PASSWORD, DevicePersona, ERROR_COMMAND, FakeSshDevice};
+use rneter::testkit::{
+    DEFAULT_ENABLE_PASSWORD, DevicePersona, ERROR_COMMAND, FakeSshDevice, FaultInjection,
+};
 
 struct TempKeyFile {
     path: PathBuf,
@@ -94,6 +96,79 @@ fn command(mode: &str, text: &str) -> Command {
         timeout: Some(10),
         ..Command::default()
     }
+}
+
+async fn wait_for_command(device: &FakeSshDevice, expected: &str, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if device
+            .received_commands()
+            .iter()
+            .any(|command| command == expected)
+        {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn slow_connection_is_still_evicted_after_idle_timeout() {
+    let device = FakeSshDevice::spawn(
+        custom_persona()
+            .with_faults(FaultInjection::new().with_auth_delay(Duration::from_millis(1_200))),
+    )
+    .await
+    .expect("spawn slow-auth fake device");
+    let manager = SshConnectionManager::with_pool_config(ConnectionPoolConfig {
+        max_connections: 2,
+        idle_timeout: Duration::from_millis(400),
+    });
+
+    manager
+        .execute_command_with_context(
+            device.connection_request().expect("request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("command after slow connection");
+
+    assert!(
+        wait_for_command(&device, "exit", Duration::from_secs(2)).await,
+        "idle connection was not evicted after a slow connection attempt: {:?}",
+        device.received_commands()
+    );
+}
+
+#[tokio::test]
+async fn dropping_last_manager_closes_its_connections() {
+    let device = FakeSshDevice::spawn(custom_persona())
+        .await
+        .expect("spawn fake device");
+    let manager = SshConnectionManager::with_pool_config(ConnectionPoolConfig {
+        max_connections: 2,
+        idle_timeout: Duration::from_secs(30),
+    });
+
+    manager
+        .execute_command_with_context(
+            device.connection_request().expect("request"),
+            command("Enable", "show version"),
+            device.execution_context(),
+        )
+        .await
+        .expect("command before manager drop");
+    drop(manager);
+
+    assert!(
+        wait_for_command(&device, "exit", Duration::from_secs(1)).await,
+        "dropping the last manager left its connection open: {:?}",
+        device.received_commands()
+    );
 }
 
 #[tokio::test]
