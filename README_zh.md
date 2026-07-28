@@ -1021,6 +1021,7 @@ async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>
 
 - `DevicePersona::builtin(name)`——全部内置模板的现成 persona，模仿真实设备：主机名风格的提示符（`Router#`、`<HUAWEI>`、`FGT60F #` 等）、厂商版本命令的真实回显（`show version`、`display version`、`get system status` 等）、enable/sudo 密码质询，以及厂商风格的错误输出（发送 `testkit::ERROR_COMMAND` 触发）。
 - `DevicePersona::with_canned_reply(command, output)`——为任意 persona 追加更多真实命令回显。
+- `DevicePersona::with_paged_reply(command, pager, pages)`——模拟每一页都需要发送空格后才继续并最终返回设备提示符的命令。
 - `DevicePersona::for_config(...)`——模拟自定义 `DeviceHandlerConfig`，可通过 builder 方法追加质询和错误文案。
 - `DevicePersona::with_faults(FaultInjection::new()...)`——注入认证或命令延迟、拒绝前 N 次有效认证，或在指定命令到达时断开连接。故障次数预算在重连后仍然共享。
 - `FakeSshDevice::received_commands()`——设备侧命令日志，适合断言状态转换顺序与事务回滚顺序。
@@ -1042,6 +1043,7 @@ async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>
 
 - **状态机转换**：收到模板转换命令（`enable`、`system-view`、`configure terminal` 等）时按状态机切换提示符；需要密码的转换会先发出质询（`Password:`、`[sudo] password for admin:` 等），并校验应答。
 - **仿真命令**：命中 persona 内置（或 `with_canned_reply` 追加）的命令时，返回厂商真实格式的多行回显。
+- **分页命令**：通过 `with_paged_reply` 添加的命令会在各页之间输出指定 pager 标记，并等待空格后继续。
 - **未知命令**：返回 `benign_reply`（默认 `testkit-ok sample output`），判定为执行成功——上层测试可以放心发送任意配置命令。
 - **`make-error`**（`testkit::ERROR_COMMAND`）：返回该厂商风格的错误文案（linux 为退出码 1），用于测试错误检测与事务回滚路径。
 - **故障注入**：`FaultInjection` 可确定性地延迟认证或命令响应、拒绝指定次数的有效认证，并在收到精确匹配的命令时关闭 shell channel。计数器属于设备级状态，因此重连不会重置预算。

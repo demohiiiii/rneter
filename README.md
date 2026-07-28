@@ -1062,6 +1062,8 @@ Useful entry points:
   (triggered by sending `testkit::ERROR_COMMAND`).
 - `DevicePersona::with_canned_reply(command, output)` — add more realistic
   command replies to any persona.
+- `DevicePersona::with_paged_reply(command, pager, pages)` — simulate a
+  command that requires one space per page before returning the device prompt.
 - `DevicePersona::for_config(...)` — simulate a custom
   `DeviceHandlerConfig`; add challenges and error text with the builder
   methods.
@@ -1096,6 +1098,8 @@ All of these are public persona fields and can be overridden.
   response.
 - **Simulated commands**: commands known to the persona (built-in or added
   via `with_canned_reply`) return realistic multi-line vendor output.
+- **Paged commands**: replies added with `with_paged_reply` emit the configured
+  pager marker between pages and require a space before continuing.
 - **Unknown commands**: return `benign_reply`
   (default `testkit-ok sample output`) and count as successful, so tests
   can send arbitrary configuration commands.

@@ -124,6 +124,66 @@ pub async fn run_confirmation_scenario(
     );
 }
 
+/// Verifies that a template advances through every page and returns one
+/// cleaned output without leaking pager prompts.
+pub async fn run_pager_scenario(
+    template: &str,
+    mode: &str,
+    command_text: &str,
+    pager_prompt: &str,
+) {
+    let pages = [
+        "page-one unique output",
+        "page-two unique output",
+        "page-three unique output",
+    ];
+    let persona = DevicePersona::builtin(template)
+        .unwrap_or_else(|error| panic!("[{template}] build persona: {error}"))
+        .with_paged_reply(command_text, pager_prompt, pages);
+    let name = persona.name.clone();
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] spawn virtual device: {error}"));
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device
+                .connection_request()
+                .unwrap_or_else(|error| panic!("[{name}] build request: {error}")),
+            command(mode, command_text),
+            device.execution_context(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{name}] execute paged command: {error}"));
+    assert!(output.success, "[{name}] paged command failed");
+    assert!(
+        !output.content.contains(pager_prompt),
+        "[{name}] cleaned output leaked pager prompt: {}",
+        output.content
+    );
+
+    let mut previous_position = 0;
+    for page in pages {
+        let position = output.content[previous_position..]
+            .find(page)
+            .map(|offset| previous_position + offset)
+            .unwrap_or_else(|| panic!("[{name}] output is missing {page:?}: {}", output.content));
+        previous_position = position + page.len();
+    }
+
+    let commands = device.received_commands();
+    let command_index = position_from(&commands, 0, command_text, &name);
+    assert_eq!(
+        commands[command_index + 1..]
+            .iter()
+            .filter(|command| command.as_str() == " ")
+            .count(),
+        pages.len() - 1,
+        "[{name}] must send one space per page boundary: {commands:?}"
+    );
+}
+
 /// Runs the full end-to-end scenario against the virtual device of one
 /// built-in template.
 ///

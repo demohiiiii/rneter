@@ -13,7 +13,7 @@
 //! [`DeviceHandlerConfig`] the client template uses, so template changes can
 //! never silently diverge from the simulation. A [`DevicePersona`] supplies
 //! only what a regex cannot: concrete prompt strings, interactive challenges
-//! (enable/sudo passwords), and vendor-styled error text.
+//! (enable/sudo passwords), paged replies, and vendor-styled error text.
 //!
 //! ```no_run
 //! use rneter::session::{Command, ExecutionContext, SshConnectionManager};
@@ -79,6 +79,17 @@ pub struct PersonaChallenge {
     pub prompt: String,
     /// Response the device expects (without newline).
     pub response: String,
+}
+
+/// Multi-page output a fake device returns for one exact command.
+#[derive(Debug, Clone)]
+pub struct PersonaPagedReply {
+    /// Command that produces the paged output.
+    pub command: String,
+    /// Pager marker displayed between pages, without a trailing newline.
+    pub pager_prompt: String,
+    /// Output pages in delivery order. At least two pages are required.
+    pub pages: Vec<String>,
 }
 
 /// Deterministic failures and delays injected by a fake device.
@@ -154,6 +165,8 @@ pub struct DevicePersona {
     /// Realistic command replies: exact command text to the multi-line
     /// output the real device would print (e.g. `show version`).
     pub canned_replies: Vec<(String, String)>,
+    /// Multi-page replies keyed by exact command text.
+    pub paged_replies: Vec<PersonaPagedReply>,
     /// Login username the device accepts.
     pub username: String,
     /// Login password the device accepts.
@@ -192,6 +205,7 @@ impl DevicePersona {
             error_reply: "ERROR: forced failure".to_string(),
             benign_reply: "testkit-ok sample output".to_string(),
             canned_replies: Vec::new(),
+            paged_replies: Vec::new(),
             username: DEFAULT_USERNAME.to_string(),
             password: DEFAULT_PASSWORD.to_string(),
             enable_password: None,
@@ -209,6 +223,28 @@ impl DevicePersona {
         output: impl Into<String>,
     ) -> Self {
         self.canned_replies.push((command.into(), output.into()));
+        self
+    }
+
+    /// Adds a multi-page reply for one exact command.
+    ///
+    /// The pager prompt must match this persona's `more_regex`; spawning the
+    /// device rejects mismatches and replies with fewer than two pages.
+    pub fn with_paged_reply<I, S>(
+        mut self,
+        command: impl Into<String>,
+        pager_prompt: impl Into<String>,
+        pages: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.paged_replies.push(PersonaPagedReply {
+            command: command.into(),
+            pager_prompt: pager_prompt.into(),
+            pages: pages.into_iter().map(Into::into).collect(),
+        });
         self
     }
 
@@ -334,6 +370,8 @@ struct EngineSpec {
     benign_reply: String,
     /// Realistic replies for exact commands (e.g. `show version`).
     canned: HashMap<String, String>,
+    /// Multi-page replies for exact commands.
+    paged: HashMap<String, PersonaPagedReply>,
     username: String,
     password: String,
     /// Parsed authorized public keys for public-key authentication.
@@ -387,6 +425,12 @@ impl EngineSpec {
             error_reply: persona.error_reply.clone(),
             benign_reply: persona.benign_reply.clone(),
             canned: persona.canned_replies.iter().cloned().collect(),
+            paged: persona
+                .paged_replies
+                .iter()
+                .cloned()
+                .map(|reply| (reply.command.clone(), reply))
+                .collect(),
             username: persona.username.clone(),
             password: persona.password.clone(),
             authorized_public_keys,
@@ -443,6 +487,14 @@ struct PendingChallenge {
     target_state: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingPager {
+    pager_prompt: String,
+    pages: Vec<String>,
+    next_page: usize,
+    wants_marker: bool,
+}
+
 enum LineAction {
     Reply(String),
     Disconnect,
@@ -454,6 +506,7 @@ struct ScriptedHandler {
     log: Arc<Mutex<Vec<String>>>,
     state: String,
     pending: Option<PendingChallenge>,
+    pending_pager: Option<PendingPager>,
     line_buffer: String,
     /// Set after a `\r`-terminated line so a following `\n` (from a `\r\n`
     /// pair split across packets) is not treated as an extra empty command.
@@ -468,6 +521,7 @@ impl ScriptedHandler {
             log,
             state,
             pending: None,
+            pending_pager: None,
             line_buffer: String::new(),
             skip_leading_lf: false,
         }
@@ -499,11 +553,15 @@ impl ScriptedHandler {
         Some(line)
     }
 
-    /// Takes an exact response to a pending immediate challenge even when the
+    /// Takes exact input for a pending challenge or pager even when the
     /// client correctly sends it without a line terminator.
-    fn take_pending_response(&mut self) -> Option<String> {
-        let pending = self.pending.as_ref()?;
-        if self.line_buffer == pending.response {
+    fn take_pending_input(&mut self) -> Option<String> {
+        let expected = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.response.as_str())
+            .or_else(|| self.pending_pager.as_ref().map(|_| " "))?;
+        if self.line_buffer == expected {
             Some(std::mem::take(&mut self.line_buffer))
         } else {
             None
@@ -526,6 +584,38 @@ impl ScriptedHandler {
         format!("{marker}{code}{EXIT_STATUS_SUFFIX}\r\n")
     }
 
+    fn handle_pager_response(&mut self, response: &str) -> LineAction {
+        let mut pager = self
+            .pending_pager
+            .take()
+            .expect("pager response requires pending state");
+        if response != " " {
+            return LineAction::Reply(format!(
+                "\r\n{}\r\n{}",
+                self.spec.error_reply,
+                self.spec.prompt(&self.state)
+            ));
+        }
+
+        let body = pager.pages[pager.next_page].replace('\n', "\r\n");
+        pager.next_page += 1;
+        if pager.next_page < pager.pages.len() {
+            let pager_prompt = pager.pager_prompt.clone();
+            self.pending_pager = Some(pager);
+            LineAction::Reply(format!("\r\n{body}\r\n{pager_prompt}"))
+        } else {
+            let marker = if pager.wants_marker {
+                self.marker_line(0)
+            } else {
+                String::new()
+            };
+            LineAction::Reply(format!(
+                "\r\n{body}\r\n{marker}{}",
+                self.spec.prompt(&self.state)
+            ))
+        }
+    }
+
     /// Processes one received line and returns the device action.
     fn handle_line(&mut self, raw_line: &str) -> LineAction {
         let line = raw_line.trim_end_matches(['\r', '\n']);
@@ -538,6 +628,10 @@ impl ScriptedHandler {
 
         if self.spec.should_disconnect_command(&core) {
             return LineAction::Disconnect;
+        }
+
+        if self.pending_pager.is_some() {
+            return self.handle_pager_response(&core);
         }
 
         if let Some(pending) = self.pending.take() {
@@ -601,6 +695,17 @@ impl ScriptedHandler {
                 self.spec.error_reply,
                 self.spec.prompt(&self.state)
             ));
+        }
+
+        if let Some(reply) = self.spec.paged.get(&core).cloned() {
+            let body = reply.pages[0].replace('\n', "\r\n");
+            self.pending_pager = Some(PendingPager {
+                pager_prompt: reply.pager_prompt.clone(),
+                pages: reply.pages,
+                next_page: 1,
+                wants_marker,
+            });
+            return LineAction::Reply(format!("{echo}{body}\r\n{}", reply.pager_prompt));
         }
 
         // Realistic vendor output for known commands (e.g. `show version`).
@@ -774,7 +879,7 @@ impl server::Handler for ScriptedHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.line_buffer.push_str(&String::from_utf8_lossy(data));
-        while let Some(line) = self.take_line().or_else(|| self.take_pending_response()) {
+        while let Some(line) = self.take_line().or_else(|| self.take_pending_input()) {
             let action = self.handle_line(&line);
             if !self.spec.command_delay.is_zero() {
                 tokio::time::sleep(self.spec.command_delay).await;
@@ -890,6 +995,24 @@ impl FakeSshDevice {
                 return Err(ConnectError::InvalidDeviceHandlerConfig(format!(
                     "persona '{}': prompt state '{state}' has no concrete prompt",
                     persona.name
+                )));
+            }
+        }
+        for reply in &persona.paged_replies {
+            if reply.command.is_empty() || reply.pages.len() < 2 {
+                return Err(ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "persona '{}': paged reply '{}' requires a command and at least two pages",
+                    persona.name, reply.command
+                )));
+            }
+            let mut handler = persona.config.build()?;
+            if !matches!(
+                handler.read_need_write(&reply.pager_prompt),
+                Some((response, false)) if response == " "
+            ) {
+                return Err(ConnectError::InvalidDeviceHandlerConfig(format!(
+                    "persona '{}': pager prompt '{}' does not match its more_regex",
+                    persona.name, reply.pager_prompt
                 )));
             }
         }

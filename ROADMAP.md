@@ -55,8 +55,8 @@ section; nothing here is a commitment, and feedback via issues is welcome.
 
 - [x] Save-confirmation interactions for Huawei, Hillstone, and Juniper are
   exercised end-to-end against device-side Y/N challenges.
-- [ ] Pager (`more_regex`) handling has no E2E coverage; virtual devices
-  could simulate paged output.
+- [x] Pager (`more_regex`) handling is covered end-to-end with virtual-device
+  multi-page output and continuation-input assertions.
 - [x] `autodetect_and_connect_*` supports manager-owned connections; custom
   managers retain the detected connection in their own pool, while the free
   functions remain global-manager shortcuts.
