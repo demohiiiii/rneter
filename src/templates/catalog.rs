@@ -12,6 +12,7 @@ pub const BUILTIN_TEMPLATES: &[&str] = &[
     "hp_comware",
     "hillstone_stoneos",
     "juniper_junos",
+    "leadsec_powerv",
     "array",
     "linux",
     "arista_eos",
@@ -43,6 +44,7 @@ pub(crate) fn canonical_template_name(name: &str) -> Option<&'static str> {
         "hp_comware" => Some("hp_comware"),
         "hillstone" | "hillstone_stoneos" => Some("hillstone_stoneos"),
         "juniper" | "juniper_junos" => Some("juniper_junos"),
+        "leadsec" | "leadsec_power" | "leadsec_powerv" => Some("leadsec_powerv"),
         "array" => Some("array"),
         "linux" => Some("linux"),
         "arista" | "arista_eos" => Some("arista_eos"),
@@ -425,6 +427,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             capabilities: vec![
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
             ],
             detect_profile: Some(h3c_comware_detect_profile()),
         },
@@ -436,6 +439,7 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             capabilities: vec![
                 TemplateCapability::EnableMode,
                 TemplateCapability::ConfigMode,
+                TemplateCapability::InteractiveInput,
             ],
             detect_profile: Some(hp_comware_detect_profile()),
         },
@@ -462,6 +466,14 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
                 TemplateCapability::InteractiveInput,
             ],
             detect_profile: Some(juniper_detect_profile()),
+        },
+        "leadsec_powerv" => TemplateMetadata {
+            name: "leadsec_powerv".to_string(),
+            vendor: "LeadSec".to_string(),
+            family: "PowerV".to_string(),
+            template_version: "1.0.0".to_string(),
+            capabilities: vec![TemplateCapability::LoginMode],
+            detect_profile: None,
         },
         "array" => TemplateMetadata {
             name: "array".to_string(),
@@ -559,7 +571,10 @@ pub(crate) fn metadata_for(name: &str) -> Option<TemplateMetadata> {
             vendor: "Fortinet".to_string(),
             family: "FortiGate".to_string(),
             template_version: "1.0.0".to_string(),
-            capabilities: vec![TemplateCapability::EnableMode],
+            capabilities: vec![
+                TemplateCapability::EnableMode,
+                TemplateCapability::SysContext,
+            ],
             detect_profile: Some(fortinet_detect_profile()),
         },
         "paloalto_panos" => TemplateMetadata {

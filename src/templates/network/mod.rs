@@ -17,6 +17,7 @@ mod h3c;
 mod hillstone;
 mod huawei;
 mod juniper;
+mod leadsec;
 mod maipu;
 mod paloalto;
 mod qianxin;
@@ -55,6 +56,8 @@ pub use huawei::huawei;
 pub use huawei::huawei_config;
 pub use juniper::juniper;
 pub use juniper::juniper_config;
+pub use leadsec::leadsec;
+pub use leadsec::leadsec_config;
 pub use maipu::maipu;
 pub use maipu::maipu_config;
 pub use paloalto::paloalto;
@@ -266,7 +269,10 @@ mod tests {
                 config_builder: fortinet_config,
                 expected_states: &["enable", "vdomenable"],
                 expected_prompt_order: &["Enable"],
-                expected_capabilities: &[TemplateCapability::EnableMode],
+                expected_capabilities: &[
+                    TemplateCapability::EnableMode,
+                    TemplateCapability::SysContext,
+                ],
             },
             NetworkTemplateCase {
                 name: "h3c_comware",
@@ -277,6 +283,7 @@ mod tests {
                 expected_capabilities: &[
                     TemplateCapability::EnableMode,
                     TemplateCapability::ConfigMode,
+                    TemplateCapability::InteractiveInput,
                 ],
             },
             NetworkTemplateCase {
@@ -314,6 +321,14 @@ mod tests {
                     TemplateCapability::ConfigMode,
                     TemplateCapability::InteractiveInput,
                 ],
+            },
+            NetworkTemplateCase {
+                name: "leadsec_powerv",
+                builder: leadsec,
+                config_builder: leadsec_config,
+                expected_states: &["login"],
+                expected_prompt_order: &["Login"],
+                expected_capabilities: &[TemplateCapability::LoginMode],
             },
             NetworkTemplateCase {
                 name: "maipu",
@@ -538,6 +553,42 @@ mod tests {
                     "template: {name}, prompt: {prompt:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn netdriver_prompt_compatibility_regressions_keep_vendor_specific_modes() {
+        let mut array = array().expect("create Array handler");
+        for (prompt, state, sys) in [
+            ("AN#", "enable", None),
+            ("vs1$", "vsiteenable", Some("vs1")),
+            ("vs1(config)$", "vsiteconfig", Some("vs1")),
+        ] {
+            array.read(prompt);
+            assert_eq!(array.current_state(), state, "Array prompt: {prompt:?}");
+            assert_eq!(array.current_sys(), sys, "Array prompt: {prompt:?}");
+        }
+
+        let mut topsec = topsec().expect("create TopSec handler");
+        for prompt in ["TopsecOS#", "TopsecOS%"] {
+            assert!(
+                topsec.read_prompt(prompt),
+                "TopSec prompt should match: {prompt:?}"
+            );
+        }
+
+        let mut qianxin = qianxin().expect("create QiAnXin handler");
+        for prompt in [
+            "QiAnXin-config]",
+            "QiAnXin-config-policy-security]",
+            "QiAnXin-config-object-address-group]",
+        ] {
+            qianxin.read(prompt);
+            assert_eq!(
+                qianxin.current_state(),
+                "config",
+                "QiAnXin prompt: {prompt:?}"
+            );
         }
     }
 

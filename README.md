@@ -1131,6 +1131,7 @@ All of these are public persona fields and can be overridden.
 | `fortinet` | `FGT60F #` | `get system status` · `show system interface` · `get system performance status` |
 | `paloalto_panos` | `admin@PA-3220>` `admin@PA-3220#` | `show system info` · `show config running` · `show interface all` |
 | `checkpoint_gaia` | `gw-13800b>` | `show version all` · `show configuration` · `show interfaces all` |
+| `leadsec_powerv` | `PowerV>` | `show version` |
 | `huawei` | `<HUAWEI>` `[HUAWEI]` | `display version` · `display current-configuration` · `display interface brief` |
 | `h3c_comware` / `hp_comware` | `<H3C>` `[H3C]` | `display version` · `display current-configuration` · `display interface brief` |
 | `hillstone_stoneos` | `SG-6000#` `SG-6000(config)#` | `show version` · `show configuration` · `show interface` |
@@ -1155,7 +1156,7 @@ cargo run --example virtual_device --features testkit -- --list
 # Run one virtual device on a fixed port
 cargo run --example virtual_device --features testkit -- cisco_ios 2201
 
-# Run a fleet: one virtual device per built-in template (ports 2200..2224)
+# Run a fleet: one virtual device per built-in template (ports 2200..2225)
 cargo run --example virtual_device --features testkit -- --all 2200
 
 # Run a self-defined device type (custom prompts/transitions/errors)
@@ -1596,6 +1597,7 @@ The library is designed to work with any SSH-enabled network device and Linux se
 | `fortinet`    | Fortinet FortiGate        | `Enable`, vdom modes                     | Basic FortiGate / VDOM-oriented state model                                   |
 | `paloalto`    | Palo Alto Networks PAN-OS | `Enable`, `Config`                       | Operational and config prompts                                                |
 | `checkpoint`  | Check Point Gaia          | `Enable`                                 | Read/operational template                                                     |
+| `leadsec`     | LeadSec PowerV            | `Login`                                  | Alphanumeric PowerV operational prompt                                        |
 | `topsec`      | Topsec NGFW               | `Enable`                                 | Basic operational template                                                    |
 | `venustech`   | Venustech USG             | `Login`, `Enable`, `Config`              | Cisco-like firewall template                                                  |
 | `dptech`      | DPTech firewall           | `Enable`, `Config`                       | H3C-like prompt style                                                         |

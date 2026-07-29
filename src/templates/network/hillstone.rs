@@ -32,6 +32,8 @@ pub fn hillstone_config() -> DeviceHandlerConfig {
         error_regex: vec![
             r".+\^.+".to_string(),
             r".+%.+".to_string(),
+            r"Error:.+".to_string(),
+            r"错误：.+".to_string(),
             r".+doesn't exist.+".to_string(),
             r".+does not exist.+".to_string(),
             r"Object group with given name exists with different type.".to_string(),
@@ -70,5 +72,26 @@ mod tests {
         let config = hillstone_config();
         assert_eq!(config.hooks.after_connect.len(), 1);
         assert_eq!(config.hooks.after_connect[0].name, "disable-paging");
+    }
+
+    #[test]
+    fn netdriver_error_samples_are_detected() {
+        for output in [
+            "\n           ^-----unrecognized keyword aa",
+            "Error: Address as is not found",
+            "Error: This name is used by another policy rule",
+            "Error: Rule 9 is not found in this context",
+            "Error: Maximum is smaller than minimum",
+            "Error: This address entry is used by policy \"5\" and cannot be deleted",
+            "Error: Service entity UDP-232 is used by Policy rule id 5",
+            "Error:Start time is greater than end time!",
+            "Error: Schedule Schedule_e796e021750334cb is in use by Policy id 5",
+            "         ^-----无法识别的关键字: skdjf",
+            "错误：此名称已经被其他的策略规则使用",
+        ] {
+            let mut handler = hillstone().expect("create Hillstone handler");
+            handler.read(output);
+            assert!(handler.error(), "output should be an error: {output:?}");
+        }
     }
 }

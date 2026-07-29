@@ -37,6 +37,7 @@ pub(super) fn builtin(template: &str) -> Result<DevicePersona, ConnectError> {
         "hp_comware" => network::h3c::hp_comware(),
         "hillstone_stoneos" => network::hillstone::hillstone_stoneos(),
         "juniper_junos" => network::juniper::juniper_junos(),
+        "leadsec_powerv" => network::leadsec::leadsec_powerv(),
         "paloalto_panos" => network::paloalto::paloalto_panos(),
         "fortinet" => network::fortinet::fortinet(),
         "checkpoint_gaia" => network::checkpoint::checkpoint_gaia(),

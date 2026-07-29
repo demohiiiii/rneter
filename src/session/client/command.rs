@@ -40,6 +40,24 @@ fn flush_pending_prompt_lines(
     }
 }
 
+fn observe_prior_terminal_fragments(
+    handler: &mut DeviceHandler,
+    buffer: &str,
+    is_error: &mut bool,
+) {
+    let fragments: Vec<_> = buffer
+        .split(['\n', '\r'])
+        .filter(|fragment| !fragment.is_empty())
+        .collect();
+
+    for fragment in fragments.iter().take(fragments.len().saturating_sub(1)) {
+        handler.read(fragment.trim_end());
+        if handler.error() {
+            *is_error = true;
+        }
+    }
+}
+
 fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -780,6 +798,7 @@ impl SharedSshClient {
                         merge_terminal_prompt_fragments(&pending_prompt_lines, Some(&line_buffer))
                         && handler.read_prompt(&prompt_candidate)
                     {
+                        observe_prior_terminal_fragments(handler, &line_buffer, &mut is_error);
                         handler.read(&prompt_candidate);
                         let matched_prompt = handler
                             .current_prompt()
@@ -832,6 +851,7 @@ impl SharedSshClient {
                                 &mut clean_output,
                                 &mut is_error,
                             );
+                            observe_prior_terminal_fragments(handler, &line_buffer, &mut is_error);
                             handler.read(&line_buffer);
                             let matched_prompt =
                                 handler.current_prompt().unwrap_or(&line_buffer).to_string();
@@ -1172,6 +1192,21 @@ mod tests {
             interaction.read_need_write(prompt),
             Some(("secret\n".to_string(), false))
         );
+    }
+
+    #[test]
+    fn prior_carriage_return_fragment_marks_command_as_failed_before_prompt() {
+        let mut handler = crate::templates::cisco().expect("create Cisco handler");
+        let mut is_error = false;
+
+        observe_prior_terminal_fragments(
+            &mut handler,
+            "Password: \r% Access denied\rRouter>",
+            &mut is_error,
+        );
+
+        assert!(is_error);
+        assert!(handler.error());
     }
 
     #[test]

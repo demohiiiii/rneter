@@ -1064,6 +1064,7 @@ async fn my_automation_works_on_cisco() -> Result<(), Box<dyn std::error::Error>
 | `fortinet` | `FGT60F #` | `get system status` · `show system interface` · `get system performance status` |
 | `paloalto_panos` | `admin@PA-3220>` `admin@PA-3220#` | `show system info` · `show config running` · `show interface all` |
 | `checkpoint_gaia` | `gw-13800b>` | `show version all` · `show configuration` · `show interfaces all` |
+| `leadsec_powerv` | `PowerV>` | `show version` |
 | `huawei` | `<HUAWEI>` `[HUAWEI]` | `display version` · `display current-configuration` · `display interface brief` |
 | `h3c_comware` / `hp_comware` | `<H3C>` `[H3C]` | `display version` · `display current-configuration` · `display interface brief` |
 | `hillstone_stoneos` | `SG-6000#` `SG-6000(config)#` | `show version` · `show configuration` · `show interface` |
@@ -1087,7 +1088,7 @@ cargo run --example virtual_device --features testkit -- --list
 # 在固定端口运行一台虚拟设备
 cargo run --example virtual_device --features testkit -- cisco_ios 2201
 
-# 运行舰队：每个内置模板一台（端口 2200..2224）
+# 运行舰队：每个内置模板一台（端口 2200..2225）
 cargo run --example virtual_device --features testkit -- --all 2200
 
 # 运行自定义设备类型（自定义提示符/转换/错误风格）
@@ -1525,6 +1526,7 @@ let report = autodetect_with_builtin_and_templates_and_context(
 | `fortinet`    | Fortinet FortiGate        | `Enable`、vdom 模式                     | 基础 FortiGate / VDOM 状态模型                      |
 | `paloalto`    | Palo Alto Networks PAN-OS | `Enable`、`Config`                      | Operational 和 config prompt                        |
 | `checkpoint`  | Check Point Gaia          | `Enable`                                | 只读/操作类模板                                     |
+| `leadsec`     | LeadSec PowerV            | `Login`                                 | 字母数字组成的 PowerV 操作提示符                    |
 | `topsec`      | Topsec NGFW               | `Enable`                                | 基础操作类模板                                      |
 | `venustech`   | 启明星辰 Venustech USG    | `Login`、`Enable`、`Config`             | Cisco-like 防火墙模板                               |
 | `dptech`      | 迪普 DPTech 防火墙        | `Enable`、`Config`                      | H3C-like prompt 风格                                |

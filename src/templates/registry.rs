@@ -7,8 +7,8 @@ use super::linux::linux_handler_config;
 use super::network::{
     arista_config, array_config, aruba_aoscx_config, chaitin_config, checkpoint_config,
     cisco_asa_config, cisco_config, cisco_nxos_config, dell_os10_config, dptech_config,
-    fortinet_config, h3c_config, hillstone_config, huawei_config, juniper_config, maipu_config,
-    paloalto_config, qianxin_config, ruijie_config, topsec_config, venustech_config,
+    fortinet_config, h3c_config, hillstone_config, huawei_config, juniper_config, leadsec_config,
+    maipu_config, paloalto_config, qianxin_config, ruijie_config, topsec_config, venustech_config,
     zte_zxros_config,
 };
 
@@ -25,6 +25,7 @@ pub fn by_name_config(name: &str) -> Result<DeviceHandlerConfig, ConnectError> {
         Some("h3c_comware" | "hp_comware") => Ok(h3c_config()),
         Some("hillstone_stoneos") => Ok(hillstone_config()),
         Some("juniper_junos") => Ok(juniper_config()),
+        Some("leadsec_powerv") => Ok(leadsec_config()),
         Some("array") => Ok(array_config()),
         Some("linux") => Ok(linux_handler_config()),
         Some("arista_eos") => Ok(arista_config()),

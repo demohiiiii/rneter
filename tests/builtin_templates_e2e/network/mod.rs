@@ -16,6 +16,7 @@ mod h3c;
 mod hillstone;
 mod huawei;
 mod juniper;
+mod leadsec;
 mod maipu;
 mod paloalto;
 mod qianxin;

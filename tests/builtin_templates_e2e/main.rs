@@ -28,6 +28,7 @@ const COVERED_TEMPLATES: &[&str] = &[
     "hp_comware",
     "hillstone_stoneos",
     "juniper_junos",
+    "leadsec_powerv",
     "array",
     "linux",
     "arista_eos",

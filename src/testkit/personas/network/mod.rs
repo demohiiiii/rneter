@@ -16,6 +16,7 @@ pub(crate) mod h3c;
 pub(crate) mod hillstone;
 pub(crate) mod huawei;
 pub(crate) mod juniper;
+pub(crate) mod leadsec;
 pub(crate) mod maipu;
 pub(crate) mod paloalto;
 pub(crate) mod qianxin;

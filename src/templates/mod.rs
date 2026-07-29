@@ -36,9 +36,9 @@ pub use network::{
     chaitin_config, checkpoint, checkpoint_config, cisco, cisco_asa, cisco_asa_config,
     cisco_config, cisco_nxos, cisco_nxos_config, dell_os10, dell_os10_config, dptech,
     dptech_config, fortinet, fortinet_config, h3c, h3c_config, hillstone, hillstone_config, huawei,
-    huawei_config, juniper, juniper_config, maipu, maipu_config, paloalto, paloalto_config,
-    qianxin, qianxin_config, ruijie, ruijie_config, topsec, topsec_config, venustech,
-    venustech_config, zte_zxros, zte_zxros_config,
+    huawei_config, juniper, juniper_config, leadsec, leadsec_config, maipu, maipu_config, paloalto,
+    paloalto_config, qianxin, qianxin_config, ruijie, ruijie_config, topsec, topsec_config,
+    venustech, venustech_config, zte_zxros, zte_zxros_config,
 };
 pub use registry::{
     available_detect_profiles, by_name, by_name_config, detect_profile_by_name,
