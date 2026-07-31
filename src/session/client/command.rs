@@ -1051,11 +1051,16 @@ impl SharedSshClient {
     ) -> Result<Output, ConnectError> {
         let handler = &self.handler;
 
-        let temp_mode = mode.to_ascii_lowercase();
-        let mode = temp_mode.as_str();
+        let mode_candidates = mode_candidates(mode)
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let mode_refs = mode_candidates
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let mut last_state = self.handler.current_state().to_string();
 
-        let trans_cmds = handler.trans_state_write(mode, sys)?;
+        let (_target_mode, trans_cmds) = handler.trans_state_write_candidates(&mode_refs, sys)?;
         let mut all = self.prompt.clone();
 
         for (t_cmd, target_state) in trans_cmds {
@@ -1159,6 +1164,18 @@ impl TxCommandRunner for SharedSshClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_mode_accepts_ordered_comma_or_pipe_separated_candidates() {
+        assert_eq!(
+            mode_candidates(" Root, User ").collect::<Vec<_>>(),
+            vec!["Root", "User"]
+        );
+        assert_eq!(
+            mode_candidates("Login|Config").collect::<Vec<_>>(),
+            vec!["Login", "Config"]
+        );
+    }
 
     #[test]
     fn runtime_command_interaction_matches_sanitized_prompt() {

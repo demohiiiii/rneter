@@ -26,6 +26,35 @@ async fn cisco_xe_autodetected_from_virtual_device() {
 }
 
 #[tokio::test]
+async fn cisco_multi_mode_prefers_login_from_enable() {
+    let mut persona = DevicePersona::builtin("cisco_ios").expect("build cisco persona");
+    persona.initial_state = "enable".to_string();
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn enable-mode cisco device");
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device.connection_request().expect("request"),
+            support::command("Config,Login", "run multi-mode-check"),
+            device.execution_context(),
+        )
+        .await
+        .expect("execute in outer accepted mode");
+
+    assert!(output.success, "output: {}", output.all);
+    let commands = device.received_commands();
+    assert!(commands.iter().any(|command| command == "disable"));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command == "configure terminal"),
+        "multi-mode selection must prefer login over config: {commands:?}"
+    );
+}
+
+#[tokio::test]
 async fn autodetect_and_connect_uses_calling_manager_pool() {
     let device =
         FakeSshDevice::spawn(DevicePersona::builtin("cisco_ios").expect("build cisco persona"))

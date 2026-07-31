@@ -474,7 +474,10 @@ impl SessionReplayer {
             {
                 let command_match = recorded_command == command;
                 let mode_match = mode
-                    .map(|expected| expected.eq_ignore_ascii_case(recorded_mode))
+                    .map(|expected| {
+                        mode_candidates(expected)
+                            .any(|candidate| candidate.eq_ignore_ascii_case(recorded_mode))
+                    })
                     .unwrap_or(true);
                 if !command_match || !mode_match {
                     continue;
@@ -715,6 +718,33 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, ConnectError::ReplayMismatchError(_)));
+    }
+
+    #[test]
+    fn replay_next_in_mode_accepts_recorded_resolved_mode() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Full);
+        recorder
+            .record_event(SessionEvent::CommandOutput {
+                command: "id".to_string(),
+                mode: "root".to_string(),
+                prompt_before: Some("root@host#".to_string()),
+                prompt_after: Some("root@host#".to_string()),
+                fsm_prompt_before: Some("root".to_string()),
+                fsm_prompt_after: Some("root".to_string()),
+                success: true,
+                exit_code: Some(0),
+                content: "uid=0(root)".to_string(),
+                all: "id\nuid=0(root)\nroot@host#".to_string(),
+            })
+            .expect("record output");
+
+        let mut replayer = SessionReplayer::from_recorder(&recorder);
+        let output = replayer
+            .replay_next_in_mode("id", "Root,User")
+            .expect("resolved root mode should satisfy multi-mode replay");
+
+        assert!(output.success);
+        assert_eq!(output.content, "uid=0(root)");
     }
 
     #[test]

@@ -6,6 +6,92 @@ use super::{AdjacencyList, DeviceHandler, ExitPath};
 use crate::error::ConnectError;
 
 impl DeviceHandler {
+    /// Calculates a transition path for one of several acceptable states.
+    ///
+    /// The current state always wins when it is one of the candidates. When it
+    /// is not, an exit-only path is preferred so callers can request an outer
+    /// mode (for example `login,config`) without accidentally entering a
+    /// deeper mode first. If no outer candidate is reachable, candidates are
+    /// tried in their supplied order using the normal transition graph.
+    pub fn trans_state_write_candidates(
+        &self,
+        states: &[&str],
+        sys: Option<&String>,
+    ) -> Result<(String, Vec<(String, String)>), ConnectError> {
+        let candidates = states
+            .iter()
+            .map(|state| state.trim().to_ascii_lowercase())
+            .filter(|state| !state.is_empty())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(ConnectError::InvalidCommandFlow(
+                "command mode must include at least one state".to_string(),
+            ));
+        }
+
+        let current = self.current_state().to_string();
+        if candidates.iter().any(|state| state == &current) {
+            let path = self.trans_state_write(&current, sys)?;
+            return Ok((current, path));
+        }
+
+        // Follow only exit edges to find the outermost acceptable state.
+        // This deliberately ignores enter edges: from `enable`, `login` is
+        // preferred over `config` when both were requested.
+        let mut queue = VecDeque::from([(current.clone(), 0usize)]);
+        let mut visited = HashSet::from([current]);
+        let mut outer_candidate = None::<(String, usize, usize)>;
+        while let Some((state, distance)) = queue.pop_front() {
+            for (from, _, to, is_exit, _) in &self.edges {
+                if !*is_exit || from != &state || visited.contains(to) {
+                    continue;
+                }
+                let next_distance = distance + 1;
+                if let Some(candidate_index) = candidates
+                    .iter()
+                    .position(|candidate| candidate == &to.to_ascii_lowercase())
+                {
+                    let replace =
+                        outer_candidate
+                            .as_ref()
+                            .is_none_or(|(_, best_distance, best_index)| {
+                                next_distance > *best_distance
+                                    || (next_distance == *best_distance
+                                        && candidate_index < *best_index)
+                            });
+                    if replace {
+                        outer_candidate =
+                            Some((to.to_ascii_lowercase(), next_distance, candidate_index));
+                    }
+                }
+                visited.insert(to.clone());
+                queue.push_back((to.clone(), next_distance));
+            }
+        }
+        if let Some((target, _, _)) = outer_candidate {
+            return Ok((target.clone(), self.trans_state_write(&target, sys)?));
+        }
+
+        let mut first_error = None;
+        for candidate in candidates {
+            match self.trans_state_write(&candidate, sys) {
+                Ok(path) => return Ok((candidate, path)),
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+
+        Err(first_error.unwrap_or_else(|| {
+            ConnectError::UnreachableState(
+                states
+                    .first()
+                    .map(|state| state.trim())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        }))
+    }
+
     /// Finds the path to exit from system-specific prompts.
     fn exit_until_no_sys(&self, sys: Option<&String>) -> Result<ExitPath, ConnectError> {
         if !self.match_sys_prompt(self.current_state_index) {
@@ -268,5 +354,70 @@ mod tests {
             path,
             vec![("configure terminal".to_string(), "config".to_string())]
         );
+    }
+
+    #[test]
+    fn candidate_transition_keeps_current_outer_or_inner_state() {
+        let mut handler = build_test_handler();
+        handler.read("dev#");
+
+        let (target, path) = handler
+            .trans_state_write_candidates(&["config", "enable"], None)
+            .expect("current state should be accepted");
+        assert_eq!(target, "enable");
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn candidate_transition_prefers_exit_path_to_outer_state() {
+        let mut handler = build_test_handler();
+        handler.read("dev#");
+
+        let (target, path) = handler
+            .trans_state_write_candidates(&["config", "login"], None)
+            .expect("outer candidate should be reachable");
+        assert_eq!(target, "login");
+        assert_eq!(path, vec![("exit".to_string(), "login".to_string())]);
+    }
+
+    #[test]
+    fn candidate_transition_chooses_outermost_exit_candidate() {
+        let mut handler = build_test_handler();
+        handler.read("dev(cfg)#");
+
+        let (target, path) = handler
+            .trans_state_write_candidates(&["enable", "login"], None)
+            .expect("outermost candidate should be reachable");
+        assert_eq!(target, "login");
+        assert_eq!(
+            path,
+            vec![
+                ("exit".to_string(), "enable".to_string()),
+                ("exit".to_string(), "login".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_candidate_transition_does_not_drop_root_to_user() {
+        let mut handler = DeviceHandler::new(DeviceHandlerConfig {
+            prompt: vec![
+                prompt_rule("User", &[r"^user\$\s*$"]),
+                prompt_rule("Root", &[r"^root#\s*$"]),
+            ],
+            edges: vec![
+                transition_rule("User", "sudo -i", "Root", false, false),
+                transition_rule("Root", "exit", "User", true, false),
+            ],
+            ..Default::default()
+        })
+        .expect("linux-like handler should build");
+        handler.read("root#");
+
+        let (target, path) = handler
+            .trans_state_write_candidates(&["root", "user"], None)
+            .expect("root should be accepted as-is");
+        assert_eq!(target, "root");
+        assert!(path.is_empty());
     }
 }

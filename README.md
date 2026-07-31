@@ -1308,6 +1308,13 @@ Commands are executed through an async channel-based architecture:
 
 Mode names supplied by callers are normalized to lowercase internally, so `"Enable"`, `"enable"`, and `"ENABLE"` target the same FSM state.
 
+A command may accept multiple modes by separating them with `,` or `|`, for example
+`mode: "Root,User".to_string()` or `mode: "Login|Config".to_string()`. If the current
+mode is in that set, rneter executes the command without changing mode. Otherwise it
+prefers a candidate reachable through exit transitions (the outer mode), then falls
+back to the supplied order. For example, a root Linux session remains root for
+`Root,User`, while an enable-mode network session exits to login for `Login,Config`.
+
 ## Lifecycle Hooks
 
 `rneter` now supports declarative lifecycle hooks through `DeviceHandlerConfig.hooks`:

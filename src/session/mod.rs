@@ -613,10 +613,19 @@ pub enum MultilineMode {
     Whole,
 }
 
+pub(crate) fn mode_candidates(mode: &str) -> impl Iterator<Item = &str> {
+    mode.split([',', '|'])
+        .map(str::trim)
+        .filter(|state| !state.is_empty())
+}
+
 /// Configuration for a command to execute on a device.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Command {
-    /// Execution mode - Specifies the device mode in which the command should run
+    /// Execution mode - Specifies the device mode in which the command should run.
+    /// Multiple acceptable modes can be separated with `,` or `|`, for example
+    /// `"Root,User"` or `"Login|Config"`. If the current mode is acceptable it
+    /// is kept; otherwise the outermost acceptable mode is preferred.
     /// Common values:
     /// - "Login": User mode (limited privileges)
     /// - "Enable": Privileged mode (admin privileges)

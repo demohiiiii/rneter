@@ -49,6 +49,35 @@ async fn linux_reports_shell_exit_codes() {
 }
 
 #[tokio::test]
+async fn linux_multi_mode_keeps_direct_root_session() {
+    let mut persona = DevicePersona::builtin("linux").expect("linux persona");
+    persona.initial_state = "root".to_string();
+    let device = FakeSshDevice::spawn(persona)
+        .await
+        .expect("spawn root linux device");
+    let manager = SshConnectionManager::new();
+
+    let output = manager
+        .execute_command_with_context(
+            device.connection_request().expect("request"),
+            support::command("Root,User", "run multi-mode-check"),
+            device.execution_context(),
+        )
+        .await
+        .expect("execute in accepted root mode");
+
+    assert!(output.success, "output: {}", output.all);
+    assert!(
+        !device
+            .received_commands()
+            .iter()
+            .any(|command| command == "exit"),
+        "accepted root mode must not exit to user: {:?}",
+        device.received_commands()
+    );
+}
+
+#[tokio::test]
 async fn linux_autodetected_from_virtual_device() {
     support::run_autodetect_scenario("linux").await;
 }

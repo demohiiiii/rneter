@@ -1240,6 +1240,13 @@ flowchart TD
 
 调用方传入的 mode 名称会在内部统一转成小写匹配，因此 `"Enable"`、`"enable"`、`"ENABLE"` 都会指向同一个 FSM 状态。
 
+一条命令可以用 `,` 或 `|` 分隔多个可接受的 mode，例如
+`mode: "Root,User".to_string()` 或 `mode: "Login|Config".to_string()`。如果当前
+mode 已在候选集合中，rneter 会保持当前 mode 直接执行；否则优先选择可通过退出边
+到达的候选（即更外层的 mode），再按输入顺序尝试普通切换。例如 Linux 当前为
+root 时，`Root,User` 不会退出到 user；网络设备当前为 enable 时，
+`Login,Config` 会优先退出到 login。
+
 ## 生命周期 Hook
 
 `rneter` 现在可以通过 `DeviceHandlerConfig.hooks` 声明生命周期 Hook：
