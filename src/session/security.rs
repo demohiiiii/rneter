@@ -47,7 +47,7 @@ impl ConnectionSecurityOptions {
     pub fn legacy_compatible() -> Self {
         Self {
             level: SecurityLevel::LegacyCompatible,
-            server_check: ServerCheckMethod::DefaultKnownHostsFile,
+            server_check: ServerCheckMethod::NoCheck,
         }
     }
 
@@ -95,13 +95,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profile_keeps_host_verification() {
+    fn legacy_profile_uses_no_host_check() {
         let options = ConnectionSecurityOptions::legacy_compatible();
         assert_eq!(options.level, SecurityLevel::LegacyCompatible);
-        assert!(matches!(
-            options.server_check,
-            ServerCheckMethod::DefaultKnownHostsFile
-        ));
+        assert!(matches!(options.server_check, ServerCheckMethod::NoCheck));
     }
 
     #[test]
