@@ -94,11 +94,12 @@ async fn collect_detect_snapshot(
         inactivity_timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     };
+    let transport_auth = request.auth.to_transport().await?;
 
     let client = Client::connect_with_config(
         (request.addr.as_str(), request.port),
         &request.user,
-        request.auth.to_transport(),
+        transport_auth,
         security_options.server_check.clone(),
         config,
     )

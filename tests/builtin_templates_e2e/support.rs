@@ -211,16 +211,6 @@ pub async fn run_full_scenario(template: &str) {
     let manager = SshConnectionManager::new();
 
     let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
-    manager
-        .get_with_recorder_and_context(
-            device
-                .connection_request()
-                .unwrap_or_else(|error| panic!("[{name}] build request: {error}")),
-            device.execution_context(),
-            recorder.clone(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("[{name}] connect: {error}"));
 
     // Walk every prompt state forward, then back to the initial state, so
     // each transition edge (including exits) is exercised on the wire.
@@ -228,10 +218,11 @@ pub async fn run_full_scenario(template: &str) {
     walk.extend(prompt_states.iter().rev().skip(1).cloned());
     for state in &walk {
         let output = manager
-            .execute_command_with_context(
+            .execute_command_with_recorder_and_context(
                 device.connection_request().expect("request"),
                 command(state, "run e2e-check"),
                 device.execution_context(),
+                recorder.clone(),
             )
             .await
             .unwrap_or_else(|error| panic!("[{name}] exec in mode '{state}': {error}"));
@@ -254,10 +245,11 @@ pub async fn run_full_scenario(template: &str) {
     );
     for (canned_command, canned_output) in &canned_replies {
         let output = manager
-            .execute_command_with_context(
+            .execute_command_with_recorder_and_context(
                 device.connection_request().expect("request"),
                 command(&prompt_states[0], canned_command),
                 device.execution_context(),
+                recorder.clone(),
             )
             .await
             .unwrap_or_else(|error| panic!("[{name}] exec '{canned_command}': {error}"));
@@ -280,10 +272,11 @@ pub async fn run_full_scenario(template: &str) {
 
     // Vendor-styled error output must be classified as a failure.
     let output = manager
-        .execute_command_with_context(
+        .execute_command_with_recorder_and_context(
             device.connection_request().expect("request"),
             command(&prompt_states[0], ERROR_COMMAND),
             device.execution_context(),
+            recorder.clone(),
         )
         .await
         .unwrap_or_else(|error| panic!("[{name}] exec error command: {error}"));
@@ -317,10 +310,11 @@ pub async fn run_full_scenario(template: &str) {
         ],
     };
     let result = manager
-        .execute_tx_block_with_context(
+        .execute_tx_block_with_recorder_and_context(
             device.connection_request().expect("request"),
             block,
             device.execution_context(),
+            recorder.clone(),
         )
         .await
         .unwrap_or_else(|error| panic!("[{name}] execute tx block: {error}"));
@@ -352,5 +346,11 @@ pub async fn run_full_scenario(template: &str) {
             SessionEvent::CommandOutput { command, .. } if command.contains("e2e-check")
         )),
         "[{name}] recording must contain command outputs"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(&entry.event, SessionEvent::TxBlockStarted { .. })),
+        "[{name}] recording must contain transaction events"
     );
 }

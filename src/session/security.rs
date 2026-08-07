@@ -47,7 +47,7 @@ impl ConnectionSecurityOptions {
     pub fn legacy_compatible() -> Self {
         Self {
             level: SecurityLevel::LegacyCompatible,
-            server_check: ServerCheckMethod::NoCheck,
+            server_check: ServerCheckMethod::DefaultKnownHostsFile,
         }
     }
 
@@ -95,10 +95,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profile_uses_no_host_check() {
+    fn legacy_profile_keeps_host_verification() {
         let options = ConnectionSecurityOptions::legacy_compatible();
         assert_eq!(options.level, SecurityLevel::LegacyCompatible);
-        assert!(matches!(options.server_check, ServerCheckMethod::NoCheck));
+        assert!(matches!(
+            options.server_check,
+            ServerCheckMethod::DefaultKnownHostsFile
+        ));
     }
 
     #[test]
@@ -116,41 +119,18 @@ mod tests {
         let preferred = ConnectionSecurityOptions::legacy_compatible().preferred();
 
         assert!(preferred.kex.contains(&kex::DH_G1_SHA1));
-        assert!(preferred.cipher.contains(&cipher::NONE));
-        assert!(preferred.mac.contains(&mac::NONE));
+        assert!(preferred.cipher.iter().all(|alg| *alg != cipher::NONE));
+        assert!(preferred.cipher.iter().all(|alg| *alg != cipher::CLEAR));
+        assert!(preferred.mac.iter().all(|alg| *alg != mac::NONE));
+        assert!(preferred.kex.iter().all(|alg| *alg != kex::NONE));
     }
 
     #[test]
-    fn legacy_profile_prefers_encrypted_algorithms_over_plaintext_fallbacks() {
-        // SSH negotiation picks the first mutually supported algorithm in
-        // client preference order, so plaintext/no-integrity entries must
-        // always rank below every real algorithm.
+    fn legacy_profile_never_allows_plaintext_or_missing_integrity() {
         let preferred = ConnectionSecurityOptions::legacy_compatible().preferred();
-
-        let weakest_cipher_rank = preferred
-            .cipher
-            .iter()
-            .position(|alg| *alg == cipher::CLEAR || *alg == cipher::NONE)
-            .expect("legacy profile keeps plaintext fallbacks");
-        let strongest_real_cipher_rank = preferred
-            .cipher
-            .iter()
-            .rposition(|alg| *alg != cipher::CLEAR && *alg != cipher::NONE)
-            .expect("legacy profile keeps encrypted ciphers");
-        assert!(
-            strongest_real_cipher_rank < weakest_cipher_rank,
-            "plaintext ciphers must rank below every encrypted cipher"
-        );
-
-        assert_eq!(
-            preferred.mac.last(),
-            Some(&mac::NONE),
-            "mac none must be the last-resort entry"
-        );
-        assert_eq!(
-            preferred.kex.last(),
-            Some(&kex::NONE),
-            "kex none must be the last-resort entry"
-        );
+        assert!(!preferred.cipher.contains(&cipher::CLEAR));
+        assert!(!preferred.cipher.contains(&cipher::NONE));
+        assert!(!preferred.mac.contains(&mac::NONE));
+        assert!(!preferred.kex.contains(&kex::NONE));
     }
 }

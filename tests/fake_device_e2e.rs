@@ -278,34 +278,37 @@ async fn records_redacts_and_replays_session_as_dry_run() {
                 other => other,
             },
         );
-    let (_sender, recorder) = manager
-        .get_with_recorder_and_context(
-            device.connection_request().expect("request"),
-            device.execution_context(),
-            recorder,
-        )
-        .await
-        .expect("connect with recorder");
-
     let output = manager
-        .execute_command_with_context(
+        .execute_command_with_recorder_and_context(
             device.connection_request().expect("request"),
             command("Config", "hostname lab-s3cret"),
             device.execution_context(),
+            recorder.clone(),
         )
         .await
         .expect("hostname command should succeed");
     assert!(output.success);
 
     let live_output = manager
-        .execute_command_with_context(
+        .execute_command_with_recorder_and_context(
             device.connection_request().expect("request"),
             command("Enable", "show version"),
             device.execution_context(),
+            recorder.clone(),
         )
         .await
-        .expect("show version should succeed");
+        .expect("recorded show command should succeed");
     assert!(live_output.success);
+
+    let isolated_output = manager
+        .execute_command_with_context(
+            device.connection_request().expect("request"),
+            command("Enable", "show isolated"),
+            device.execution_context(),
+        )
+        .await
+        .expect("ordinary pooled command should succeed");
+    assert!(isolated_output.success);
 
     // The device received the real secret, but the recording never stores it.
     assert!(
@@ -320,6 +323,10 @@ async fn records_redacts_and_replays_session_as_dry_run() {
         "recording leaked the secret: {jsonl}"
     );
     assert!(jsonl.contains("hostname lab-***"));
+    assert!(
+        !jsonl.contains("show isolated"),
+        "ordinary pooled command leaked into a caller's recorder: {jsonl}"
+    );
 
     // Dry-run: replay the recorded session offline, without any device.
     let mut replayer = SessionReplayer::from_recorder(&recorder);
@@ -478,7 +485,7 @@ async fn rejects_an_incorrect_private_key_passphrase() {
         .expect_err("wrong passphrase must fail");
 
     assert!(
-        error.to_string().contains("Unable to load key"),
+        matches!(error, rneter::error::ConnectError::InvalidSshAuth(_)),
         "unexpected error: {error:?}"
     );
     assert!(device.received_commands().is_empty());

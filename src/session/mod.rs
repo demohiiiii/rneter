@@ -74,6 +74,18 @@ pub enum SshAuthMethod {
         path: std::path::PathBuf,
         passphrase: Option<String>,
     },
+    /// Private key provided inline with explicit acceptance of
+    /// RUSTSEC-2023-0071 when the key is RSA.
+    PrivateKeyAllowVulnerableRsa {
+        key_data: String,
+        passphrase: Option<String>,
+    },
+    /// File-backed private key with explicit acceptance of
+    /// RUSTSEC-2023-0071 when the key is RSA.
+    PrivateKeyFileAllowVulnerableRsa {
+        path: std::path::PathBuf,
+        passphrase: Option<String>,
+    },
     /// Authenticate through the local ssh-agent.
     #[cfg(not(target_os = "windows"))]
     Agent,
@@ -94,6 +106,16 @@ impl std::fmt::Debug for SshAuthMethod {
                 .finish(),
             Self::PrivateKeyFile { path, passphrase } => formatter
                 .debug_struct("PrivateKeyFile")
+                .field("path", path)
+                .field("has_passphrase", &passphrase.is_some())
+                .finish(),
+            Self::PrivateKeyAllowVulnerableRsa { passphrase, .. } => formatter
+                .debug_struct("PrivateKeyAllowVulnerableRsa")
+                .field("key_data", &"<redacted>")
+                .field("has_passphrase", &passphrase.is_some())
+                .finish(),
+            Self::PrivateKeyFileAllowVulnerableRsa { path, passphrase } => formatter
+                .debug_struct("PrivateKeyFileAllowVulnerableRsa")
                 .field("path", path)
                 .field("has_passphrase", &passphrase.is_some())
                 .finish(),
@@ -132,6 +154,36 @@ impl SshAuthMethod {
         }
     }
 
+    /// Private key authentication from inline key contents with explicit
+    /// acceptance of RUSTSEC-2023-0071 for RSA keys.
+    ///
+    /// Prefer [`Self::private_key`] with Ed25519/ECDSA keys or
+    /// `SshAuthMethod::agent()` where available.
+    pub fn private_key_allow_vulnerable_rsa(
+        key_data: impl Into<String>,
+        passphrase: Option<String>,
+    ) -> Self {
+        Self::PrivateKeyAllowVulnerableRsa {
+            key_data: key_data.into(),
+            passphrase,
+        }
+    }
+
+    /// File-backed private key authentication with explicit acceptance of
+    /// RUSTSEC-2023-0071 for RSA keys.
+    ///
+    /// Prefer [`Self::private_key_file`] with Ed25519/ECDSA keys or
+    /// `SshAuthMethod::agent()` where available.
+    pub fn private_key_file_allow_vulnerable_rsa(
+        path: impl Into<std::path::PathBuf>,
+        passphrase: Option<String>,
+    ) -> Self {
+        Self::PrivateKeyFileAllowVulnerableRsa {
+            path: path.into(),
+            passphrase,
+        }
+    }
+
     /// Authentication through the local ssh-agent.
     #[cfg(not(target_os = "windows"))]
     pub fn agent() -> Self {
@@ -142,6 +194,22 @@ impl SshAuthMethod {
     /// pairs.
     pub fn keyboard_interactive(responses: Vec<(String, String)>) -> Self {
         Self::KeyboardInteractive(responses)
+    }
+
+    fn validate_private_key_data(
+        key_data: &str,
+        passphrase: Option<&str>,
+    ) -> Result<(), ConnectError> {
+        let key = russh::keys::decode_secret_key(key_data, passphrase).map_err(|error| {
+            ConnectError::InvalidSshAuth(format!("failed to decode private key: {error}"))
+        })?;
+        if key.algorithm().is_rsa() {
+            return Err(ConnectError::InvalidSshAuth(
+                "in-process RSA private-key authentication is disabled because of RUSTSEC-2023-0071; use Ed25519/ECDSA, ssh-agent, or explicitly opt in through SshAuthMethod"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Digest of the effective authentication material used for cached-
@@ -191,6 +259,25 @@ impl SshAuthMethod {
                 update_bytes(&mut hasher, &key_data);
                 update_optional_str(&mut hasher, passphrase.as_deref());
             }
+            Self::PrivateKeyAllowVulnerableRsa {
+                key_data,
+                passphrase,
+            } => {
+                hasher.update([5u8]);
+                update_bytes(&mut hasher, key_data.as_bytes());
+                update_optional_str(&mut hasher, passphrase.as_deref());
+            }
+            Self::PrivateKeyFileAllowVulnerableRsa { path, passphrase } => {
+                let key_data = tokio::fs::read(path).await.map_err(|error| {
+                    ConnectError::InvalidSshAuth(format!(
+                        "read private key file '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+                hasher.update([6u8]);
+                update_bytes(&mut hasher, &key_data);
+                update_optional_str(&mut hasher, passphrase.as_deref());
+            }
             #[cfg(not(target_os = "windows"))]
             Self::Agent => {
                 hasher.update([3u8]);
@@ -236,15 +323,32 @@ impl SshAuthMethod {
         Ok(hasher.finalize().into())
     }
 
-    /// Maps to the transport-level authentication method.
-    pub(crate) fn to_transport(&self) -> AuthMethod {
-        match self {
+    /// Maps to transport authentication after applying private-key policy.
+    pub(crate) async fn to_transport(&self) -> Result<AuthMethod, ConnectError> {
+        Ok(match self {
             Self::Password(password) => AuthMethod::with_password(password),
             Self::PrivateKey {
                 key_data,
                 passphrase,
-            } => AuthMethod::with_key(key_data, passphrase.as_deref()),
+            } => {
+                Self::validate_private_key_data(key_data, passphrase.as_deref())?;
+                AuthMethod::with_key(key_data, passphrase.as_deref())
+            }
             Self::PrivateKeyFile { path, passphrase } => {
+                let key_data = tokio::fs::read_to_string(path).await.map_err(|error| {
+                    ConnectError::InvalidSshAuth(format!(
+                        "failed to read private key file '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+                Self::validate_private_key_data(&key_data, passphrase.as_deref())?;
+                AuthMethod::with_key(&key_data, passphrase.as_deref())
+            }
+            Self::PrivateKeyAllowVulnerableRsa {
+                key_data,
+                passphrase,
+            } => AuthMethod::with_key(key_data, passphrase.as_deref()),
+            Self::PrivateKeyFileAllowVulnerableRsa { path, passphrase } => {
                 AuthMethod::with_key_file(path, passphrase.as_deref())
             }
             #[cfg(not(target_os = "windows"))]
@@ -256,7 +360,7 @@ impl SshAuthMethod {
                 );
                 AuthMethod::with_keyboard_interactive(interactive)
             }
-        }
+        })
     }
 }
 
@@ -1058,8 +1162,17 @@ impl Default for ConnectionPoolConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ConnectionCacheKey {
+    Shared(String),
+    Recorder {
+        device_addr: String,
+        recorder_id: u64,
+    },
+}
+
 struct ConnectionPoolInner {
-    cache: Cache<String, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
+    cache: Cache<ConnectionCacheKey, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
     /// Whether the pool maintenance task has been started.
     maintenance_started: AtomicBool,
     /// Interval between pending-task maintenance runs.
@@ -1089,6 +1202,28 @@ mod transaction;
 mod tests {
     use super::*;
     use crate::templates;
+
+    #[tokio::test]
+    async fn in_process_rsa_keys_require_explicit_opt_in() {
+        use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Rsa { hash: None })
+            .expect("generate RSA key")
+            .to_openssh(LineEnding::LF)
+            .expect("encode RSA key");
+        let auth = SshAuthMethod::private_key(key.to_string(), None);
+
+        let error = auth
+            .to_transport()
+            .await
+            .expect_err("RSA must be rejected by default");
+        assert!(matches!(error, ConnectError::InvalidSshAuth(_)));
+
+        SshAuthMethod::private_key_allow_vulnerable_rsa(key.to_string(), None)
+            .to_transport()
+            .await
+            .expect("explicit opt-in allows RSA");
+    }
 
     #[test]
     fn connection_request_formats_device_addr() {

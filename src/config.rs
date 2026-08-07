@@ -26,7 +26,6 @@ pub const LEGACY_KEX_ORDER: &[kex::Name] = &[
     kex::ECDH_SHA2_NISTP256,
     kex::ECDH_SHA2_NISTP384,
     kex::ECDH_SHA2_NISTP521,
-    kex::NONE,
 ];
 
 /// Legacy-compatible cipher algorithms.
@@ -35,8 +34,7 @@ pub const LEGACY_KEX_ORDER: &[kex::Name] = &[
 /// legacy CBC mode ciphers for compatibility with older devices.
 ///
 /// SSH negotiation follows client preference order (RFC 4253), so the
-/// plaintext `clear`/`none` entries must stay last: they are a final
-/// fallback only, never preferred over an encrypted cipher.
+/// Null/plaintext ciphers are intentionally excluded even from this profile.
 pub static LEGACY_CIPHERS: &[cipher::Name] = &[
     cipher::CHACHA20_POLY1305,
     cipher::AES_256_GCM,
@@ -46,8 +44,6 @@ pub static LEGACY_CIPHERS: &[cipher::Name] = &[
     cipher::AES_256_CBC,
     cipher::AES_192_CBC,
     cipher::AES_128_CBC,
-    cipher::CLEAR,
-    cipher::NONE,
 ];
 
 /// Legacy-compatible MAC (Message Authentication Code) algorithms.
@@ -55,8 +51,7 @@ pub static LEGACY_CIPHERS: &[cipher::Name] = &[
 /// Includes both standard HMAC variants and ETM (Encrypt-then-MAC) variants
 /// for enhanced security.
 ///
-/// `none` must stay last so an integrity-checked MAC always wins the
-/// negotiation when the server supports one.
+/// A MAC is always required, including for legacy connections.
 pub const LEGACY_MAC_ALGORITHMS: &[mac::Name] = &[
     mac::HMAC_SHA512_ETM,
     mac::HMAC_SHA256_ETM,
@@ -64,7 +59,6 @@ pub const LEGACY_MAC_ALGORITHMS: &[mac::Name] = &[
     mac::HMAC_SHA512,
     mac::HMAC_SHA256,
     mac::HMAC_SHA1,
-    mac::NONE,
 ];
 
 /// Compression algorithms shared by all security levels.

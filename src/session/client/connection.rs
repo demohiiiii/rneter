@@ -151,6 +151,8 @@ impl SharedSshClient {
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
 
+        let transport_auth = auth.to_transport().await?;
+
         let config = Config {
             preferred: security_options.preferred(),
             inactivity_timeout: Some(Duration::from_secs(60)),
@@ -163,7 +165,7 @@ impl SharedSshClient {
             Client::connect_with_config(
                 (addr, port),
                 &user,
-                auth.to_transport(),
+                transport_auth,
                 security_options.server_check.clone(),
                 config,
             ),

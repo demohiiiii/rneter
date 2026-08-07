@@ -291,6 +291,12 @@ let auth = SshAuthMethod::keyboard_interactive(vec![
 自动识别同样支持 `DetectRequest::new_with_auth(...)`。
 连接池会把认证方式纳入参数指纹，因此更换凭据一定会重建连接。
 
+由于传递依赖中的 `rsa` 实现受 `RUSTSEC-2023-0071` 影响且尚无修复版本，
+默认拒绝进程内 RSA 私钥认证。应优先使用 Ed25519/ECDSA 私钥或
+`SshAuthMethod::agent()`。确认接受该公告风险的调用方可以通过
+`SshAuthMethod::private_key_allow_vulnerable_rsa(...)` 或
+`SshAuthMethod::private_key_file_allow_vulnerable_rsa(...)` 显式启用 RSA 私钥认证。
+
 ## 重连与重试
 
 普通命令和 `SessionOperation` 执行入口可以通过 `ExecutionContext` 显式开启
@@ -612,20 +618,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use rneter::session::{
-    ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
+    Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
 };
 use rneter::templates;
 
-let (sender, recorder) = MANAGER
+let request = ConnectionRequest::new(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+);
+let (_sender, recorder) = MANAGER
     .get_with_recording_level_and_context(
-        ConnectionRequest::new(
-            "admin".to_string(),
-            "192.168.1.1".to_string(),
-            22,
-            "password".to_string(),
-            None,
-            templates::cisco()?,
-        ),
+        request.clone(),
         ExecutionContext::default(),
         SessionRecordLevel::Full,
     )
@@ -638,6 +645,20 @@ tokio::spawn(async move {
         println!("实时事件: {:?}", entry.event);
     }
 });
+
+let output = MANAGER
+    .execute_command_with_recorder_and_context(
+        request,
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version".to_string(),
+            ..Command::default()
+        },
+        ExecutionContext::default(),
+        recorder.clone(),
+    )
+    .await?;
+assert!(output.success);
 
 // 或者仅记录关键事件（不记录原始 shell 分块）
 let (_sender2, _recorder2) = MANAGER
@@ -654,8 +675,6 @@ let (_sender2, _recorder2) = MANAGER
         SessionRecordLevel::KeyEventsOnly,
     )
     .await?;
-
-// ...通过 `sender` 发送 CmdJob...
 
 // 导出为 JSONL
 let jsonl = recorder.to_jsonl()?;
@@ -684,6 +703,10 @@ let script = vec![
 let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
+
+每个录制器使用独立的池化连接。命令、flow、事务、workflow 和上传应使用
+recorder-aware manager 方法，也可以通过对应 sender 发送 `CmdJob`。普通 manager
+调用和其他录制器不会写入该录制器。
 
 对于 CI 离线测试，可以把 JSONL 录制文件放入 `tests/fixtures/`，并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。可以用下面的命令将线上噪声录制归一化为稳定 fixture：
 

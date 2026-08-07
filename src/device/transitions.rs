@@ -133,6 +133,12 @@ impl DeviceHandler {
     fn format_cmd(format: bool, cmd: &str, sys: Option<&str>) -> Result<String, ConnectError> {
         if format {
             match sys {
+                Some(s) if s.is_empty() || s.chars().any(char::is_control) => {
+                    Err(ConnectError::InvalidCommandFlow(
+                        "transition system name must be non-empty and contain no control characters"
+                            .to_string(),
+                    ))
+                }
                 Some(s) => Ok(cmd.replace("{}", s)),
                 None => Err(ConnectError::InvalidCommandFlow(format!(
                     "transition command '{cmd}' requires a system name (sys), but none was provided"
@@ -338,6 +344,19 @@ mod tests {
             path,
             vec![("switch site-a".to_string(), "vsite".to_string())]
         );
+    }
+
+    #[test]
+    fn transition_rejects_control_characters_in_system_name() {
+        let mut handler = build_sys_edge_handler();
+        handler.read("dev#");
+
+        let sys = "site-a\nconfigure terminal".to_string();
+        let error = handler
+            .trans_state_write("vsite", Some(&sys))
+            .expect_err("control characters must not reach a transition command");
+
+        assert!(matches!(error, ConnectError::InvalidCommandFlow(_)));
     }
 
     #[test]

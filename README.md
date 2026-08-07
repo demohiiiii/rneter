@@ -544,6 +544,13 @@ Autodetect uses the same model through `DetectRequest::new_with_auth(...)`.
 Cached connections include the authentication method in their parameter
 fingerprint, so changing credentials always forces a fresh connection.
 
+In-process RSA private keys are rejected by default because the transitive
+`rsa` implementation is affected by `RUSTSEC-2023-0071` and has no fixed
+release. Prefer Ed25519/ECDSA keys or `SshAuthMethod::agent()`. A caller that
+accepts the advisory risk can explicitly opt in with
+`SshAuthMethod::private_key_allow_vulnerable_rsa(...)` or
+`SshAuthMethod::private_key_file_allow_vulnerable_rsa(...)`.
+
 ## Reconnect and Retry
 
 Ordinary command and `SessionOperation` entrypoints can opt into bounded
@@ -639,20 +646,21 @@ their individual `FleetExecutionResult` values, including partial flow output.
 
 ```rust
 use rneter::session::{
-    ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
+    Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
 };
 use rneter::templates;
 
-let (sender, recorder) = MANAGER
+let request = ConnectionRequest::new(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    templates::cisco()?,
+);
+let (_sender, recorder) = MANAGER
     .get_with_recording_level_and_context(
-        ConnectionRequest::new(
-            "admin".to_string(),
-            "192.168.1.1".to_string(),
-            22,
-            "password".to_string(),
-            None,
-            templates::cisco()?,
-        ),
+        request.clone(),
         ExecutionContext::default(),
         SessionRecordLevel::Full,
     )
@@ -665,6 +673,20 @@ tokio::spawn(async move {
         println!("live event: {:?}", entry.event);
     }
 });
+
+let output = MANAGER
+    .execute_command_with_recorder_and_context(
+        request,
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version".to_string(),
+            ..Command::default()
+        },
+        ExecutionContext::default(),
+        recorder.clone(),
+    )
+    .await?;
+assert!(output.success);
 
 // Or record key events only (no raw shell chunks)
 let (_sender2, _recorder2) = MANAGER
@@ -681,8 +703,6 @@ let (_sender2, _recorder2) = MANAGER
         SessionRecordLevel::KeyEventsOnly,
     )
     .await?;
-
-// ...send CmdJob through `sender`...
 
 // Export recording as JSONL
 let jsonl = recorder.to_jsonl()?;
@@ -711,6 +731,11 @@ let script = vec![
 let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
+
+Each recorder has a dedicated pooled connection. Use the recorder-aware manager
+methods for commands, flows, transactions, workflows, and uploads, or send a
+`CmdJob` through the associated sender. Ordinary manager calls and other
+recorders cannot append to it.
 
 For CI-style offline tests, store JSONL recordings under `tests/fixtures/` and replay them in integration tests (see `tests/replay_fixtures.rs`). Normalize noisy online recordings into stable fixtures with:
 

@@ -1,9 +1,11 @@
 use super::*;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 const RECORDER_BROADCAST_CAPACITY: usize = 256;
+static NEXT_RECORDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Session recording granularity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -193,17 +195,24 @@ pub type SessionEventRedactor = dyn Fn(SessionEvent) -> SessionEvent + Send + Sy
 /// In-memory session recorder.
 #[derive(Clone)]
 pub struct SessionRecorder {
+    id: u64,
     level: SessionRecordLevel,
     entries: Arc<Mutex<Vec<SessionRecordEntry>>>,
     subscribers: broadcast::Sender<SessionRecordEntry>,
-    redactor: Option<Arc<SessionEventRedactor>>,
+    redactor: Arc<StdRwLock<Option<Arc<SessionEventRedactor>>>>,
 }
 
 impl std::fmt::Debug for SessionRecorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_redactor = self
+            .redactor
+            .read()
+            .map(|redactor| redactor.is_some())
+            .unwrap_or(true);
         f.debug_struct("SessionRecorder")
             .field("level", &self.level)
-            .field("has_redactor", &self.redactor.is_some())
+            .field("id", &self.id)
+            .field("has_redactor", &has_redactor)
             .finish_non_exhaustive()
     }
 }
@@ -213,11 +222,16 @@ impl SessionRecorder {
     pub fn new(level: SessionRecordLevel) -> Self {
         let (subscribers, _) = broadcast::channel(RECORDER_BROADCAST_CAPACITY);
         Self {
+            id: NEXT_RECORDER_ID.fetch_add(1, Ordering::Relaxed),
             level,
             entries: Arc::new(Mutex::new(Vec::new())),
             subscribers,
-            redactor: None,
+            redactor: Arc::new(StdRwLock::new(None)),
         }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     /// Attach a redactor applied to every event before it is stored or
@@ -227,11 +241,17 @@ impl SessionRecorder {
     /// include secrets typed into configuration commands (passwords, SNMP
     /// communities, keys). A redactor lets callers scrub or mask such values
     /// before they ever reach the in-memory log or exported JSONL.
+    /// Clones represent the same recorder and share this policy.
     pub fn with_redactor(
-        mut self,
+        self,
         redactor: impl Fn(SessionEvent) -> SessionEvent + Send + Sync + 'static,
     ) -> Self {
-        self.redactor = Some(Arc::new(redactor));
+        let mut guard = self
+            .redactor
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(Arc::new(redactor));
+        drop(guard);
         self
     }
 
@@ -253,7 +273,12 @@ impl SessionRecorder {
         if self.level == SessionRecordLevel::Off {
             return Ok(());
         }
-        let event = match self.redactor.as_ref() {
+        let redactor = self
+            .redactor
+            .read()
+            .map_err(|e| ConnectError::InternalServerError(format!("redactor lock error: {e}")))?
+            .clone();
+        let event = match redactor {
             Some(redactor) => redactor(event),
             None => event,
         };
@@ -596,6 +621,23 @@ mod tests {
         let broadcast_entry = subscription.try_recv().expect("broadcast entry");
         let encoded = serde_json::to_string(&broadcast_entry).expect("encode broadcast entry");
         assert!(!encoded.contains("s3cret"), "broadcast leaked the secret");
+    }
+
+    #[test]
+    fn recorder_clones_share_the_same_redactor_policy() {
+        let recorder = SessionRecorder::new(SessionRecordLevel::Full);
+        let clone_created_first = recorder.clone();
+        let recorder = recorder.with_redactor(|event| match event {
+            SessionEvent::RawChunk { data } => SessionEvent::RawChunk {
+                data: data.replace("secret", "***"),
+            },
+            other => other,
+        });
+
+        clone_created_first
+            .record_raw_chunk("secret".to_string())
+            .expect("record through clone");
+        assert!(!recorder.to_jsonl().expect("jsonl").contains("secret"));
     }
 
     #[test]

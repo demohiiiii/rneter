@@ -47,15 +47,15 @@ impl Drop for MaintenanceTaskGuard {
 }
 
 async fn invalidate_cache_client_if_current<T>(
-    cache: &Cache<String, (mpsc::Sender<CmdJob>, Arc<T>)>,
-    device_addr: &str,
+    cache: &Cache<ConnectionCacheKey, (mpsc::Sender<CmdJob>, Arc<T>)>,
+    cache_key: &ConnectionCacheKey,
     failed_client: &Arc<T>,
 ) where
     T: Send + Sync + 'static,
 {
     let failed_client = failed_client.clone();
     cache
-        .entry_by_ref(device_addr)
+        .entry_by_ref(cache_key)
         .and_compute_with(move |entry| {
             let should_remove = entry.as_ref().is_some_and(|entry| {
                 let (_sender, current_client) = entry.value();
@@ -68,6 +68,19 @@ async fn invalidate_cache_client_if_current<T>(
             })
         })
         .await;
+}
+
+fn connection_cache_key(
+    device_addr: &str,
+    recorder: Option<&SessionRecorder>,
+) -> ConnectionCacheKey {
+    match recorder {
+        Some(recorder) => ConnectionCacheKey::Recorder {
+            device_addr: device_addr.to_string(),
+            recorder_id: recorder.id(),
+        },
+        None => ConnectionCacheKey::Shared(device_addr.to_string()),
+    }
 }
 
 impl SshConnectionManager {
@@ -159,15 +172,47 @@ impl SshConnectionManager {
         command: Command,
         context: ExecutionContext,
     ) -> Result<Output, ConnectError> {
+        self.execute_command_with_optional_recorder(request, command, context, None)
+            .await
+    }
+
+    /// Execute a single command on the isolated connection bound to `recorder`.
+    pub async fn execute_command_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        command: Command,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<Output, ConnectError> {
+        self.execute_command_with_optional_recorder(request, command, context, Some(recorder))
+            .await
+    }
+
+    async fn execute_command_with_optional_recorder(
+        &self,
+        request: ConnectionRequest,
+        command: Command,
+        context: ExecutionContext,
+        recorder: Option<SessionRecorder>,
+    ) -> Result<Output, ConnectError> {
         let flow = command.into_flow()?;
         if flow.steps.len() != 1 {
-            return Err(ConnectError::InvalidCommandFlow(
-                "multiline command produces multiple outputs; use execute_multiline_command_with_context"
-                    .to_string(),
-            ));
+            let multiline_method = if recorder.is_some() {
+                "execute_multiline_command_with_recorder_and_context"
+            } else {
+                "execute_multiline_command_with_context"
+            };
+            return Err(ConnectError::InvalidCommandFlow(format!(
+                "multiline command produces multiple outputs; use {multiline_method}"
+            )));
         }
         let result = self
-            .execute_operation_with_context(request, SessionOperation::from(flow), context)
+            .execute_operation_with_optional_recorder(
+                request,
+                SessionOperation::from(flow),
+                context,
+                recorder,
+            )
             .await
             .map_err(|err| err.into_parts().0)?;
         match result.steps.len() {
@@ -193,8 +238,31 @@ impl SshConnectionManager {
         command: Command,
         context: ExecutionContext,
     ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
-        self.execute_operation_with_context(request, SessionOperation::from(command), context)
-            .await
+        self.execute_operation_with_optional_recorder(
+            request,
+            SessionOperation::from(command),
+            context,
+            None,
+        )
+        .await
+    }
+
+    /// Execute newline-separated command text on the connection bound to
+    /// `recorder`.
+    pub async fn execute_multiline_command_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        command: Command,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
+        self.execute_operation_with_optional_recorder(
+            request,
+            SessionOperation::from(command),
+            context,
+            Some(recorder),
+        )
+        .await
     }
 
     /// Execute any supported session operation using a structured connection/context pair.
@@ -208,6 +276,30 @@ impl SshConnectionManager {
         request: ConnectionRequest,
         operation: SessionOperation,
         context: ExecutionContext,
+    ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
+        self.execute_operation_with_optional_recorder(request, operation, context, None)
+            .await
+    }
+
+    /// Execute a session operation on the isolated connection bound to
+    /// `recorder`.
+    pub async fn execute_operation_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        operation: SessionOperation,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
+        self.execute_operation_with_optional_recorder(request, operation, context, Some(recorder))
+            .await
+    }
+
+    async fn execute_operation_with_optional_recorder(
+        &self,
+        request: ConnectionRequest,
+        operation: SessionOperation,
+        context: ExecutionContext,
+        recorder: Option<SessionRecorder>,
     ) -> Result<SessionOperationOutput, SessionOperationExecutionError> {
         context.retry_policy.validate().map_err(|error| {
             SessionOperationExecutionError::new(
@@ -228,6 +320,7 @@ impl SshConnectionManager {
             )
         })?;
         let device_addr = request.device_addr();
+        let cache_key = connection_cache_key(&device_addr, recorder.as_ref());
         let mut accumulated_steps = Vec::new();
         let mut retries_used = 0usize;
 
@@ -237,6 +330,7 @@ impl SshConnectionManager {
                     request.clone(),
                     SessionOperation::Flow(remaining_flow.clone()),
                     &context,
+                    recorder.clone(),
                 )
                 .await;
             match result {
@@ -287,7 +381,7 @@ impl SshConnectionManager {
                     if let Some(failed_client) = failed_client {
                         invalidate_cache_client_if_current(
                             &self.inner.cache,
-                            &device_addr,
+                            &cache_key,
                             &failed_client,
                         )
                         .await;
@@ -310,6 +404,7 @@ impl SshConnectionManager {
         request: ConnectionRequest,
         operation: SessionOperation,
         context: &ExecutionContext,
+        recorder: Option<SessionRecorder>,
     ) -> Result<SessionOperationOutput, OperationAttemptError> {
         let sys = context.sys.clone();
         let (_sender, client) = self
@@ -317,7 +412,7 @@ impl SshConnectionManager {
                 request,
                 context.security_options.clone(),
                 context.connect_timeout,
-                None,
+                recorder,
             )
             .await
             .map_err(|error| OperationAttemptError {
@@ -353,10 +448,35 @@ impl SshConnectionManager {
         flow: CommandFlow,
         context: ExecutionContext,
     ) -> Result<CommandFlowOutput, ConnectError> {
-        self.execute_operation_with_context(request, SessionOperation::from(flow), context)
-            .await
-            .map(|output| output.into_command_flow_output())
-            .map_err(|err| err.into_parts().0)
+        self.execute_operation_with_optional_recorder(
+            request,
+            SessionOperation::from(flow),
+            context,
+            None,
+        )
+        .await
+        .map(|output| output.into_command_flow_output())
+        .map_err(|err| err.into_parts().0)
+    }
+
+    /// Execute a multi-step command flow on the isolated connection bound to
+    /// `recorder`.
+    pub async fn execute_command_flow_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        flow: CommandFlow,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<CommandFlowOutput, ConnectError> {
+        self.execute_operation_with_optional_recorder(
+            request,
+            SessionOperation::from(flow),
+            context,
+            Some(recorder),
+        )
+        .await
+        .map(|output| output.into_command_flow_output())
+        .map_err(|err| err.into_parts().0)
     }
 
     /// Execute a transaction-like block with structured connection/context options.
@@ -366,13 +486,37 @@ impl SshConnectionManager {
         block: TxBlock,
         context: ExecutionContext,
     ) -> Result<TxResult, ConnectError> {
+        self.execute_tx_block_with_optional_recorder(request, block, context, None)
+            .await
+    }
+
+    /// Execute a transaction-like block on the isolated connection bound to
+    /// `recorder`.
+    pub async fn execute_tx_block_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        block: TxBlock,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<TxResult, ConnectError> {
+        self.execute_tx_block_with_optional_recorder(request, block, context, Some(recorder))
+            .await
+    }
+
+    async fn execute_tx_block_with_optional_recorder(
+        &self,
+        request: ConnectionRequest,
+        block: TxBlock,
+        context: ExecutionContext,
+        recorder: Option<SessionRecorder>,
+    ) -> Result<TxResult, ConnectError> {
         let sys = context.sys.clone();
         let (_sender, client) = self
             .get_client_with_request_and_recording(
                 request,
                 context.security_options,
                 context.connect_timeout,
-                None,
+                recorder,
             )
             .await?;
 
@@ -387,13 +531,37 @@ impl SshConnectionManager {
         workflow: TxWorkflow,
         context: ExecutionContext,
     ) -> Result<TxWorkflowResult, ConnectError> {
+        self.execute_tx_workflow_with_optional_recorder(request, workflow, context, None)
+            .await
+    }
+
+    /// Execute a transaction workflow on the isolated connection bound to
+    /// `recorder`.
+    pub async fn execute_tx_workflow_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        workflow: TxWorkflow,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<TxWorkflowResult, ConnectError> {
+        self.execute_tx_workflow_with_optional_recorder(request, workflow, context, Some(recorder))
+            .await
+    }
+
+    async fn execute_tx_workflow_with_optional_recorder(
+        &self,
+        request: ConnectionRequest,
+        workflow: TxWorkflow,
+        context: ExecutionContext,
+        recorder: Option<SessionRecorder>,
+    ) -> Result<TxWorkflowResult, ConnectError> {
         let sys = context.sys.clone();
         let (_sender, client) = self
             .get_client_with_request_and_recording(
                 request,
                 context.security_options,
                 context.connect_timeout,
-                None,
+                recorder,
             )
             .await?;
 
@@ -410,12 +578,35 @@ impl SshConnectionManager {
         upload: FileUploadRequest,
         context: ExecutionContext,
     ) -> Result<(), ConnectError> {
+        self.upload_file_with_optional_recorder(request, upload, context, None)
+            .await
+    }
+
+    /// Upload a local file on the isolated connection bound to `recorder`.
+    pub async fn upload_file_with_recorder_and_context(
+        &self,
+        request: ConnectionRequest,
+        upload: FileUploadRequest,
+        context: ExecutionContext,
+        recorder: SessionRecorder,
+    ) -> Result<(), ConnectError> {
+        self.upload_file_with_optional_recorder(request, upload, context, Some(recorder))
+            .await
+    }
+
+    async fn upload_file_with_optional_recorder(
+        &self,
+        request: ConnectionRequest,
+        upload: FileUploadRequest,
+        context: ExecutionContext,
+        recorder: Option<SessionRecorder>,
+    ) -> Result<(), ConnectError> {
         let (_sender, client) = self
             .get_client_with_request_and_recording(
                 request,
                 context.security_options,
                 context.connect_timeout,
-                None,
+                recorder,
             )
             .await?;
 
@@ -484,6 +675,7 @@ impl SshConnectionManager {
         self.spawn_maintenance_if_needed();
 
         let device_addr = request.device_addr();
+        let cache_key = connection_cache_key(&device_addr, recorder.as_ref());
         let ConnectionRequest {
             user,
             addr,
@@ -500,7 +692,7 @@ impl SshConnectionManager {
             let entry = self
                 .inner
                 .cache
-                .entry(device_addr.clone())
+                .entry(cache_key.clone())
                 .or_try_insert_with(Self::create_connection(
                     device_addr.clone(),
                     user.clone(),
@@ -539,9 +731,6 @@ impl SshConnectionManager {
 
             if reusable {
                 debug!("Cached connection params match, reusing: {}", device_addr);
-                if recorder.is_some() {
-                    client.write().await.recorder = recorder.clone();
-                }
                 return Ok((sender, client));
             }
 
@@ -551,7 +740,7 @@ impl SshConnectionManager {
             );
             // Eviction drops the pool's sender; the old connection's worker
             // closes it once the last sender is gone.
-            self.inner.cache.invalidate(&device_addr).await;
+            self.inner.cache.invalidate(&cache_key).await;
         }
 
         Err(ConnectError::InternalServerError(format!(
@@ -681,18 +870,19 @@ mod tests {
         let stale_client = Arc::new(1u8);
         let replacement_client = Arc::new(2u8);
         let device_addr = "admin@127.0.0.1:22".to_string();
+        let cache_key = ConnectionCacheKey::Shared(device_addr);
         cache
-            .insert(device_addr.clone(), (sender, replacement_client.clone()))
+            .insert(cache_key.clone(), (sender, replacement_client.clone()))
             .await;
 
-        invalidate_cache_client_if_current(&cache, &device_addr, &stale_client).await;
+        invalidate_cache_client_if_current(&cache, &cache_key, &stale_client).await;
         let (_sender, current_client) = cache
-            .get(&device_addr)
+            .get(&cache_key)
             .await
             .expect("replacement must remain cached");
         assert!(Arc::ptr_eq(&current_client, &replacement_client));
 
-        invalidate_cache_client_if_current(&cache, &device_addr, &replacement_client).await;
-        assert!(cache.get(&device_addr).await.is_none());
+        invalidate_cache_client_if_current(&cache, &cache_key, &replacement_client).await;
+        assert!(cache.get(&cache_key).await.is_none());
     }
 }

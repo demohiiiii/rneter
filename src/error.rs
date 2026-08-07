@@ -207,6 +207,7 @@ impl ConnectError {
         match error {
             Self::ConnectTimeout(target) => Self::ConnectTimeout(target.clone()),
             Self::InitTimeout(message) => Self::InitTimeout(message.clone()),
+            Self::InvalidSshAuth(message) => Self::InvalidSshAuth(message.clone()),
             _ if error.is_authentication_failure() => Self::AuthenticationFailed(error.to_string()),
             _ if error.is_transient() => Self::ConnectionEstablishmentFailed(error.to_string()),
             _ => Self::InternalServerError(error.to_string()),

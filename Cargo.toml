@@ -38,6 +38,7 @@ schemars = { version = "0.9.0" }
 sha2 = "0.10.8"
 
 [dev-dependencies]
+rand = "0.10.0"
 tokio = { version = "1", features = ["macros", "net", "time", "io-util", "sync"] }
 
 [[example]]
