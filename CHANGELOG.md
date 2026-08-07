@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] - 2026-08-08
+
+### New Features
+
+- Added the optional `testkit` feature with in-process SSH devices for every built-in template, including authentication, interactive confirmations, paged output, deterministic fault injection, and a runnable virtual-device example.
+- Added `SshAuthMethod` support for passwords, inline or file-backed private keys, SSH agents, and keyboard-interactive authentication, with authentication-aware connection-pool fingerprints.
+- Added bounded fleet execution through `FleetTarget`, `FleetOptions`, `FleetExecutionResult`, and `SshConnectionManager::execute_on_fleet(...)`, preserving input order while isolating per-device failures and partial output.
+- Added opt-in retry policies with capped exponential backoff for transient connection failures and command-flow resumption from the first unfinished step.
+- Added comma- or pipe-separated command modes, allowing execution in the current permitted mode or transition toward the outermost reachable permitted mode, plus replay support for the resolved mode.
+- Added LeadSec PowerV support and expanded H3C, Huawei, Check Point, Fortinet, and Hillstone prompt, context, interaction, and error coverage.
+
+### Optimizations
+
+- Hardened connection pooling with configurable capacity and idle timeouts, single-flight connection establishment, dead-session eviction, credential-change detection, idle maintenance, and graceful worker shutdown.
+- Added manager-owned autodetect-and-connect methods so caller-created managers retain and reuse the selected connection instead of routing it through the global pool.
+- Cached state-transition paths and improved terminal stream handling so carriage-return-delimited vendor errors are retained before the final prompt.
+- Updated the SSH dependency stack and algorithm preference order, removed plaintext and unauthenticated legacy algorithms, and moved CI actions to Node 24-compatible releases.
+- Expanded end-to-end coverage across built-in templates, authentication methods, connection-pool lifecycle, recording isolation, retry recovery, fleet execution, paging, and interactive confirmations.
+
+### API Changes
+
+- `DetectRequest.password` and `ConnectionRequest.password` were replaced by `auth: SshAuthMethod`. Existing password callers can keep using `new(...)`; struct-literal callers must migrate to `auth` or `new_with_auth(...)`.
+- Added `RetryPolicy` and `ExecutionContext::with_retry_policy(...)`; `ExecutionContext` struct literals must now initialize `retry_policy` or use its constructors and builders.
+- Added `ConnectionPoolConfig`, `SshConnectionManager::with_pool_config(...)`, fleet execution types, manager-owned autodetect methods, recorder-aware execution entrypoints, and public transient/authentication error classification helpers.
+- Marked `ConnectError` as `#[non_exhaustive]` and added authentication, fleet, retry, and shared-connection error variants. Downstream exhaustive matches must include a wildcard arm.
+- Added the `testkit` Cargo feature and raised the declared minimum supported Rust version to 1.88.
+- `Command.mode` now accepts one mode or a comma-/pipe-separated set such as `"user,root"` or `"login|config"`; single-mode values retain their previous behavior.
+
+### Risks
+
+- Retries have at-least-once semantics: if a device applies a command and disconnects before returning its prompt, retrying can apply the remote side effect again. Keep retries disabled for operations that are not idempotent unless duplication is acceptable.
+- The legacy-compatible SSH security profile intentionally skips `known_hosts` verification. Use the secure or balanced profile when server identity verification is required.
+- The transitive RSA implementation remains covered by `RUSTSEC-2023-0071` with no fixed upstream release. In-process RSA private keys are rejected by default but can be enabled through explicit advisory-aware constructors; prefer Ed25519, ECDSA, or an SSH agent.
+- Public struct field changes to connection, detection, and execution-context models require migration for callers that construct those structs directly.
+- Virtual-device tests model known prompts and workflows but do not replace validation against customized prompts, terminal behavior, and production firmware.
+
 ## [0.4.7] - 2026-07-23
 
 ### New Features

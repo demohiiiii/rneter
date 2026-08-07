@@ -61,7 +61,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rneter = "0.4.7"
+rneter = "0.5.0"
 ```
 
 ## Quick Start
@@ -1042,7 +1042,7 @@ Enable it in your `dev-dependencies`:
 
 ```toml
 [dev-dependencies]
-rneter = { version = "0.4.7", features = ["testkit"] }
+rneter = { version = "0.5.0", features = ["testkit"] }
 ```
 
 Every built-in template has a ready-made persona. The simulated state machine

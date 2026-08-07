@@ -61,7 +61,7 @@
 
 ```toml
 [dependencies]
-rneter = "0.4.7"
+rneter = "0.5.0"
 ```
 
 ## 快速开始
@@ -1007,7 +1007,7 @@ let block = templates::build_tx_block(
 
 ```toml
 [dev-dependencies]
-rneter = { version = "0.4.7", features = ["testkit"] }
+rneter = { version = "0.5.0", features = ["testkit"] }
 ```
 
 每个内置模板都有现成的 persona。模拟设备的状态机与客户端模板派生自同一份 `DeviceHandlerConfig`，模板变更永远不会与模拟实现悄悄脱节：
