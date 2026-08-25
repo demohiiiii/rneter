@@ -2,6 +2,7 @@
 
 use crate::device::{DeviceHandler, DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use crate::error::ConnectError;
+use crate::session::{Command, HookAction, SessionHooks, SessionOperation};
 use std::collections::HashMap;
 
 /// Exports the underlying handler configuration for H3C devices.
@@ -58,6 +59,17 @@ pub fn h3c_config() -> DeviceHandlerConfig {
             transition_rule("Config", "exit", "Enable", true, false),
         ],
         dyn_param: HashMap::new(),
+        hooks: SessionHooks {
+            after_connect: vec![HookAction::new(
+                "disable-paging",
+                SessionOperation::from(Command {
+                    mode: "Enable".to_string(),
+                    command: "screen-length disable".to_string(),
+                    ..Command::default()
+                }),
+            )],
+            ..SessionHooks::default()
+        },
         ..Default::default()
     }
 }

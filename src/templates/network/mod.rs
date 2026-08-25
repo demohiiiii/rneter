@@ -616,6 +616,9 @@ mod tests {
         assert!(ruijie_hooks.contains(&"terminal width 256".to_string()));
         assert!(ruijie_hooks.contains(&"terminal length 0".to_string()));
 
+        let h3c_hooks = after_connect_command_strings(&h3c_config());
+        assert!(h3c_hooks.contains(&"screen-length disable".to_string()));
+
         let zte_hooks = after_connect_command_strings(&zte_zxros_config());
         assert!(zte_hooks.contains(&"terminal length 0".to_string()));
     }
