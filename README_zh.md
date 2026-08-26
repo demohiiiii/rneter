@@ -16,6 +16,7 @@
 - [Linux 主机管理](#linux-主机管理)
 - [连接安全](#连接安全)
 - [SSH 认证方式](#ssh-认证方式)
+- [终端输出编码](#终端输出编码)
 - [重连与重试](#重连与重试)
 - [Fleet 批量执行](#fleet-批量执行)
 - [文件传输](#文件传输)
@@ -296,6 +297,29 @@ let auth = SshAuthMethod::keyboard_interactive(vec![
 `SshAuthMethod::agent()`。确认接受该公告风险的调用方可以通过
 `SshAuthMethod::private_key_allow_vulnerable_rsa(...)` 或
 `SshAuthMethod::private_key_file_allow_vulnerable_rsa(...)` 显式启用 RSA 私钥认证。
+
+## 终端输出编码
+
+SSH 终端输出默认按 UTF-8 解码。对于使用中文传统编码的设备，可以在连接请求中
+选择 GB2312、GBK 或 GB18030。由于 GB18030 兼容 GB2312 和 GBK，这三个枚举值
+统一使用 GB18030 解码器：
+
+```rust
+use rneter::session::{ConnectionRequest, TextEncoding};
+
+let request = ConnectionRequest::new(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    rneter::templates::huawei()?,
+)
+.with_output_encoding(TextEncoding::Gb18030);
+```
+
+模板自动识别需要读取传统编码输出时，也可以在 `DetectRequest` 上调用相同的
+`with_output_encoding(...)` 方法。
 
 ## 重连与重试
 

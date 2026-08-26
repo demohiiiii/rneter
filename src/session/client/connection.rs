@@ -69,6 +69,7 @@ impl SharedSshClient {
         enable_password: &Option<String>,
         handler: &DeviceHandler,
         security_options: &ConnectionSecurityOptions,
+        output_encoding: TextEncoding,
     ) -> bool {
         if &self.auth_digest != auth_digest {
             debug!("Authentication method digest mismatch");
@@ -88,6 +89,11 @@ impl SharedSshClient {
 
         if &self.security_options != security_options {
             debug!("Security options mismatch");
+            return false;
+        }
+
+        if self.output_encoding != output_encoding {
+            debug!("Output encoding mismatch");
             return false;
         }
 
@@ -146,6 +152,7 @@ impl SharedSshClient {
         enable_password: Option<String>,
         mut handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
+        output_encoding: TextEncoding,
         connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
     ) -> Result<SharedSshClient, ConnectError> {
@@ -192,6 +199,7 @@ impl SharedSshClient {
 
         let io_task_device_addr = device_addr.clone();
         tokio::spawn(async move {
+            let mut output_decoder = super::TextStreamDecoder::new(output_encoding);
             loop {
                 tokio::select! {
                     data = receiver_from_user.recv() => {
@@ -212,24 +220,37 @@ impl SharedSshClient {
                         match msg {
                             Some(msg) => match msg {
                                 ChannelMsg::Data { ref data } => {
-                                    if let Ok(s) = std::str::from_utf8(data)
-                                        && sender_to_user.send(s.to_string()).await.is_err() {
+                                    let output = output_decoder.decode(data);
+                                    if !output.is_empty()
+                                        && sender_to_user.send(output).await.is_err() {
                                             debug!("{} Shell output receiver dropped. Closing task.", io_task_device_addr);
                                             break;
                                         }
                                 }
                                 ChannelMsg::ExitStatus { exit_status } => {
+                                    let trailing = output_decoder.finish();
+                                    if !trailing.is_empty() {
+                                        let _ = sender_to_user.send(trailing).await;
+                                    }
                                     debug!("{} Shell exited with status code: {}", io_task_device_addr, exit_status);
                                     let _ = channel.eof().await;
                                     break;
                                 }
                                 ChannelMsg::Eof => {
+                                    let trailing = output_decoder.finish();
+                                    if !trailing.is_empty() {
+                                        let _ = sender_to_user.send(trailing).await;
+                                    }
                                     debug!("{} Shell sent EOF.", io_task_device_addr);
                                     break;
                                 }
                                 _ => {}
                             },
                             None => {
+                                let trailing = output_decoder.finish();
+                                if !trailing.is_empty() {
+                                    let _ = sender_to_user.send(trailing).await;
+                                }
                                 debug!("{} Shell channel closed. Closing task.", io_task_device_addr);
                                 break;
                             }
@@ -367,6 +388,7 @@ impl SharedSshClient {
             auth_digest,
             enable_password_hash,
             security_options,
+            output_encoding,
             recorder,
             closed: false,
         };

@@ -683,6 +683,7 @@ impl SshConnectionManager {
             auth,
             enable_password,
             handler,
+            output_encoding,
         } = request;
         let auth_digest = auth.fingerprint().await?;
 
@@ -703,6 +704,7 @@ impl SshConnectionManager {
                     enable_password.clone(),
                     handler.clone(),
                     security_options.clone(),
+                    output_encoding,
                     connect_timeout,
                     recorder.clone(),
                 ))
@@ -726,6 +728,7 @@ impl SshConnectionManager {
                         &enable_password,
                         &handler,
                         &security_options,
+                        output_encoding,
                     )
             };
 
@@ -760,6 +763,7 @@ impl SshConnectionManager {
         enable_password: Option<String>,
         handler: DeviceHandler,
         security_options: ConnectionSecurityOptions,
+        output_encoding: TextEncoding,
         connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
     ) -> Result<(mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>), ConnectError> {
@@ -775,6 +779,7 @@ impl SshConnectionManager {
             enable_password,
             handler,
             security_options,
+            output_encoding,
             connect_timeout,
             recorder,
         )

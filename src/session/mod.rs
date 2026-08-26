@@ -55,6 +55,34 @@ pub use transaction::{
 /// Global singleton SSH connection manager.
 pub static MANAGER: Lazy<SshConnectionManager> = Lazy::new(SshConnectionManager::new);
 
+/// Character encoding used to decode terminal output received over SSH.
+///
+/// GB2312 and GBK are subsets of GB18030, so all three Chinese encoding
+/// variants use the GB18030 decoder.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TextEncoding {
+    /// UTF-8 with malformed byte sequences replaced by U+FFFD.
+    #[default]
+    Utf8,
+    /// GB2312-compatible decoding through GB18030.
+    Gb2312,
+    /// GBK-compatible decoding through GB18030.
+    Gbk,
+    /// GB18030 decoding.
+    Gb18030,
+}
+
+impl TextEncoding {
+    fn decoder(self) -> encoding_rs::Decoder {
+        match self {
+            Self::Utf8 => encoding_rs::UTF_8,
+            Self::Gb2312 | Self::Gbk | Self::Gb18030 => encoding_rs::GB18030,
+        }
+        .new_decoder_without_bom_handling()
+    }
+}
+
 /// Authentication method used to establish an SSH session.
 ///
 /// Marked `#[non_exhaustive]` so further methods can be added without a
@@ -371,6 +399,7 @@ pub struct DetectRequest {
     pub addr: String,
     pub port: u16,
     pub auth: SshAuthMethod,
+    pub output_encoding: TextEncoding,
 }
 
 impl DetectRequest {
@@ -386,7 +415,14 @@ impl DetectRequest {
             addr,
             port,
             auth,
+            output_encoding: TextEncoding::default(),
         }
+    }
+
+    /// Override the character encoding used to decode SSH terminal output.
+    pub fn with_output_encoding(mut self, output_encoding: TextEncoding) -> Self {
+        self.output_encoding = output_encoding;
+        self
     }
 
     /// Stable textual device address used for diagnostics.
@@ -404,6 +440,7 @@ pub struct ConnectionRequest {
     pub auth: SshAuthMethod,
     pub enable_password: Option<String>,
     pub handler: DeviceHandler,
+    pub output_encoding: TextEncoding,
 }
 
 impl ConnectionRequest {
@@ -442,7 +479,14 @@ impl ConnectionRequest {
             auth,
             enable_password,
             handler,
+            output_encoding: TextEncoding::default(),
         }
+    }
+
+    /// Override the character encoding used to decode SSH terminal output.
+    pub fn with_output_encoding(mut self, output_encoding: TextEncoding) -> Self {
+        self.output_encoding = output_encoding;
+        self
     }
 
     /// Stable cache key used by the connection manager.
@@ -605,6 +649,9 @@ pub struct SharedSshClient {
 
     /// Effective security options used when the connection was established.
     security_options: ConnectionSecurityOptions,
+
+    /// Character encoding used to decode SSH terminal output.
+    output_encoding: TextEncoding,
 
     /// Optional session recorder bound to this connection.
     recorder: Option<SessionRecorder>,
@@ -1240,6 +1287,30 @@ mod tests {
             request.auth,
             SshAuthMethod::Password(ref password) if password == "password"
         ));
+        assert_eq!(request.output_encoding, TextEncoding::Utf8);
+    }
+
+    #[test]
+    fn connection_and_detect_requests_allow_output_encoding_overrides() {
+        let connection = ConnectionRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+            None,
+            templates::cisco().expect("template"),
+        )
+        .with_output_encoding(TextEncoding::Gbk);
+        let detect = DetectRequest::new(
+            "admin".to_string(),
+            "192.168.1.1".to_string(),
+            22,
+            "password".to_string(),
+        )
+        .with_output_encoding(TextEncoding::Gb18030);
+
+        assert_eq!(connection.output_encoding, TextEncoding::Gbk);
+        assert_eq!(detect.output_encoding, TextEncoding::Gb18030);
     }
 
     #[tokio::test]

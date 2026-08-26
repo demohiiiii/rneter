@@ -119,13 +119,15 @@ async fn collect_detect_snapshot(
         ConnectError::russh_stage("autodetect_request_shell", device_addr.clone(), error)
     })?;
 
+    let mut output_decoder = super::TextStreamDecoder::new(request.output_encoding);
     let mut initial_raw = String::new();
     let prompt = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { ref data }) => {
-                    if let Ok(chunk) = std::str::from_utf8(data) {
-                        initial_raw.push_str(chunk);
+                    let chunk = output_decoder.decode(data);
+                    if !chunk.is_empty() {
+                        initial_raw.push_str(&chunk);
                         let normalized = normalize_detect_output(&initial_raw);
                         let fragment = latest_terminal_fragment(&normalized).trim_end();
                         if !fragment.is_empty() && looks_like_shell_prompt(fragment) {
@@ -176,14 +178,15 @@ async fn collect_detect_snapshot(
             loop {
                 match channel.wait().await {
                     Some(ChannelMsg::Data { ref data }) => {
-                        if let Ok(chunk) = std::str::from_utf8(data) {
-                            raw.push_str(chunk);
+                        let chunk = output_decoder.decode(data);
+                        if !chunk.is_empty() {
+                            raw.push_str(&chunk);
                             let normalized = normalize_detect_output(&raw);
                             let fragment = latest_terminal_fragment(&normalized).trim_end();
                             trace!(
                                 "autodetect probe waiting command='{}' chunk='{}' latest_fragment='{}' target_prompt='{}'",
                                 command,
-                                summarize_detect_log_text(chunk, 120),
+                                summarize_detect_log_text(&chunk, 120),
                                 summarize_detect_log_text(fragment, 120),
                                 summarize_detect_log_text(&prompt, 80)
                             );

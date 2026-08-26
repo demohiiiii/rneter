@@ -668,6 +668,7 @@ fn build_detected_connection_request_from_templates(
         .ok_or_else(|| ConnectError::TemplateNotFound(best.template_name.clone()))?;
     let handler = template.handler_config.build()?;
 
+    let output_encoding = request.output_encoding;
     Ok(ConnectionRequest::new_with_auth(
         request.user,
         request.addr,
@@ -675,7 +676,8 @@ fn build_detected_connection_request_from_templates(
         request.auth,
         enable_password,
         handler,
-    ))
+    )
+    .with_output_encoding(output_encoding))
 }
 
 fn builtin_detect_profiles() -> Vec<(String, TemplateDetectProfile)> {
@@ -981,7 +983,8 @@ mod tests {
             "127.0.0.1".to_string(),
             22,
             "secret".to_string(),
-        );
+        )
+        .with_output_encoding(crate::session::TextEncoding::Gbk);
 
         let best = select_best_detected_template(&report, DetectConnectPolicy::default())
             .expect("best candidate");
@@ -1000,11 +1003,13 @@ mod tests {
             auth,
             enable_password,
             handler,
+            output_encoding,
         } = built;
 
         assert_eq!(user, "adam");
         assert_eq!(addr, "127.0.0.1");
         assert_eq!(port, 22);
+        assert_eq!(output_encoding, crate::session::TextEncoding::Gbk);
         assert_eq!(
             auth,
             crate::session::SshAuthMethod::Password("secret".to_string())

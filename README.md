@@ -18,6 +18,7 @@
 - [Command Flows and Interaction](#command-flows-and-interaction)
 - [Connection Security](#connection-security)
 - [SSH Authentication](#ssh-authentication)
+- [Terminal Output Encoding](#terminal-output-encoding)
 - [Reconnect and Retry](#reconnect-and-retry)
 - [Fleet Execution](#fleet-execution)
 - [Session Recording and Replay](#session-recording-and-replay)
@@ -550,6 +551,30 @@ release. Prefer Ed25519/ECDSA keys or `SshAuthMethod::agent()`. A caller that
 accepts the advisory risk can explicitly opt in with
 `SshAuthMethod::private_key_allow_vulnerable_rsa(...)` or
 `SshAuthMethod::private_key_file_allow_vulnerable_rsa(...)`.
+
+## Terminal Output Encoding
+
+SSH terminal output is decoded as UTF-8 by default. Devices configured for a
+Chinese legacy encoding can select GB2312, GBK, or GB18030 on the connection
+request. All three variants use GB18030 decoding because it is compatible with
+GB2312 and GBK:
+
+```rust
+use rneter::session::{ConnectionRequest, TextEncoding};
+
+let request = ConnectionRequest::new(
+    "admin".to_string(),
+    "192.168.1.1".to_string(),
+    22,
+    "password".to_string(),
+    None,
+    rneter::templates::huawei()?,
+)
+.with_output_encoding(TextEncoding::Gb18030);
+```
+
+Use the same `with_output_encoding(...)` method on `DetectRequest` when
+template autodetection must read legacy-encoded output.
 
 ## Reconnect and Retry
 
