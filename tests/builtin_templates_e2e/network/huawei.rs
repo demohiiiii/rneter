@@ -1,7 +1,9 @@
 //! Virtual-device E2E test for the `huawei` template.
 
 use crate::support;
-use rneter::testkit::{DevicePersona, FakeSshDevice};
+use rneter::autodetect_with_context;
+use rneter::session::{ConnectionSecurityOptions, ExecutionContext};
+use rneter::testkit::{DevicePersona, FakeHostKeyAlgorithm, FakeSshDevice};
 
 #[tokio::test]
 async fn huawei_full_scenario() {
@@ -11,6 +13,24 @@ async fn huawei_full_scenario() {
 #[tokio::test]
 async fn huawei_autodetected_from_virtual_device() {
     support::run_autodetect_scenario("huawei").await;
+}
+
+#[tokio::test]
+async fn huawei_autodetect_retries_an_ssh_rsa_only_device() {
+    let persona = DevicePersona::builtin("huawei").expect("build huawei persona");
+    let device =
+        FakeSshDevice::spawn_with_host_key_algorithm(persona, FakeHostKeyAlgorithm::SshRsa)
+            .await
+            .expect("spawn ssh-rsa-only Huawei device");
+    let context = ExecutionContext::new()
+        .with_security_options(ConnectionSecurityOptions::legacy_compatible())
+        .with_connect_timeout_secs(15);
+
+    let report = autodetect_with_context(device.detect_request(), context)
+        .await
+        .expect("autodetect should retry with ssh-rsa");
+    let best = report.best_match.expect("autodetect should find Huawei");
+    assert_eq!(best.template_name, "huawei");
 }
 
 #[tokio::test]

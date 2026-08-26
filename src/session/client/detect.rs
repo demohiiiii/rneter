@@ -1,4 +1,5 @@
 use super::super::*;
+use super::connection::connect_ssh_with_legacy_host_key_fallback;
 use crate::device::{latest_terminal_fragment, normalize_terminal_output};
 use crate::templates::{DetectSnapshot, summarize_detect_log_text};
 use log::{debug, trace};
@@ -73,13 +74,20 @@ impl SshConnectionManager {
         context: &ExecutionContext,
         probe_commands: &[String],
     ) -> Result<DetectSnapshot, ConnectError> {
-        collect_detect_snapshot(request, &context.security_options, probe_commands).await
+        collect_detect_snapshot(
+            request,
+            &context.security_options,
+            context.connect_timeout,
+            probe_commands,
+        )
+        .await
     }
 }
 
 async fn collect_detect_snapshot(
     request: &DetectRequest,
     security_options: &ConnectionSecurityOptions,
+    connect_timeout: Duration,
     probe_commands: &[String],
 ) -> Result<DetectSnapshot, ConnectError> {
     let device_addr = request.device_addr();
@@ -89,22 +97,19 @@ async fn collect_detect_snapshot(
         request.port,
         probe_commands.len()
     );
-    let config = Config {
-        preferred: security_options.preferred(),
-        inactivity_timeout: Some(Duration::from_secs(60)),
-        ..Default::default()
-    };
     let transport_auth = request.auth.to_transport().await?;
 
-    let client = Client::connect_with_config(
-        (request.addr.as_str(), request.port),
+    let client = connect_ssh_with_legacy_host_key_fallback(
+        "autodetect_connect",
+        &device_addr,
+        &request.addr,
+        request.port,
         &request.user,
         transport_auth,
-        security_options.server_check.clone(),
-        config,
+        security_options,
+        connect_timeout,
     )
-    .await
-    .map_err(|error| ConnectError::ssh2_stage("autodetect_connect", device_addr.clone(), error))?;
+    .await?;
 
     let mut channel = client.get_channel().await.map_err(|error| {
         ConnectError::ssh2_stage("autodetect_open_channel", device_addr.clone(), error)

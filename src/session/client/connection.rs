@@ -12,6 +12,7 @@ fn build_init_timeout_message(initial_output: &str) -> String {
 }
 
 async fn await_ssh_connect<T>(
+    stage: &'static str,
     device_addr: &str,
     connect_timeout: Duration,
     connect: impl std::future::Future<Output = Result<T, async_ssh2_tokio::Error>>,
@@ -19,11 +20,12 @@ async fn await_ssh_connect<T>(
     tokio::time::timeout(connect_timeout, connect)
         .await
         .map_err(|_| ConnectError::ConnectTimeout(device_addr.to_string()))?
-        .map_err(|error| ConnectError::ssh2_stage("connect", device_addr.to_string(), error))
+        .map_err(|error| ConnectError::ssh2_stage(stage, device_addr.to_string(), error))
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn connect_ssh_transport(
+    stage: &'static str,
     device_addr: &str,
     addr: &str,
     port: u16,
@@ -40,11 +42,86 @@ async fn connect_ssh_transport(
     };
 
     await_ssh_connect(
+        stage,
         device_addr,
         connect_timeout,
         Client::connect_with_config((addr.to_string(), port), user, auth, server_check, config),
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn connect_ssh_with_legacy_host_key_fallback(
+    stage: &'static str,
+    device_addr: &str,
+    addr: &str,
+    port: u16,
+    user: &str,
+    auth: AuthMethod,
+    security_options: &ConnectionSecurityOptions,
+    connect_timeout: Duration,
+) -> Result<Client, ConnectError> {
+    let connect_started = std::time::Instant::now();
+    let initial_connect = connect_ssh_transport(
+        stage,
+        device_addr,
+        addr,
+        port,
+        user,
+        auth.clone(),
+        security_options.server_check.clone(),
+        security_options.preferred(),
+        connect_timeout,
+    )
+    .await;
+
+    let error = match initial_connect {
+        Ok(client) => return Ok(client),
+        Err(error) => error,
+    };
+    let Some(fallback) = legacy_host_key_fallback(&error) else {
+        return Err(error);
+    };
+    let preferred = match fallback {
+        LegacyHostKeyFallback::SshRsa => security_options.ssh_rsa_fallback_preferred(),
+        LegacyHostKeyFallback::SshDss => security_options.ssh_dss_fallback_preferred(),
+    };
+    let Some(preferred) = preferred else {
+        return Err(error);
+    };
+
+    debug!(
+        "{} host-key negotiation requires {:?}; retrying once",
+        device_addr, fallback
+    );
+    let fallback_timeout = remaining_connect_timeout(connect_timeout, connect_started.elapsed())
+        .ok_or_else(|| ConnectError::ConnectTimeout(device_addr.to_string()))?;
+    let client = connect_ssh_transport(
+        stage,
+        device_addr,
+        addr,
+        port,
+        user,
+        auth,
+        security_options.server_check.clone(),
+        preferred,
+        fallback_timeout,
+    )
+    .await?;
+    match fallback {
+        LegacyHostKeyFallback::SshRsa => {
+            warn!("{} connected using legacy ssh-rsa (SHA-1)", device_addr)
+        }
+        LegacyHostKeyFallback::SshDss => {
+            warn!("{} connected using legacy ssh-dss (DSA/SHA-1)", device_addr)
+        }
+    }
+    Ok(client)
+}
+
+fn remaining_connect_timeout(total: Duration, elapsed: Duration) -> Option<Duration> {
+    let remaining = total.saturating_sub(elapsed);
+    (!remaining.is_zero()).then_some(remaining)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,58 +298,17 @@ impl SharedSshClient {
         let device_addr = format!("{user}@{addr}:{port}");
 
         let transport_auth = auth.to_transport().await?;
-        let initial_connect = connect_ssh_transport(
+        let client = connect_ssh_with_legacy_host_key_fallback(
+            "connect",
             &device_addr,
             &addr,
             port,
             &user,
-            transport_auth.clone(),
-            security_options.server_check.clone(),
-            security_options.preferred(),
+            transport_auth,
+            &security_options,
             connect_timeout,
         )
-        .await;
-
-        let client = match initial_connect {
-            Err(error) => {
-                let Some(fallback) = legacy_host_key_fallback(&error) else {
-                    return Err(error);
-                };
-                let preferred = match fallback {
-                    LegacyHostKeyFallback::SshRsa => security_options.ssh_rsa_fallback_preferred(),
-                    LegacyHostKeyFallback::SshDss => security_options.ssh_dss_fallback_preferred(),
-                };
-                let Some(preferred) = preferred else {
-                    return Err(error);
-                };
-
-                debug!(
-                    "{} host-key negotiation requires {:?}; retrying once",
-                    device_addr, fallback
-                );
-                let client = connect_ssh_transport(
-                    &device_addr,
-                    &addr,
-                    port,
-                    &user,
-                    transport_auth,
-                    security_options.server_check.clone(),
-                    preferred,
-                    connect_timeout,
-                )
-                .await?;
-                match fallback {
-                    LegacyHostKeyFallback::SshRsa => {
-                        warn!("{} connected using legacy ssh-rsa (SHA-1)", device_addr)
-                    }
-                    LegacyHostKeyFallback::SshDss => {
-                        warn!("{} connected using legacy ssh-dss (DSA/SHA-1)", device_addr)
-                    }
-                }
-                client
-            }
-            Ok(client) => client,
-        };
+        .await?;
         debug!("{} TCP connection successful", device_addr);
 
         let mut channel = client.get_channel().await.map_err(|error| {
@@ -618,7 +654,7 @@ impl SharedSshClient {
 mod tests {
     use super::{
         LegacyHostKeyFallback, await_ssh_connect, build_init_timeout_message,
-        legacy_host_key_fallback, should_run_hook_actions,
+        legacy_host_key_fallback, remaining_connect_timeout, should_run_hook_actions,
     };
     use crate::device::normalize_terminal_output;
     use crate::error::ConnectError;
@@ -680,6 +716,7 @@ mod tests {
     #[tokio::test]
     async fn ssh_connect_timeout_reports_target() {
         let result = await_ssh_connect(
+            "connect",
             "admin@192.0.2.1:22",
             Duration::from_millis(1),
             std::future::pending::<Result<(), async_ssh2_tokio::Error>>(),
@@ -760,5 +797,21 @@ mod tests {
             }),
         );
         assert_eq!(legacy_host_key_fallback(&error), None);
+    }
+
+    #[test]
+    fn fallback_uses_only_the_remaining_connect_timeout() {
+        assert_eq!(
+            remaining_connect_timeout(Duration::from_secs(10), Duration::from_secs(4)),
+            Some(Duration::from_secs(6))
+        );
+        assert_eq!(
+            remaining_connect_timeout(Duration::from_secs(10), Duration::from_secs(10)),
+            None
+        );
+        assert_eq!(
+            remaining_connect_timeout(Duration::from_secs(10), Duration::from_secs(12)),
+            None
+        );
     }
 }

@@ -39,6 +39,7 @@
 //! # }
 //! ```
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,6 +69,28 @@ pub const DEFAULT_PASSWORD: &str = "testkit-login-pw";
 pub const DEFAULT_ENABLE_PASSWORD: &str = "testkit-enable-pw";
 /// Command every fake device answers with vendor-styled error output.
 pub const ERROR_COMMAND: &str = "make-error";
+
+/// SSH host-key algorithm exposed by a fake device.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FakeHostKeyAlgorithm {
+    /// Modern Ed25519 host key used by default.
+    #[default]
+    Ed25519,
+    /// Legacy RSA with SHA-1 signature (`ssh-rsa`).
+    SshRsa,
+    /// Legacy DSA with SHA-1 signature (`ssh-dss`).
+    SshDss,
+}
+
+impl FakeHostKeyAlgorithm {
+    fn russh_algorithm(self) -> Algorithm {
+        match self {
+            Self::Ed25519 => Algorithm::Ed25519,
+            Self::SshRsa => Algorithm::Rsa { hash: None },
+            Self::SshDss => Algorithm::Dsa,
+        }
+    }
+}
 
 /// Interactive challenge a fake device issues before completing a command.
 #[derive(Debug, Clone)]
@@ -921,7 +944,15 @@ impl FakeSshDevice {
     /// state through the real prompt-matching engine, so personas can never
     /// drift from the template they simulate.
     pub async fn spawn(persona: DevicePersona) -> Result<Self, ConnectError> {
-        Self::spawn_on(persona, ("127.0.0.1", 0)).await
+        Self::spawn_with_host_key_algorithm(persona, FakeHostKeyAlgorithm::default()).await
+    }
+
+    /// Starts a fake device restricted to one SSH host-key algorithm.
+    pub async fn spawn_with_host_key_algorithm(
+        persona: DevicePersona,
+        host_key_algorithm: FakeHostKeyAlgorithm,
+    ) -> Result<Self, ConnectError> {
+        Self::spawn_on_with_host_key_algorithm(persona, ("127.0.0.1", 0), host_key_algorithm).await
     }
 
     /// Starts a fake device on a specific bind address.
@@ -932,6 +963,16 @@ impl FakeSshDevice {
     pub async fn spawn_on(
         persona: DevicePersona,
         bind_addr: impl tokio::net::ToSocketAddrs,
+    ) -> Result<Self, ConnectError> {
+        Self::spawn_on_with_host_key_algorithm(persona, bind_addr, FakeHostKeyAlgorithm::default())
+            .await
+    }
+
+    /// Starts a fake device on a specific address with one host-key algorithm.
+    pub async fn spawn_on_with_host_key_algorithm(
+        persona: DevicePersona,
+        bind_addr: impl tokio::net::ToSocketAddrs,
+        host_key_algorithm: FakeHostKeyAlgorithm,
     ) -> Result<Self, ConnectError> {
         Self::validate_persona(&persona)?;
 
@@ -944,12 +985,30 @@ impl FakeSshDevice {
             ConnectError::InternalServerError(format!("fake device local addr: {error}"))
         })?;
 
-        let host_key =
-            PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).map_err(|error| {
+        let host_key_algorithm_name = host_key_algorithm.russh_algorithm();
+        let host_key = match host_key_algorithm {
+            FakeHostKeyAlgorithm::SshRsa => {
+                russh::keys::decode_secret_key(include_str!("fixtures/ssh_host_rsa_key"), None)
+                    .map_err(|error| {
+                        ConnectError::InternalServerError(format!(
+                            "decode testkit RSA host key fixture: {error}"
+                        ))
+                    })?
+            }
+            FakeHostKeyAlgorithm::Ed25519 | FakeHostKeyAlgorithm::SshDss => PrivateKey::random(
+                &mut rand::rng(),
+                host_key_algorithm_name.clone(),
+            )
+            .map_err(|error| {
                 ConnectError::InternalServerError(format!("generate fake host key: {error}"))
-            })?;
+            })?,
+        };
         let config = Arc::new(server::Config {
             keys: vec![host_key],
+            preferred: russh::Preferred {
+                key: Cow::Owned(vec![host_key_algorithm_name]),
+                ..Default::default()
+            },
             auth_rejection_time: Duration::from_millis(10),
             ..Default::default()
         });
