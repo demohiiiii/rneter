@@ -496,6 +496,13 @@ let _sender = MANAGER
     .await?;
 ```
 
+`LegacyCompatible` first attempts modern host-key signatures. If a device only
+offers a deprecated host-key algorithm, or returns the non-canonical ECDSA
+`mpint` encoding found on some Huawei releases, rneter retries once with the
+required `ssh-rsa` (SHA-1) or `ssh-dss` algorithm and emits a `WARN` log after
+the fallback succeeds. `Secure` and `Balanced` never perform this downgrade.
+Host-key verification remains unchanged during the retry.
+
 ## SSH Authentication
 
 Password authentication remains the default through `ConnectionRequest::new(...)`.

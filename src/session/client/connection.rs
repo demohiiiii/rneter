@@ -22,6 +22,68 @@ async fn await_ssh_connect<T>(
         .map_err(|error| ConnectError::ssh2_stage("connect", device_addr.to_string(), error))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn connect_ssh_transport(
+    device_addr: &str,
+    addr: &str,
+    port: u16,
+    user: &str,
+    auth: AuthMethod,
+    server_check: ServerCheckMethod,
+    preferred: Preferred,
+    connect_timeout: Duration,
+) -> Result<Client, ConnectError> {
+    let config = Config {
+        preferred,
+        inactivity_timeout: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+
+    await_ssh_connect(
+        device_addr,
+        connect_timeout,
+        Client::connect_with_config((addr.to_string(), port), user, auth, server_check, config),
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyHostKeyFallback {
+    SshRsa,
+    SshDss,
+}
+
+fn legacy_host_key_fallback(error: &ConnectError) -> Option<LegacyHostKeyFallback> {
+    let ConnectError::Ssh2StageError {
+        source: async_ssh2_tokio::Error::SshError(source),
+        ..
+    } = error
+    else {
+        return None;
+    };
+
+    match source {
+        russh::Error::SshKey(russh::keys::ssh_key::Error::Encoding(
+            russh::keys::ssh_encoding::Error::MpintEncoding,
+        )) => Some(LegacyHostKeyFallback::SshRsa),
+        russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            theirs,
+            ..
+        } if theirs.iter().any(|algorithm| algorithm == "ssh-rsa") => {
+            Some(LegacyHostKeyFallback::SshRsa)
+        }
+        russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            theirs,
+            ..
+        } if theirs.iter().any(|algorithm| algorithm == "ssh-dss") => {
+            Some(LegacyHostKeyFallback::SshDss)
+        }
+        _ => None,
+    }
+}
+
 fn should_run_hook_actions(in_hook: bool, actions: &[HookAction]) -> bool {
     !in_hook && !actions.is_empty()
 }
@@ -159,25 +221,58 @@ impl SharedSshClient {
         let device_addr = format!("{user}@{addr}:{port}");
 
         let transport_auth = auth.to_transport().await?;
-
-        let config = Config {
-            preferred: security_options.preferred(),
-            inactivity_timeout: Some(Duration::from_secs(60)),
-            ..Default::default()
-        };
-
-        let client = await_ssh_connect(
+        let initial_connect = connect_ssh_transport(
             &device_addr,
+            &addr,
+            port,
+            &user,
+            transport_auth.clone(),
+            security_options.server_check.clone(),
+            security_options.preferred(),
             connect_timeout,
-            Client::connect_with_config(
-                (addr, port),
-                &user,
-                transport_auth,
-                security_options.server_check.clone(),
-                config,
-            ),
         )
-        .await?;
+        .await;
+
+        let client = match initial_connect {
+            Err(error) => {
+                let Some(fallback) = legacy_host_key_fallback(&error) else {
+                    return Err(error);
+                };
+                let preferred = match fallback {
+                    LegacyHostKeyFallback::SshRsa => security_options.ssh_rsa_fallback_preferred(),
+                    LegacyHostKeyFallback::SshDss => security_options.ssh_dss_fallback_preferred(),
+                };
+                let Some(preferred) = preferred else {
+                    return Err(error);
+                };
+
+                debug!(
+                    "{} host-key negotiation requires {:?}; retrying once",
+                    device_addr, fallback
+                );
+                let client = connect_ssh_transport(
+                    &device_addr,
+                    &addr,
+                    port,
+                    &user,
+                    transport_auth,
+                    security_options.server_check.clone(),
+                    preferred,
+                    connect_timeout,
+                )
+                .await?;
+                match fallback {
+                    LegacyHostKeyFallback::SshRsa => {
+                        warn!("{} connected using legacy ssh-rsa (SHA-1)", device_addr)
+                    }
+                    LegacyHostKeyFallback::SshDss => {
+                        warn!("{} connected using legacy ssh-dss (DSA/SHA-1)", device_addr)
+                    }
+                }
+                client
+            }
+            Ok(client) => client,
+        };
         debug!("{} TCP connection successful", device_addr);
 
         let mut channel = client.get_channel().await.map_err(|error| {
@@ -521,7 +616,10 @@ impl SharedSshClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{await_ssh_connect, build_init_timeout_message, should_run_hook_actions};
+    use super::{
+        LegacyHostKeyFallback, await_ssh_connect, build_init_timeout_message,
+        legacy_host_key_fallback, should_run_hook_actions,
+    };
     use crate::device::normalize_terminal_output;
     use crate::error::ConnectError;
     use crate::session::{Command, HookAction, HookFailurePolicy, SessionOperation};
@@ -593,5 +691,74 @@ mod tests {
             Err(ConnectError::ConnectTimeout(target))
                 if target == "admin@192.0.2.1:22"
         ));
+    }
+
+    #[test]
+    fn mpint_errors_trigger_ssh_rsa_compatibility() {
+        let mpint_error = ConnectError::ssh2_stage(
+            "connect",
+            "admin@device:22",
+            async_ssh2_tokio::Error::SshError(russh::Error::SshKey(
+                russh::keys::ssh_key::Error::Encoding(
+                    russh::keys::ssh_encoding::Error::MpintEncoding,
+                ),
+            )),
+        );
+        assert_eq!(
+            legacy_host_key_fallback(&mpint_error),
+            Some(LegacyHostKeyFallback::SshRsa)
+        );
+
+        let unrelated_error = ConnectError::ssh2_stage(
+            "connect",
+            "admin@device:22",
+            async_ssh2_tokio::Error::SshError(russh::Error::WrongServerSig),
+        );
+        assert_eq!(legacy_host_key_fallback(&unrelated_error), None);
+    }
+
+    #[test]
+    fn no_common_host_key_error_selects_an_offered_legacy_algorithm() {
+        let error = ConnectError::ssh2_stage(
+            "connect",
+            "admin@device:22",
+            async_ssh2_tokio::Error::SshError(russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ours: vec!["ssh-ed25519".to_string()],
+                theirs: vec!["ssh-dss".to_string(), "ssh-rsa".to_string()],
+            }),
+        );
+        assert_eq!(
+            legacy_host_key_fallback(&error),
+            Some(LegacyHostKeyFallback::SshRsa)
+        );
+
+        let dsa_only = ConnectError::ssh2_stage(
+            "connect",
+            "admin@device:22",
+            async_ssh2_tokio::Error::SshError(russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ours: vec!["ssh-ed25519".to_string()],
+                theirs: vec!["ssh-dss".to_string()],
+            }),
+        );
+        assert_eq!(
+            legacy_host_key_fallback(&dsa_only),
+            Some(LegacyHostKeyFallback::SshDss)
+        );
+    }
+
+    #[test]
+    fn no_common_non_host_key_error_does_not_trigger_host_key_fallback() {
+        let error = ConnectError::ssh2_stage(
+            "connect",
+            "admin@device:22",
+            async_ssh2_tokio::Error::SshError(russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Kex,
+                ours: vec!["curve25519-sha256".to_string()],
+                theirs: vec!["ssh-rsa".to_string()],
+            }),
+        );
+        assert_eq!(legacy_host_key_fallback(&error), None);
     }
 }

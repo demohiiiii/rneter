@@ -1,4 +1,5 @@
 use super::*;
+use russh::keys::Algorithm;
 
 /// Security level used for SSH algorithm selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -69,12 +70,37 @@ impl ConnectionSecurityOptions {
             },
             SecurityLevel::LegacyCompatible => Preferred {
                 kex: Cow::Borrowed(config::LEGACY_KEX_ORDER),
-                key: Cow::Borrowed(config::LEGACY_KEY_TYPES),
+                key: Cow::Borrowed(config::LEGACY_INITIAL_KEY_TYPES),
                 cipher: Cow::Borrowed(config::LEGACY_CIPHERS),
                 mac: Cow::Borrowed(config::LEGACY_MAC_ALGORITHMS),
                 compression: Cow::Borrowed(config::DEFAULT_COMPRESSION_ALGORITHMS),
             },
         }
+    }
+
+    pub(super) fn ssh_rsa_fallback_preferred(&self) -> Option<Preferred> {
+        self.legacy_host_key_fallback_preferred(config::LEGACY_SSH_RSA_KEY_TYPES)
+    }
+
+    pub(super) fn ssh_dss_fallback_preferred(&self) -> Option<Preferred> {
+        self.legacy_host_key_fallback_preferred(config::LEGACY_SSH_DSS_KEY_TYPES)
+    }
+
+    fn legacy_host_key_fallback_preferred(
+        &self,
+        key_types: &'static [Algorithm],
+    ) -> Option<Preferred> {
+        if self.level != SecurityLevel::LegacyCompatible {
+            return None;
+        }
+
+        Some(Preferred {
+            kex: Cow::Borrowed(config::LEGACY_KEX_ORDER),
+            key: Cow::Borrowed(key_types),
+            cipher: Cow::Borrowed(config::LEGACY_CIPHERS),
+            mac: Cow::Borrowed(config::LEGACY_MAC_ALGORITHMS),
+            compression: Cow::Borrowed(config::DEFAULT_COMPRESSION_ALGORITHMS),
+        })
     }
 }
 
@@ -82,6 +108,7 @@ impl ConnectionSecurityOptions {
 mod tests {
     use super::{ConnectionSecurityOptions, SecurityLevel};
     use async_ssh2_tokio::ServerCheckMethod;
+    use russh::keys::Algorithm;
     use russh::{cipher, kex, mac};
 
     #[test]
@@ -116,6 +143,8 @@ mod tests {
         let preferred = ConnectionSecurityOptions::legacy_compatible().preferred();
 
         assert!(preferred.kex.contains(&kex::DH_G1_SHA1));
+        assert!(!preferred.key.contains(&Algorithm::Rsa { hash: None }));
+        assert!(!preferred.key.contains(&Algorithm::Dsa));
         assert!(preferred.cipher.iter().all(|alg| *alg != cipher::NONE));
         assert!(preferred.cipher.iter().all(|alg| *alg != cipher::CLEAR));
         assert!(preferred.mac.iter().all(|alg| *alg != mac::NONE));
@@ -129,5 +158,29 @@ mod tests {
         assert!(!preferred.cipher.contains(&cipher::NONE));
         assert!(!preferred.mac.contains(&mac::NONE));
         assert!(!preferred.kex.contains(&kex::NONE));
+    }
+
+    #[test]
+    fn only_legacy_profile_can_retry_with_sha1_ssh_rsa() {
+        assert!(
+            ConnectionSecurityOptions::secure_default()
+                .ssh_rsa_fallback_preferred()
+                .is_none()
+        );
+        assert!(
+            ConnectionSecurityOptions::balanced()
+                .ssh_rsa_fallback_preferred()
+                .is_none()
+        );
+
+        let preferred = ConnectionSecurityOptions::legacy_compatible()
+            .ssh_rsa_fallback_preferred()
+            .expect("legacy profile should allow the compatibility retry");
+        assert_eq!(preferred.key.as_ref(), &[Algorithm::Rsa { hash: None }]);
+
+        let preferred = ConnectionSecurityOptions::legacy_compatible()
+            .ssh_dss_fallback_preferred()
+            .expect("legacy profile should preserve DSA-only compatibility");
+        assert_eq!(preferred.key.as_ref(), &[Algorithm::Dsa]);
     }
 }

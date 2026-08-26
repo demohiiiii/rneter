@@ -245,6 +245,11 @@ let _sender = MANAGER
     .await?;
 ```
 
+`LegacyCompatible` 会先尝试现代主机密钥签名。如果设备只提供已弃用的主机密钥算法，
+或者返回部分 Huawei 版本中存在的非规范 ECDSA `mpint` 编码，rneter 会使用所需的
+`ssh-rsa`（SHA-1）或 `ssh-dss` 算法重试一次，并在回退成功后输出 `WARN` 日志。
+`Secure` 和 `Balanced` 不会执行该降级；重试期间仍使用原有的主机密钥校验策略。
+
 ## SSH 认证方式
 
 密码认证仍是默认路径：`ConnectionRequest::new(...)`。

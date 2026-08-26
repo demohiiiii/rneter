@@ -76,8 +76,9 @@ pub const DEFAULT_COMPRESSION_ALGORITHMS: &[compression::Name] = &[
 /// Includes modern algorithms like Ed25519 and ECDSA, as well as legacy
 /// RSA and DSA for compatibility with older devices.
 ///
-/// Deprecated algorithms (SHA-1 RSA, 1024-bit DSA) stay at the end so a
-/// modern host key is always preferred when the server offers one.
+/// Deprecated algorithms (SHA-1 RSA, 1024-bit DSA) stay at the end. The
+/// legacy connection profile omits them from its first attempt and enables
+/// them only through a logged compatibility retry.
 pub const LEGACY_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Ed25519,
     Algorithm::SkEd25519,
@@ -100,6 +101,40 @@ pub const LEGACY_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Rsa { hash: None },
     Algorithm::Dsa,
 ];
+
+/// Host key algorithms used for the first legacy-compatible connection attempt.
+///
+/// SHA-1 RSA and DSA are excluded so their use always goes through a logged
+/// compatibility retry.
+pub const LEGACY_INITIAL_KEY_TYPES: &[Algorithm] = &[
+    Algorithm::Ed25519,
+    Algorithm::SkEd25519,
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP256,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP384,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
+    },
+    Algorithm::SkEcdsaSha2NistP256,
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha512),
+    },
+    Algorithm::Rsa {
+        hash: Some(HashAlg::Sha256),
+    },
+];
+
+/// SHA-1 RSA host key algorithm used only for an explicit compatibility retry.
+///
+/// This list intentionally contains no modern alternatives: a retry using it
+/// cannot negotiate the malformed ECDSA signature that triggered the retry.
+pub const LEGACY_SSH_RSA_KEY_TYPES: &[Algorithm] = &[Algorithm::Rsa { hash: None }];
+
+/// DSA host key algorithm used only for an explicit compatibility retry.
+pub const LEGACY_SSH_DSS_KEY_TYPES: &[Algorithm] = &[Algorithm::Dsa];
 
 /// Balanced key exchange algorithms (keeps broad compatibility while removing weak entries).
 pub const BALANCED_KEX_ORDER: &[kex::Name] = &[

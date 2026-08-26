@@ -17,7 +17,7 @@
 
 use async_ssh2_tokio::client::{AuthMethod, Client};
 use async_ssh2_tokio::{Config, ServerCheckMethod};
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use moka::future::Cache;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
