@@ -1143,7 +1143,7 @@ impl SessionOperationOutput {
 /// operations outside transaction/workflow execution.
 #[derive(Debug)]
 pub struct SessionOperationExecutionError {
-    error: ConnectError,
+    error: Box<ConnectError>,
     partial_output: SessionOperationOutput,
 }
 
@@ -1151,7 +1151,7 @@ impl SessionOperationExecutionError {
     /// Build a new operation execution error from the root cause and partial output.
     pub fn new(error: ConnectError, partial_output: SessionOperationOutput) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             partial_output,
         }
     }
@@ -1168,7 +1168,7 @@ impl SessionOperationExecutionError {
 
     /// Consume the wrapper and return both the root cause and partial output.
     pub fn into_parts(self) -> (ConnectError, SessionOperationOutput) {
-        (self.error, self.partial_output)
+        (*self.error, self.partial_output)
     }
 }
 
@@ -1485,6 +1485,10 @@ mod tests {
             err.partial_output().steps[0].operation_summary,
             "terminal length 0"
         );
+
+        let (error, partial_output) = err.into_parts();
+        assert!(matches!(error, ConnectError::ExecTimeout(_)));
+        assert_eq!(partial_output.steps.len(), 1);
     }
 
     #[test]
