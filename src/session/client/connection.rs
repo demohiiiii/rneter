@@ -50,73 +50,78 @@ async fn connect_ssh_transport(
     .await
 }
 
+/// Boxes the russh connection state machine so callers do not embed it in larger retry futures.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn connect_ssh_with_legacy_host_key_fallback(
+pub(super) fn connect_ssh_with_legacy_host_key_fallback<'a>(
     stage: &'static str,
-    device_addr: &str,
-    addr: &str,
+    device_addr: &'a str,
+    addr: &'a str,
     port: u16,
-    user: &str,
+    user: &'a str,
     auth: AuthMethod,
-    security_options: &ConnectionSecurityOptions,
+    security_options: &'a ConnectionSecurityOptions,
     connect_timeout: Duration,
-) -> Result<Client, ConnectError> {
-    let connect_started = std::time::Instant::now();
-    let initial_connect = connect_ssh_transport(
-        stage,
-        device_addr,
-        addr,
-        port,
-        user,
-        auth.clone(),
-        security_options.server_check.clone(),
-        security_options.preferred(),
-        connect_timeout,
-    )
-    .await;
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Client, ConnectError>> + Send + 'a>>
+{
+    Box::pin(async move {
+        let connect_started = std::time::Instant::now();
+        let initial_connect = connect_ssh_transport(
+            stage,
+            device_addr,
+            addr,
+            port,
+            user,
+            auth.clone(),
+            security_options.server_check.clone(),
+            security_options.preferred(),
+            connect_timeout,
+        )
+        .await;
 
-    let error = match initial_connect {
-        Ok(client) => return Ok(client),
-        Err(error) => error,
-    };
-    let Some(fallback) = legacy_host_key_fallback(&error) else {
-        return Err(error);
-    };
-    let preferred = match fallback {
-        LegacyHostKeyFallback::SshRsa => security_options.ssh_rsa_fallback_preferred(),
-        LegacyHostKeyFallback::SshDss => security_options.ssh_dss_fallback_preferred(),
-    };
-    let Some(preferred) = preferred else {
-        return Err(error);
-    };
+        let error = match initial_connect {
+            Ok(client) => return Ok(client),
+            Err(error) => error,
+        };
+        let Some(fallback) = legacy_host_key_fallback(&error) else {
+            return Err(error);
+        };
+        let preferred = match fallback {
+            LegacyHostKeyFallback::SshRsa => security_options.ssh_rsa_fallback_preferred(),
+            LegacyHostKeyFallback::SshDss => security_options.ssh_dss_fallback_preferred(),
+        };
+        let Some(preferred) = preferred else {
+            return Err(error);
+        };
 
-    debug!(
-        "{} host-key negotiation requires {:?}; retrying once",
-        device_addr, fallback
-    );
-    let fallback_timeout = remaining_connect_timeout(connect_timeout, connect_started.elapsed())
-        .ok_or_else(|| ConnectError::ConnectTimeout(device_addr.to_string()))?;
-    let client = connect_ssh_transport(
-        stage,
-        device_addr,
-        addr,
-        port,
-        user,
-        auth,
-        security_options.server_check.clone(),
-        preferred,
-        fallback_timeout,
-    )
-    .await?;
-    match fallback {
-        LegacyHostKeyFallback::SshRsa => {
-            warn!("{} connected using legacy ssh-rsa (SHA-1)", device_addr)
+        debug!(
+            "{} host-key negotiation requires {:?}; retrying once",
+            device_addr, fallback
+        );
+        let fallback_timeout =
+            remaining_connect_timeout(connect_timeout, connect_started.elapsed())
+                .ok_or_else(|| ConnectError::ConnectTimeout(device_addr.to_string()))?;
+        let client = connect_ssh_transport(
+            stage,
+            device_addr,
+            addr,
+            port,
+            user,
+            auth,
+            security_options.server_check.clone(),
+            preferred,
+            fallback_timeout,
+        )
+        .await?;
+        match fallback {
+            LegacyHostKeyFallback::SshRsa => {
+                warn!("{} connected using legacy ssh-rsa (SHA-1)", device_addr)
+            }
+            LegacyHostKeyFallback::SshDss => {
+                warn!("{} connected using legacy ssh-dss (DSA/SHA-1)", device_addr)
+            }
         }
-        LegacyHostKeyFallback::SshDss => {
-            warn!("{} connected using legacy ssh-dss (DSA/SHA-1)", device_addr)
-        }
-    }
-    Ok(client)
+        Ok(client)
+    })
 }
 
 fn remaining_connect_timeout(total: Duration, elapsed: Duration) -> Option<Duration> {
@@ -812,6 +817,26 @@ mod tests {
         assert_eq!(
             remaining_connect_timeout(Duration::from_secs(10), Duration::from_secs(12)),
             None
+        );
+    }
+
+    #[test]
+    fn legacy_host_key_fallback_future_is_heap_allocated() {
+        let security_options = crate::session::ConnectionSecurityOptions::legacy_compatible();
+        let future = super::connect_ssh_with_legacy_host_key_fallback(
+            "connect",
+            "admin@192.0.2.1:22",
+            "192.0.2.1",
+            22,
+            "admin",
+            async_ssh2_tokio::client::AuthMethod::with_password("test-password"),
+            &security_options,
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            std::mem::size_of_val(&future),
+            std::mem::size_of::<usize>() * 2
         );
     }
 }
