@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.1] - 2026-08-28
+
+### New Features
+
+- Added configurable terminal output decoding through `TextEncoding`, with UTF-8 as the default and GB2312, GBK, and GB18030 selections decoded through the GB18030-compatible codec for both ordinary connections and SSH autodetection.
+- Added a logged compatibility retry for `LegacyCompatible` SSH connections when a device requires `ssh-rsa` or `ssh-dss`, including Huawei firmware that returns non-canonical ECDSA `mpint` values; secure and balanced profiles remain unchanged.
+
+### Optimizations
+
+- Added a best-effort H3C Comware `screen-length disable` after-connect hook so configuration collection avoids unstable `---- More ----` paging and incomplete output.
+- Made terminal decoding incremental across SSH channel chunks, preserving split UTF-8 and GB18030 characters and replacing malformed UTF-8 without discarding adjacent valid output.
+- Unified ordinary and autodetect SSH establishment behind one fallback implementation with a shared timeout budget, while boxing the connection state machine and operation error payloads to reduce nested future and error sizes during reconnects.
+
+### API Changes
+
+- Added the public `TextEncoding::{Utf8, Gb2312, Gbk, Gb18030}` enum plus `ConnectionRequest::with_output_encoding(...)` and `DetectRequest::with_output_encoding(...)` builders.
+- Added `output_encoding: TextEncoding` to `ConnectionRequest` and `DetectRequest`. Constructor-based callers continue to use UTF-8 automatically; callers using struct literals must initialize the new field.
+- SSH host-key fallback and `SessionOperationExecutionError` storage changes preserve existing public function signatures and error accessors; no migration is required for constructor-based connection or operation error handling.
+
+### Risks
+
+- `ssh-rsa` and `ssh-dss` use deprecated SHA-1-era host-key signatures. They are attempted only by `LegacyCompatible`, emit a warning after a successful downgrade, and retain the configured host-key verification policy; use secure or balanced mode wherever legacy firmware compatibility is unnecessary.
+- Output encoding is caller-selected rather than automatically detected. Selecting UTF-8 for a GB-encoded device, or a Chinese legacy encoding for UTF-8 output, can produce replacement characters or incorrect text.
+- The built-in H3C template now sends `screen-length disable` after connecting. The hook is best effort, but unsupported firmware may log or return a command error before normal operations continue.
+- Legacy SSH and pager behavior varies across firmware. The release includes unit and virtual-device E2E coverage, but customized prompts, host-key sets, and vendor terminal implementations still require deployment validation.
+
 ## [0.5.0] - 2026-08-08
 
 ### New Features
