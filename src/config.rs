@@ -14,18 +14,18 @@ use russh::{cipher, compression, kex, mac};
 pub const LEGACY_KEX_ORDER: &[kex::Name] = &[
     kex::CURVE25519,
     kex::CURVE25519_PRE_RFC_8731,
-    kex::DH_GEX_SHA1,
-    kex::DH_GEX_SHA256,
-    kex::DH_G1_SHA1,
-    kex::DH_G14_SHA1,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
     kex::DH_G14_SHA256,
     kex::DH_G15_SHA512,
     kex::DH_G16_SHA512,
     kex::DH_G17_SHA512,
     kex::DH_G18_SHA512,
-    kex::ECDH_SHA2_NISTP256,
-    kex::ECDH_SHA2_NISTP384,
-    kex::ECDH_SHA2_NISTP521,
+    kex::DH_GEX_SHA256,
+    kex::DH_G14_SHA1,
+    kex::DH_GEX_SHA1,
+    kex::DH_G1_SHA1,
 ];
 
 /// Legacy-compatible cipher algorithms.
@@ -226,3 +226,31 @@ pub const SECURE_KEY_TYPES: &[Algorithm] = &[
         hash: Some(HashAlg::Sha256),
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_kex_position(algorithm: kex::Name) -> usize {
+        LEGACY_KEX_ORDER
+            .iter()
+            .position(|candidate| *candidate == algorithm)
+            .expect("legacy KEX algorithm should be configured")
+    }
+
+    #[test]
+    fn legacy_kex_prefers_fast_modern_algorithms_before_sha1_fallbacks() {
+        let first_sha1 = legacy_kex_position(kex::DH_G14_SHA1);
+
+        for modern in [
+            kex::CURVE25519,
+            kex::ECDH_SHA2_NISTP256,
+            kex::DH_G14_SHA256,
+            kex::DH_GEX_SHA256,
+        ] {
+            assert!(legacy_kex_position(modern) < first_sha1);
+        }
+        assert!(legacy_kex_position(kex::DH_G14_SHA1) < legacy_kex_position(kex::DH_GEX_SHA1));
+        assert!(legacy_kex_position(kex::DH_GEX_SHA1) < legacy_kex_position(kex::DH_G1_SHA1));
+    }
+}
