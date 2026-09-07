@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.2] - 2026-09-07
+
+### New Features
+
+- Added `ConnectionMode::{Pooled, OneShot}` through `ExecutionContext`, allowing direct commands, flows, transactions, workflows, and uploads to use the connection pool by default or create an uncached connection for one operation. A sender obtained in one-shot mode accepts one `CmdJob`.
+
+### Optimizations
+
+- Made recorded pooled connections own their internally generated recorder and reuse both the physical SSH connection and recorder for repeated requests to the same device and recording level. Recorder-aware flows, transactions, workflows, and uploads now resolve the same connection-owned recording session instead of reconnecting by recorder ID.
+- Reordered legacy-compatible SSH key exchange preferences to try Curve25519, ECDH, and SHA-2 fixed-group algorithms before SHA-1 group exchange fallbacks, avoiding slow `diffie-hellman-group-exchange-sha1` negotiation when devices offer faster alternatives.
+
+### API Changes
+
+- Added the public `ConnectionMode` enum, the `ExecutionContext::connection_mode` field, and `ExecutionContext::with_connection_mode(...)`. Constructor-based callers continue to use pooled connections; callers using `ExecutionContext` struct literals must initialize the new field.
+- Made `SessionRecorder::id()` public and read-only for correlation, and added `Hash` support to `SessionRecordLevel`.
+- Changed `get_with_recording_and_context(...)` and `get_with_recording_level_and_context(...)` so repeated pooled lookups for the same device and recording level return the existing connection's recorder. The returned recorder can be passed to recorder-aware manager methods to execute on that same connection.
+
+### Risks
+
+- Recorded pooled calls for the same device and recording level now intentionally share one recorder for the lifetime of the pooled connection, so its entries can span multiple collection operations. Callers requiring per-request isolation should use a caller-created `SessionRecorder` with recorder-aware methods or select `ConnectionMode::OneShot`.
+- One-shot mode bypasses pooling and therefore pays SSH connection setup cost for every operation. A direct flow, transaction, or workflow remains one operation and may contain multiple device commands, while a one-shot sender permits only one `CmdJob`.
+- Legacy `ssh-rsa` and `ssh-dss` connections still require an initial compatibility-detection attempt and retain SHA-1-era security risks. Firmware offering only slow legacy KEX algorithms cannot benefit from the new preference order.
+- Connection reuse and one-shot shutdown are covered with virtual-device command, transaction, and workflow tests; recorder-aware SFTP reuse does not have dedicated integration coverage against a real SFTP server.
+
 ## [0.5.1] - 2026-08-28
 
 ### New Features
