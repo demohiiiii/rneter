@@ -555,6 +555,10 @@ impl SharedSshClient {
         !self.closed && !self.client.is_closed() && !self.sender.is_closed()
     }
 
+    pub(crate) fn recorder(&self) -> Option<SessionRecorder> {
+        self.recorder.clone()
+    }
+
     pub(crate) async fn run_hook_actions(
         &mut self,
         trigger: HookTrigger<'_>,

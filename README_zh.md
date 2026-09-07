@@ -647,9 +647,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use rneter::session::{
-    Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
+    CmdJob, Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel,
+    SessionReplayer,
 };
 use rneter::templates;
+use tokio::sync::oneshot;
 
 let request = ConnectionRequest::new(
     "admin".to_string(),
@@ -659,7 +661,7 @@ let request = ConnectionRequest::new(
     None,
     templates::cisco()?,
 );
-let (_sender, recorder) = MANAGER
+let (sender, recorder) = MANAGER
     .get_with_recording_level_and_context(
         request.clone(),
         ExecutionContext::default(),
@@ -675,18 +677,19 @@ tokio::spawn(async move {
     }
 });
 
-let output = MANAGER
-    .execute_command_with_recorder_and_context(
-        request,
-        Command {
+let (responder, result) = oneshot::channel();
+sender
+    .send(CmdJob {
+        data: Command {
             mode: "Enable".to_string(),
             command: "show version".to_string(),
             ..Command::default()
         },
-        ExecutionContext::default(),
-        recorder.clone(),
-    )
+        sys: None,
+        responder,
+    })
     .await?;
+let output = result.await??;
 assert!(output.success);
 
 // 或者仅记录关键事件（不记录原始 shell 分块）
@@ -733,9 +736,26 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
-每个录制器使用独立的池化连接。命令、flow、事务、workflow 和上传应使用
-recorder-aware manager 方法，也可以通过对应 sender 发送 `CmdJob`。普通 manager
-调用和其他录制器不会写入该录制器。
+每条开启录制的 SSH 连接就是一个独立录制 session。连接首次建立时由 rneter
+生成 recorder ID；对同一设备使用相同录制级别重复调用
+`get_with_recording_level_and_context`，会同时复用物理连接及其 recorder。后续命令
+应通过该接口返回的 sender 发送 `CmdJob`，从而保证所有事件都写入这条连接对应的
+录制。`SessionRecorder::id()` 只读，仅用于关联和排查。
+也可以把该接口返回的 recorder 传给 recorder-aware 的 flow、事务块、工作流和
+上传接口；这些接口会识别连接拥有的录制 session，并复用同一条物理连接。
+
+不希望连接进入连接池时，可以使用一次性模式：
+
+```rust
+use rneter::session::{ConnectionMode, ExecutionContext};
+
+let context = ExecutionContext::new()
+    .with_connection_mode(ConnectionMode::OneShot);
+```
+
+使用该 context 的直接 manager 操作会新建 SSH 连接，任务结束后丢弃 command
+sender 并关闭连接。默认的 `ConnectionMode::Pooled` 仍会复用健康连接。在
+`OneShot` 模式下获取的 sender 只接受一个 `CmdJob`。
 
 对于 CI 离线测试，可以把 JSONL 录制文件放入 `tests/fixtures/`，并在集成测试中回放（参考 `tests/replay_fixtures.rs`）。可以用下面的命令将线上噪声录制归一化为稳定 fixture：
 

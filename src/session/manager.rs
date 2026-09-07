@@ -75,12 +75,31 @@ fn connection_cache_key(
     recorder: Option<&SessionRecorder>,
 ) -> ConnectionCacheKey {
     match recorder {
+        Some(recorder) if recorder.is_connection_owned() => ConnectionCacheKey::Recorded {
+            device_addr: device_addr.to_string(),
+            level: recorder.level(),
+        },
         Some(recorder) => ConnectionCacheKey::Recorder {
             device_addr: device_addr.to_string(),
             recorder_id: recorder.id(),
         },
         None => ConnectionCacheKey::Shared(device_addr.to_string()),
     }
+}
+
+fn limit_sender_to_one_command(pooled_sender: mpsc::Sender<CmdJob>) -> mpsc::Sender<CmdJob> {
+    let (sender, mut receiver) = mpsc::channel::<CmdJob>(1);
+    tokio::spawn(async move {
+        if let Some(job) = receiver.recv().await
+            && let Err(error) = pooled_sender.send(job).await
+        {
+            let _ = error
+                .0
+                .responder
+                .send(Err(ConnectError::ConnectClosedError));
+        }
+    });
+    sender
 }
 
 impl SshConnectionManager {
@@ -155,14 +174,19 @@ impl SshConnectionManager {
         request: ConnectionRequest,
         context: ExecutionContext,
     ) -> Result<mpsc::Sender<CmdJob>, ConnectError> {
+        let connection_mode = context.connection_mode;
         self.get_client_with_request_and_recording(
             request,
             context.security_options,
             context.connect_timeout,
             None,
+            context.connection_mode,
         )
         .await
-        .map(|(sender, _client)| sender)
+        .map(|(sender, _client)| match connection_mode {
+            ConnectionMode::Pooled => sender,
+            ConnectionMode::OneShot => limit_sender_to_one_command(sender),
+        })
     }
 
     /// Execute a single command directly using a structured connection/context pair.
@@ -378,7 +402,9 @@ impl SshConnectionManager {
                     }
 
                     retries_used += 1;
-                    if let Some(failed_client) = failed_client {
+                    if context.connection_mode == ConnectionMode::Pooled
+                        && let Some(failed_client) = failed_client
+                    {
                         invalidate_cache_client_if_current(
                             &self.inner.cache,
                             &cache_key,
@@ -413,6 +439,7 @@ impl SshConnectionManager {
                 context.security_options.clone(),
                 context.connect_timeout,
                 recorder,
+                context.connection_mode,
             )
             .await
             .map_err(|error| OperationAttemptError {
@@ -517,6 +544,7 @@ impl SshConnectionManager {
                 context.security_options,
                 context.connect_timeout,
                 recorder,
+                context.connection_mode,
             )
             .await?;
 
@@ -562,6 +590,7 @@ impl SshConnectionManager {
                 context.security_options,
                 context.connect_timeout,
                 recorder,
+                context.connection_mode,
             )
             .await?;
 
@@ -607,6 +636,7 @@ impl SshConnectionManager {
                 context.security_options,
                 context.connect_timeout,
                 recorder,
+                context.connection_mode,
             )
             .await?;
 
@@ -633,8 +663,30 @@ impl SshConnectionManager {
         context: ExecutionContext,
         level: SessionRecordLevel,
     ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
-        self.get_with_recorder_and_context(request, context, SessionRecorder::new(level))
-            .await
+        let cache_key = ConnectionCacheKey::Recorded {
+            device_addr: request.device_addr(),
+            level,
+        };
+        let (sender, client) = self
+            .get_client_with_cache_key(
+                request,
+                context.security_options,
+                context.connect_timeout,
+                Some(SessionRecorder::new_connection_owned(level)),
+                context.connection_mode,
+                cache_key,
+            )
+            .await?;
+        let sender = match context.connection_mode {
+            ConnectionMode::Pooled => sender,
+            ConnectionMode::OneShot => limit_sender_to_one_command(sender),
+        };
+        let recorder = client.read().await.recorder().ok_or_else(|| {
+            ConnectError::InternalServerError(
+                "recorded connection was created without a recorder".to_string(),
+            )
+        })?;
+        Ok((sender, recorder))
     }
 
     /// Gets a cached SSH client bound to a caller-provided recorder.
@@ -648,14 +700,20 @@ impl SshConnectionManager {
         context: ExecutionContext,
         recorder: SessionRecorder,
     ) -> Result<(mpsc::Sender<CmdJob>, SessionRecorder), ConnectError> {
+        let connection_mode = context.connection_mode;
         let (sender, _client) = self
             .get_client_with_request_and_recording(
                 request,
                 context.security_options,
                 context.connect_timeout,
                 Some(recorder.clone()),
+                context.connection_mode,
             )
             .await?;
+        let sender = match connection_mode {
+            ConnectionMode::Pooled => sender,
+            ConnectionMode::OneShot => limit_sender_to_one_command(sender),
+        };
         Ok((sender, recorder))
     }
 
@@ -671,11 +729,32 @@ impl SshConnectionManager {
         security_options: ConnectionSecurityOptions,
         connect_timeout: Duration,
         recorder: Option<SessionRecorder>,
+        connection_mode: ConnectionMode,
     ) -> Result<(mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>), ConnectError> {
-        self.spawn_maintenance_if_needed();
-
         let device_addr = request.device_addr();
         let cache_key = connection_cache_key(&device_addr, recorder.as_ref());
+        self.get_client_with_cache_key(
+            request,
+            security_options,
+            connect_timeout,
+            recorder,
+            connection_mode,
+            cache_key,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn get_client_with_cache_key(
+        &self,
+        request: ConnectionRequest,
+        security_options: ConnectionSecurityOptions,
+        connect_timeout: Duration,
+        recorder: Option<SessionRecorder>,
+        connection_mode: ConnectionMode,
+        cache_key: ConnectionCacheKey,
+    ) -> Result<(mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>), ConnectError> {
+        let device_addr = request.device_addr();
         let ConnectionRequest {
             user,
             addr,
@@ -686,6 +765,26 @@ impl SshConnectionManager {
             output_encoding,
         } = request;
         let auth_digest = auth.fingerprint().await?;
+
+        if connection_mode == ConnectionMode::OneShot {
+            return Self::create_connection(
+                device_addr,
+                user,
+                addr,
+                port,
+                auth,
+                auth_digest,
+                enable_password,
+                handler,
+                security_options,
+                output_encoding,
+                connect_timeout,
+                recorder,
+            )
+            .await;
+        }
+
+        self.spawn_maintenance_if_needed();
 
         // One retry: the first pass may find a stale or mismatched entry,
         // invalidate it, and create a fresh connection on the second pass.

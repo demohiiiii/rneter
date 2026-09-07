@@ -678,9 +678,11 @@ their individual `FleetExecutionResult` values, including partial flow output.
 
 ```rust
 use rneter::session::{
-    Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel, SessionReplayer,
+    CmdJob, Command, ConnectionRequest, ExecutionContext, MANAGER, SessionRecordLevel,
+    SessionReplayer,
 };
 use rneter::templates;
+use tokio::sync::oneshot;
 
 let request = ConnectionRequest::new(
     "admin".to_string(),
@@ -690,7 +692,7 @@ let request = ConnectionRequest::new(
     None,
     templates::cisco()?,
 );
-let (_sender, recorder) = MANAGER
+let (sender, recorder) = MANAGER
     .get_with_recording_level_and_context(
         request.clone(),
         ExecutionContext::default(),
@@ -706,18 +708,19 @@ tokio::spawn(async move {
     }
 });
 
-let output = MANAGER
-    .execute_command_with_recorder_and_context(
-        request,
-        Command {
+let (responder, result) = oneshot::channel();
+sender
+    .send(CmdJob {
+        data: Command {
             mode: "Enable".to_string(),
             command: "show version".to_string(),
             ..Command::default()
         },
-        ExecutionContext::default(),
-        recorder.clone(),
-    )
+        sys: None,
+        responder,
+    })
     .await?;
+let output = result.await??;
 assert!(output.success);
 
 // Or record key events only (no raw shell chunks)
@@ -764,10 +767,29 @@ let outputs = replayer.replay_script(&script)?;
 assert_eq!(outputs.len(), 2);
 ```
 
-Each recorder has a dedicated pooled connection. Use the recorder-aware manager
-methods for commands, flows, transactions, workflows, and uploads, or send a
-`CmdJob` through the associated sender. Ordinary manager calls and other
-recorders cannot append to it.
+Each recorded SSH connection is one recording session. rneter generates its
+recorder ID when the connection is first established; repeated
+`get_with_recording_level_and_context` calls for the same device and recording
+level reuse both the physical connection and its recorder. Send `CmdJob` values
+through the associated sender so all events stay in that connection's recording.
+`SessionRecorder::id()` is read-only and intended for correlation only.
+The recorder returned by this method can also be passed to recorder-aware flow,
+transaction, workflow, and upload methods; they resolve the connection-owned
+recording session and reuse the same physical connection.
+
+To execute without adding a connection to the pool, select one-shot mode:
+
+```rust
+use rneter::session::{ConnectionMode, ExecutionContext};
+
+let context = ExecutionContext::new()
+    .with_connection_mode(ConnectionMode::OneShot);
+```
+
+Direct manager operations using this context create a fresh SSH connection and
+drop its command sender after the operation, which closes the connection. The
+default `ConnectionMode::Pooled` continues to reuse healthy connections. A
+sender obtained in `OneShot` mode accepts only one `CmdJob`.
 
 For CI-style offline tests, store JSONL recordings under `tests/fixtures/` and replay them in integration tests (see `tests/replay_fixtures.rs`). Normalize noisy online recordings into stable fixtures with:
 

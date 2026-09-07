@@ -569,6 +569,17 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Controls whether an SSH connection is pooled after an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionMode {
+    /// Reuse a healthy connection from the manager's connection pool.
+    #[default]
+    Pooled,
+    /// Create an uncached connection for this operation and close it when the
+    /// operation's command sender is dropped.
+    OneShot,
+}
+
 /// Execution context shared by manager entrypoints.
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -580,6 +591,8 @@ pub struct ExecutionContext {
     pub connect_timeout: Duration,
     /// Bounded retry behavior for ordinary command/session operations.
     pub retry_policy: RetryPolicy,
+    /// Whether connections are pooled or created for one-time use.
+    pub connection_mode: ConnectionMode,
 }
 
 impl Default for ExecutionContext {
@@ -589,6 +602,7 @@ impl Default for ExecutionContext {
             sys: None,
             connect_timeout: Duration::from_secs(60),
             retry_policy: RetryPolicy::default(),
+            connection_mode: ConnectionMode::default(),
         }
     }
 }
@@ -625,6 +639,12 @@ impl ExecutionContext {
     /// Applies a bounded retry policy to ordinary command/session operations.
     pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Select pooled reuse or an uncached one-shot connection.
+    pub fn with_connection_mode(mut self, connection_mode: ConnectionMode) -> Self {
+        self.connection_mode = connection_mode;
         self
     }
 }
@@ -1212,6 +1232,10 @@ impl Default for ConnectionPoolConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ConnectionCacheKey {
     Shared(String),
+    Recorded {
+        device_addr: String,
+        level: SessionRecordLevel,
+    },
     Recorder {
         device_addr: String,
         recorder_id: u64,
@@ -1407,7 +1431,8 @@ mod tests {
             .with_security_options(ConnectionSecurityOptions::legacy_compatible())
             .with_sys(Some("vsys1".to_string()))
             .with_connect_timeout(Duration::from_secs(12))
-            .with_retry_policy(retry_policy);
+            .with_retry_policy(retry_policy)
+            .with_connection_mode(ConnectionMode::OneShot);
         assert_eq!(
             context.security_options,
             ConnectionSecurityOptions::legacy_compatible()
@@ -1415,6 +1440,7 @@ mod tests {
         assert_eq!(context.sys.as_deref(), Some("vsys1"));
         assert_eq!(context.connect_timeout, Duration::from_secs(12));
         assert_eq!(context.retry_policy, retry_policy);
+        assert_eq!(context.connection_mode, ConnectionMode::OneShot);
     }
 
     #[test]
@@ -1430,6 +1456,10 @@ mod tests {
             Duration::from_secs(7)
         );
         assert_eq!(ExecutionContext::new().retry_policy, RetryPolicy::default());
+        assert_eq!(
+            ExecutionContext::new().connection_mode,
+            ConnectionMode::Pooled
+        );
     }
 
     #[test]
