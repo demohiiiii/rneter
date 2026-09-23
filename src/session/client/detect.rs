@@ -18,6 +18,64 @@ fn looks_like_shell_prompt(fragment: &str) -> bool {
     PROMPT_RE.is_match(fragment.trim_end())
 }
 
+fn shell_prompt_terminator(prompt: &str) -> Option<char> {
+    prompt
+        .trim_end()
+        .chars()
+        .last()
+        .filter(|character| matches!(character, '#' | '$' | '%' | '>'))
+}
+
+/// Return the stable `user@host` part of a shell prompt, when it has one.
+///
+/// Prompts without a user/host identity stay on the strict path below. Their
+/// full text is the state signal for network devices, while shell prompts
+/// commonly add a status marker after a failed command and retain the same
+/// user/host identity.
+fn shell_prompt_identity(prompt: &str) -> Option<&str> {
+    let prompt = prompt.trim_end();
+    let at = prompt.find('@')?;
+    let start = prompt[..at]
+        .char_indices()
+        .rev()
+        .find(|(_, character)| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.')
+        })
+        .map(|(index, character)| index + character.len_utf8())
+        .unwrap_or(0);
+    let host = &prompt[at + 1..];
+    let end = host
+        .char_indices()
+        .find(|(_, character)| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.' | ':')
+        })
+        .map(|(index, _)| at + 1 + index)
+        .unwrap_or(prompt.len());
+    (end > at + 1).then_some(&prompt[start..end])
+}
+
+fn prompt_matches(expected: &str, candidate: &str) -> bool {
+    let expected = expected.trim_end();
+    let candidate = candidate.trim_end();
+    if expected == candidate {
+        return true;
+    }
+
+    let Some(expected_terminator) = shell_prompt_terminator(expected) else {
+        return false;
+    };
+    if shell_prompt_terminator(candidate) != Some(expected_terminator)
+        || !looks_like_shell_prompt(candidate)
+    {
+        return false;
+    }
+
+    let Some(identity) = shell_prompt_identity(expected) else {
+        return false;
+    };
+    candidate.contains(identity)
+}
+
 fn looks_like_pager_prompt(fragment: &str) -> bool {
     static PAGER_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
         Regex::new(r"(?i)^\s*(?:<---\s*More\s*--->|--\s*More\s*--|----\s*More\s*----|More:?)\s*$")
@@ -210,9 +268,9 @@ async fn collect_detect_snapshot(
                                 })?;
                                 continue;
                             }
-                            if fragment == prompt {
+                            if prompt_matches(&prompt, fragment) {
                                 let stripped =
-                                    strip_detect_echo_and_prompt(&normalized, command, &prompt);
+                                    strip_detect_echo_and_prompt(&normalized, command, fragment);
                                 debug!(
                                     "autodetect probe completed command='{}' output='{}'",
                                     command,
@@ -334,6 +392,18 @@ mod tests {
         assert!(looks_like_shell_prompt("router>"));
         assert!(looks_like_shell_prompt("user@host:~$"));
         assert!(looks_like_shell_prompt("<huawei>"));
+    }
+
+    #[test]
+    fn prompt_matching_allows_dynamic_shell_status_markers() {
+        assert!(prompt_matches("alice@host ~ >", "alice@host ~ [1]>"));
+        assert!(prompt_matches("root@host ~ #", "root@host ~ [127]#"));
+    }
+
+    #[test]
+    fn prompt_matching_keeps_network_state_transitions_strict() {
+        assert!(!prompt_matches("router#", "router(config)#"));
+        assert!(!prompt_matches("alice@host ~>", "other@host ~>"));
     }
 
     #[test]

@@ -1356,6 +1356,7 @@ Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件
 - 旧的 rneter 名称如 `cisco`、`juniper`、`h3c`、`hillstone`、`arista`、`paloalto`、`ruijie`、`checkpoint` 仍然可作为别名使用
 - `cisco_asa` 作为独立模板名和自动识别目标暴露，但当前复用已经验证过的 `cisco_ios` handler 行为
 - 基于初始 prompt/输出和只读 probe 命令做缓存式打分
+- probe 完成判断对网络风格的 prompt 仍要求严格一致；对于 fish/Linux shell，只要 `user@host` 标识和 prompt 结束符保持稳定，就允许失败状态带来的状态标记变化
 
 如何理解诊断结果：
 

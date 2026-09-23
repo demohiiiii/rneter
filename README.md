@@ -1431,6 +1431,7 @@ Current scope:
 - legacy rneter names such as `cisco`, `juniper`, `h3c`, `hillstone`, `arista`, `paloalto`, `ruijie`, and `checkpoint` remain accepted as aliases
 - `cisco_asa` is exposed as a distinct template name and autodetect target, but it currently reuses the proven `cisco_ios` handler behavior
 - probe-driven scoring using initial prompt/output plus cached read-only probe commands
+- probe completion keeps exact prompt matching for network-style prompts and tolerates fish/Linux status markers when the shell `user@host` identity and prompt terminator stay stable
 
 How to read the diagnostics:
 
