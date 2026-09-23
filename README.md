@@ -1421,6 +1421,7 @@ The autodetect result is a ranked report, not a single opaque answer:
 - `best_match`
 - `candidates`
 - `raw_facts`
+- `linux_shell_flavor` (`fish` or `posix`, when a Linux shell probe identifies it)
 
 This makes it easier to understand why a device looks like Cisco IOS/IOS-XE, Juniper Junos, Huawei, H3C/HP Comware, Linux, Arista EOS, Aruba AOS-CX, Cisco ASA/NX-OS, Dell OS10, Ruijie OS, ZTE ZXROS, Fortinet, Palo Alto PAN-OS, or Check Point Gaia, and to debug ambiguous results in mixed environments.
 
@@ -1461,6 +1462,7 @@ let report = autodetect_with_context(
 if let Some(best) = &report.best_match {
     println!("best template: {} ({:?}, score={})", best.template_name, best.confidence, best.score);
 }
+println!("linux shell flavor: {:?}", report.linux_shell_flavor);
 
 for candidate in &report.candidates {
     println!("candidate: {} score={}", candidate.template_name, candidate.score);

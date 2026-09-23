@@ -122,6 +122,9 @@ pub struct TemplateDetectReport {
     pub candidates: Vec<TemplateDetectCandidate>,
     #[serde(default)]
     pub raw_facts: Vec<TemplateDetectFact>,
+    /// Shell flavor inferred from Linux shell probes, when available.
+    #[serde(default)]
+    pub linux_shell_flavor: Option<crate::device::DeviceShellFlavor>,
 }
 
 /// Result of a successful autodetect-then-connect flow.
@@ -195,12 +198,50 @@ impl TemplateDetectReport {
                 .then_with(|| left.template_name.cmp(&right.template_name))
         });
         let best_match = candidates.first().cloned();
+        let linux_shell_flavor = infer_linux_shell_flavor(&raw_facts);
 
         Self {
             best_match,
             candidates,
             raw_facts,
+            linux_shell_flavor,
         }
+    }
+}
+
+fn infer_linux_shell_flavor(
+    facts: &[TemplateDetectFact],
+) -> Option<crate::device::DeviceShellFlavor> {
+    let fish_status_probe = facts.iter().any(|fact| {
+        fact.kind == DetectFactKind::PositiveMatch
+            && fact.command.trim().eq_ignore_ascii_case("echo $status")
+    });
+    if fish_status_probe {
+        return Some(crate::device::DeviceShellFlavor::Fish);
+    }
+
+    let shell_probe = facts.iter().find(|fact| {
+        fact.kind == DetectFactKind::PositiveMatch
+            && fact.command.trim().eq_ignore_ascii_case("echo $SHELL")
+    })?;
+    let shell_name = shell_probe
+        .sample
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.rsplit('/').next())
+        .find(|name| {
+            matches!(
+                *name,
+                "fish" | "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash"
+            )
+        });
+
+    match shell_name {
+        Some("fish") => Some(crate::device::DeviceShellFlavor::Fish),
+        Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "ash") => {
+            Some(crate::device::DeviceShellFlavor::Posix)
+        }
+        _ => None,
     }
 }
 
@@ -875,6 +916,25 @@ mod tests {
             Some("cisco_xe")
         );
         assert_eq!(report.candidates.len(), 1);
+    }
+
+    #[test]
+    fn detect_report_exposes_linux_fish_shell_flavor() {
+        let snapshot = DetectSnapshot {
+            initial_output: "root@host ~#".to_string(),
+            initial_prompt: "root@host ~#".to_string(),
+            probe_outputs: HashMap::from([
+                ("uname -a".to_string(), "Linux host 6.6.0".to_string()),
+                ("echo $SHELL".to_string(), "/usr/bin/fish".to_string()),
+            ]),
+        };
+
+        let report = score_builtin_templates(&snapshot);
+
+        assert_eq!(
+            report.linux_shell_flavor,
+            Some(crate::device::DeviceShellFlavor::Fish)
+        );
     }
 
     #[test]

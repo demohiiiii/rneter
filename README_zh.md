@@ -1346,6 +1346,7 @@ Hook 的输出不会并入父命令返回结果，但 Hook 的生命周期事件
 - `best_match`
 - `candidates`
 - `raw_facts`
+- `linux_shell_flavor`（shell 探测成功时为 `fish` 或 `posix`）
 
 这样在现场环境里更容易理解“为什么它更像 Cisco IOS/IOS-XE / Juniper Junos / Huawei / H3C/HP Comware / Linux / Arista EOS / Aruba AOS-CX / Cisco ASA/NX-OS / Dell OS10 / Ruijie OS / ZTE ZXROS / Fortinet / Palo Alto PAN-OS / Check Point Gaia”，也更方便排查误判。
 
@@ -1386,6 +1387,7 @@ let report = autodetect_with_context(
 if let Some(best) = &report.best_match {
     println!("最佳模板: {} ({:?}, score={})", best.template_name, best.confidence, best.score);
 }
+println!("Linux shell 类型: {:?}", report.linux_shell_flavor);
 
 for candidate in &report.candidates {
     println!("候选模板: {} score={}", candidate.template_name, candidate.score);
