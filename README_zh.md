@@ -776,6 +776,11 @@ SessionOperation -> TxStep -> TxBlock -> TxWorkflow
 - `TxBlock` 按顺序执行一组相关步骤，并应用一个显式回滚策略。
 - `TxWorkflow` 按顺序执行多个 block；后续 block 失败时，已提交 block 会按相反顺序执行补偿。
 
+`TxWorkflow` 是唯一的事务执行入口。事务块继续以内嵌值保存在
+`TxWorkflow.blocks` 中；单块事务通过只包含一个 block 的 workflow 表示。
+block 执行器只作为 workflow 的内部阶段，块级 `TxResult` 仍会通过
+`TxWorkflowResult.block_results` 返回。
+
 这里的事务是应用层补偿事务，不是数据库事务。设备已经接受的命令不会被原子撤销，回滚操作本身也可能失败。事务行为不会根据命令文本自动推断：调用方必须明确选择策略，并提供该策略所需的补偿操作。
 
 ### 回滚策略
@@ -831,14 +836,14 @@ let block = TxBlock {
 
 在 block 层，`fail_fast` 会在首次失败后停止剩余步骤；在 workflow 层，它会在首个 block 失败后停止启动后续 block。需要统一成败语义时应保持开启。
 
-### 构建并执行单个事务块
+### 构建事务块并通过工作流执行
 
 下面的 block 用于创建地址对象。步骤 `0` 成功后，如果后续步骤失败，整体回滚操作会删除该对象：
 
 ```rust
 use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
-    RollbackPolicy, TxBlock, TxStep,
+    RollbackPolicy, TxBlock, TxStep, TxWorkflow,
 };
 use rneter::templates;
 
@@ -882,7 +887,7 @@ let block = TxBlock {
 };
 
 let result = MANAGER
-    .execute_tx_block_with_context(
+    .execute_tx_workflow_with_context(
         ConnectionRequest::new(
             "admin".to_string(),
             "192.168.1.1".to_string(),
@@ -891,7 +896,11 @@ let result = MANAGER
             None,
             templates::cisco()?,
         ),
-        block,
+        TxWorkflow {
+            name: "addr-create-workflow".to_string(),
+            blocks: vec![block],
+            fail_fast: true,
+        },
         ExecutionContext::default(),
     )
     .await?;

@@ -1,7 +1,6 @@
 use super::super::*;
 use super::tx::{
-    OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_block_with_runner,
-    execute_tx_workflow_with_runner,
+    OperationRunError, OperationRunFuture, TxCommandRunner, execute_tx_workflow_with_runner,
 };
 use crate::device::{
     latest_terminal_fragment, merge_terminal_prompt_fragments, normalize_terminal_output,
@@ -1123,18 +1122,6 @@ impl SharedSshClient {
 
         cmd_output.all = all;
         Ok(cmd_output)
-    }
-
-    /// Execute a transaction-like command block.
-    ///
-    /// Forward steps run sequentially. On failure, rollback follows
-    /// the block's [`RollbackPolicy`] (`none`, `whole_resource`, `per_step`).
-    pub async fn execute_tx_block(
-        &mut self,
-        block: &TxBlock,
-        sys: Option<&String>,
-    ) -> Result<TxResult, ConnectError> {
-        execute_tx_block_with_runner(self, block, sys).await
     }
 
     /// Execute multi-block workflow with global rollback on failure.

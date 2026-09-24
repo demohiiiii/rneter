@@ -131,17 +131,6 @@ async fn recorder_aware_transactions_reuse_the_connection_owned_session() {
         fail_fast: true,
     };
 
-    let block_result = manager
-        .execute_tx_block_with_recorder_and_context(
-            request.clone(),
-            block.clone(),
-            context.clone(),
-            recorder.clone(),
-        )
-        .await
-        .expect("recorded transaction block");
-    assert!(block_result.committed);
-
     let workflow_result = manager
         .execute_tx_workflow_with_recorder_and_context(
             request,

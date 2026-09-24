@@ -810,6 +810,11 @@ SessionOperation -> TxStep -> TxBlock -> TxWorkflow
 - `TxBlock` executes related steps in order under one explicit rollback policy.
 - `TxWorkflow` executes multiple blocks and compensates previously committed blocks in reverse order when a later block fails.
 
+`TxWorkflow` is the only public transaction execution entry point. Blocks remain
+embedded values in `TxWorkflow.blocks`; a single-block transaction is represented
+as a workflow containing one block. The block executor is an internal workflow
+stage, while its `TxResult` remains available in `TxWorkflowResult.block_results`.
+
 These are application-level compensating transactions, not database transactions. Commands already accepted by a device are not atomically undone, and rollback operations can also fail. Transaction behavior is never inferred from command text: callers explicitly select the policy and provide the compensating operations required by that policy.
 
 ### Rollback Policies
@@ -865,14 +870,14 @@ forward step fails
 
 At block level, `fail_fast` stops remaining steps after the first failure. At workflow level, it stops starting later blocks after the first failed block. Keep it enabled for all-or-nothing workflows.
 
-### Build and Execute a Block
+### Build a Block and Execute a Workflow
 
 The following block creates an address object. If a later step fails after step `0` succeeds, the whole-resource rollback removes the object:
 
 ```rust
 use rneter::session::{
     Command, CommandFlow, ConnectionRequest, ExecutionContext, MANAGER,
-    RollbackPolicy, TxBlock, TxStep,
+    RollbackPolicy, TxBlock, TxStep, TxWorkflow,
 };
 use rneter::templates;
 
@@ -916,7 +921,7 @@ let block = TxBlock {
 };
 
 let result = MANAGER
-    .execute_tx_block_with_context(
+    .execute_tx_workflow_with_context(
         ConnectionRequest::new(
             "admin".to_string(),
             "192.168.1.1".to_string(),
@@ -925,7 +930,11 @@ let result = MANAGER
             None,
             templates::cisco()?,
         ),
-        block,
+        TxWorkflow {
+            name: "addr-create-workflow".to_string(),
+            blocks: vec![block],
+            fail_fast: true,
+        },
         ExecutionContext::default(),
     )
     .await?;

@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rneter::device::{DeviceHandlerConfig, input_rule, prompt_rule, transition_rule};
 use rneter::session::{
     Command, ConnectionPoolConfig, RollbackPolicy, SessionEvent, SessionRecordLevel,
-    SessionRecorder, SessionReplayer, SshConnectionManager, TxBlock, TxStep,
+    SessionRecorder, SessionReplayer, SshConnectionManager, TxBlock, TxStep, TxWorkflow,
 };
 use rneter::testkit::{
     DEFAULT_ENABLE_PASSWORD, DevicePersona, ERROR_COMMAND, FakeSshDevice, FaultInjection,
@@ -376,21 +376,29 @@ async fn rolls_back_transaction_when_forward_step_fails() {
     };
 
     let result = manager
-        .execute_tx_block_with_context(
+        .execute_tx_workflow_with_context(
             device.connection_request().expect("request"),
-            block,
+            TxWorkflow {
+                name: "hostname-change-workflow".to_string(),
+                blocks: vec![block],
+                fail_fast: true,
+            },
             device.execution_context(),
         )
         .await
         .expect("transaction should complete with a rollback");
 
     assert!(!result.committed);
-    assert_eq!(result.failed_step, Some(1));
+    let block_result = result
+        .block_results
+        .first()
+        .expect("failed workflow must include block result");
+    assert_eq!(block_result.failed_step, Some(1));
     assert!(result.rollback_attempted);
     assert!(
-        result.rollback_succeeded,
+        block_result.rollback_succeeded,
         "rollback errors: {:?}",
-        result.rollback_errors
+        block_result.rollback_errors
     );
 
     let commands = device.received_commands();

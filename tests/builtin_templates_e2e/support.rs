@@ -2,7 +2,7 @@
 
 use rneter::session::{
     Command, RollbackPolicy, SessionEvent, SessionRecordLevel, SessionRecorder,
-    SshConnectionManager, TxBlock, TxStep,
+    SshConnectionManager, TxBlock, TxStep, TxWorkflow,
 };
 use rneter::templates;
 use rneter::testkit::{DevicePersona, ERROR_COMMAND, FakeSshDevice};
@@ -310,20 +310,31 @@ pub async fn run_full_scenario(template: &str) {
         ],
     };
     let result = manager
-        .execute_tx_block_with_recorder_and_context(
+        .execute_tx_workflow_with_recorder_and_context(
             device.connection_request().expect("request"),
-            block,
+            TxWorkflow {
+                name: format!("{name}-workflow"),
+                blocks: vec![block],
+                fail_fast: true,
+            },
             device.execution_context(),
             recorder.clone(),
         )
         .await
-        .unwrap_or_else(|error| panic!("[{name}] execute tx block: {error}"));
-    assert!(!result.committed, "[{name}] failed block must not commit");
-    assert!(result.rollback_attempted, "[{name}] rollback must run");
+        .unwrap_or_else(|error| panic!("[{name}] execute tx workflow: {error}"));
     assert!(
-        result.rollback_succeeded,
+        !result.committed,
+        "[{name}] failed workflow must not commit"
+    );
+    assert!(result.rollback_attempted, "[{name}] rollback must run");
+    let block_result = result
+        .block_results
+        .first()
+        .expect("failed workflow must include block result");
+    assert!(
+        block_result.rollback_succeeded,
         "[{name}] rollback errors: {:?}",
-        result.rollback_errors
+        block_result.rollback_errors
     );
 
     let commands = device.received_commands();

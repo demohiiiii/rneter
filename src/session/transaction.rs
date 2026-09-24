@@ -420,7 +420,8 @@ pub fn workflow_rollback_order(
 
 /// Extract initial workflow rollback status from the failed block result itself.
 ///
-/// The failed block may already attempt rollback inside `execute_tx_block`.
+/// The failed block may already attempt rollback inside the workflow's block
+/// execution phase.
 /// Workflow-level rollback summary must include this outcome.
 pub fn failed_block_rollback_summary(
     failed_block_result: Option<&TxResult>,

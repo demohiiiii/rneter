@@ -506,52 +506,6 @@ impl SshConnectionManager {
         .map_err(|err| err.into_parts().0)
     }
 
-    /// Execute a transaction-like block with structured connection/context options.
-    pub async fn execute_tx_block_with_context(
-        &self,
-        request: ConnectionRequest,
-        block: TxBlock,
-        context: ExecutionContext,
-    ) -> Result<TxResult, ConnectError> {
-        self.execute_tx_block_with_optional_recorder(request, block, context, None)
-            .await
-    }
-
-    /// Execute a transaction-like block on the isolated connection bound to
-    /// `recorder`.
-    pub async fn execute_tx_block_with_recorder_and_context(
-        &self,
-        request: ConnectionRequest,
-        block: TxBlock,
-        context: ExecutionContext,
-        recorder: SessionRecorder,
-    ) -> Result<TxResult, ConnectError> {
-        self.execute_tx_block_with_optional_recorder(request, block, context, Some(recorder))
-            .await
-    }
-
-    async fn execute_tx_block_with_optional_recorder(
-        &self,
-        request: ConnectionRequest,
-        block: TxBlock,
-        context: ExecutionContext,
-        recorder: Option<SessionRecorder>,
-    ) -> Result<TxResult, ConnectError> {
-        let sys = context.sys.clone();
-        let (_sender, client) = self
-            .get_client_with_request_and_recording(
-                request,
-                context.security_options,
-                context.connect_timeout,
-                recorder,
-                context.connection_mode,
-            )
-            .await?;
-
-        let mut client_guard = client.write().await;
-        client_guard.execute_tx_block(&block, sys.as_ref()).await
-    }
-
     /// Execute a workflow with structured connection/context options.
     pub async fn execute_tx_workflow_with_context(
         &self,
