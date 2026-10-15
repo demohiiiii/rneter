@@ -477,13 +477,26 @@ impl EngineSpec {
         if !self.auth_delay.is_zero() {
             tokio::time::sleep(self.auth_delay).await;
         }
-        credentials_valid
-            && self
-                .remaining_auth_rejections
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_err()
+        if !credentials_valid {
+            return false;
+        }
+
+        // Keep Rust 1.88 support without using the deprecated `fetch_update` API.
+        let mut remaining = self.remaining_auth_rejections.load(Ordering::SeqCst);
+        loop {
+            let Some(next) = remaining.checked_sub(1) else {
+                return true;
+            };
+            match self.remaining_auth_rejections.compare_exchange_weak(
+                remaining,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return false,
+                Err(actual) => remaining = actual,
+            }
+        }
     }
 
     fn should_disconnect_command(&self, command: &str) -> bool {
