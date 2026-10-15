@@ -3,6 +3,9 @@ use super::super::*;
 impl SharedSshClient {
     /// Uploads a local file to the remote host using the SSH `sftp` subsystem.
     pub async fn upload_file(&mut self, upload: &FileUploadRequest) -> Result<(), ConnectError> {
+        if !self.is_connected() {
+            return Err(ConnectError::ConnectClosedError);
+        }
         let local_path = upload.local_path.clone();
         let remote_path = upload.remote_path.clone();
 

@@ -166,6 +166,7 @@ async fn collect_detect_snapshot(
         transport_auth,
         security_options,
         connect_timeout,
+        None,
     )
     .await?;
 

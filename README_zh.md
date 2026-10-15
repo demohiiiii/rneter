@@ -1252,6 +1252,52 @@ assert!(handler.states().iter().any(|state| state == "custommode"));
 - 在连接失败时重新连接
 - 管理最多 100 个并发连接
 
+通过 `ExecutionContext::with_keep_alive(true)` 开启持续保活，默认关闭：
+
+```rust,no_run
+use rneter::session::{Command, ConnectionRequest, ExecutionContext, SshConnectionManager};
+
+async fn example(request: ConnectionRequest) -> Result<(), rneter::error::ConnectError> {
+    let manager = SshConnectionManager::new();
+    let context = ExecutionContext::new()
+        .with_keep_alive(true)
+        .with_keep_alive_interval_secs(15);
+    manager.execute_command_with_context(
+        request.clone(),
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version".to_string(),
+            ..Command::default()
+        },
+        context,
+    ).await?;
+
+    manager.close_connection(&request).await?; // 关闭该用户、地址和端口的全部池中连接
+    manager.close_all().await?;               // 关闭该 manager 共享池中的全部连接
+    Ok(())
+}
+```
+
+开启后，SSH 在连续一个心跳间隔未收到服务端数据时发送协议级心跳，最多容忍 3 次无响应。
+间隔默认为 30 秒，可通过 `with_keep_alive_interval_secs(15)` 配置秒数，也可以用
+`with_keep_alive_interval(Duration::from_millis(500))` 配置亚秒间隔（`Duration` 来自
+`std::time`）。设置间隔不会自动开启保活；开启保活时，间隔必须大于零，否则返回
+`ConnectError::InvalidKeepAliveConfig`。
+开启保活也会关闭本地 SSH 的 60 秒空闲超时，并使该连接免于连接池的 `idle_timeout` 回收。
+心跳不会向 CLI 写入空行或命令，设备自身的 CLI 空闲退出策略仍可能生效，连接也仍受
+`max_connections` 容量限制。`OneShot` 模式只在本次操作期间发送心跳。
+使用 `.with_keep_alive(false)` 恢复默认策略；同一缓存连接的保活开关或已启用的心跳间隔改变时，下次请求会
+创建替代连接，旧 sender 持有的连接会在其释放后关闭。
+
+`close_connection` 会关闭该设备的普通连接及各种录制连接；`close_all` 作用于该 manager
+及其 clone 共享的连接池。两者等待当前操作结束，执行 `before_disconnect` Hook，并断开
+SSH 传输；即使调用方仍持有 sender，这些 sender 也会停止接受任务。
+关闭连接不会自动发送 CLI 退出命令；设备特定的清理操作可配置在 Hook 中。
+选定待关闭的连接后，关闭流程会在独立任务中执行；调用方超时或取消等待后，仍会完成这些
+连接的清理和断开。
+返回值是关闭的连接数，重复关闭返回 `0`，之后可再次请求建立新连接。这些接口处理调用时
+仍在池中的连接，不包括一次性连接、已经被池回收的连接或并发新建的连接。
+
 ### 状态机
 
 `DeviceHandler` 实现了一个有限状态机：

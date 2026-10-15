@@ -73,6 +73,10 @@ pub enum ConnectError {
     #[error("invalid retry policy: {0}")]
     InvalidRetryPolicy(String),
 
+    /// SSH keepalive options are invalid.
+    #[error("invalid SSH keepalive configuration: {0}")]
+    InvalidKeepAliveConfig(String),
+
     /// A shared connection attempt failed with a transient transport error.
     #[error("SSH connection establishment failed: {0}")]
     ConnectionEstablishmentFailed(String),

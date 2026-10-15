@@ -593,6 +593,15 @@ pub struct ExecutionContext {
     pub retry_policy: RetryPolicy,
     /// Whether connections are pooled or created for one-time use.
     pub connection_mode: ConnectionMode,
+    /// Send SSH keepalives at [`Self::keep_alive_interval`] without incoming traffic and
+    /// exempt pooled connections from idle expiration. Defaults to `false`.
+    ///
+    /// Pool capacity limits and remote device CLI idle limits still apply.
+    /// In one-shot mode, keepalives last only for the operation's lifetime.
+    pub keep_alive: bool,
+    /// Time without incoming traffic before sending an SSH keepalive.
+    /// Defaults to 30 seconds. Must be nonzero when `keep_alive` is enabled.
+    pub keep_alive_interval: Duration,
 }
 
 impl Default for ExecutionContext {
@@ -603,6 +612,8 @@ impl Default for ExecutionContext {
             connect_timeout: Duration::from_secs(60),
             retry_policy: RetryPolicy::default(),
             connection_mode: ConnectionMode::default(),
+            keep_alive: false,
+            keep_alive_interval: Duration::from_secs(30),
         }
     }
 }
@@ -647,6 +658,44 @@ impl ExecutionContext {
         self.connection_mode = connection_mode;
         self
     }
+
+    /// Enable or disable persistent SSH keepalives and pooled idle retention.
+    ///
+    /// Three unanswered keepalives are tolerated before the transport closes.
+    /// This setting is applied when establishing a connection; changing it
+    /// replaces a cached connection on the next request.
+    pub fn with_keep_alive(mut self, keep_alive: bool) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// Set the SSH keepalive interval without changing the keepalive switch.
+    ///
+    /// Supports subsecond intervals. A zero interval is rejected before
+    /// connecting when keepalives are enabled. Changing the interval replaces
+    /// an enabled cached connection on the next request.
+    pub fn with_keep_alive_interval(mut self, interval: Duration) -> Self {
+        self.keep_alive_interval = interval;
+        self
+    }
+
+    /// Set the SSH keepalive interval in seconds.
+    pub fn with_keep_alive_interval_secs(self, interval_secs: u64) -> Self {
+        self.with_keep_alive_interval(Duration::from_secs(interval_secs))
+    }
+
+    fn effective_keep_alive_interval(&self) -> Result<Option<Duration>, ConnectError> {
+        if !self.keep_alive {
+            return Ok(None);
+        }
+        if self.keep_alive_interval.is_zero() {
+            return Err(ConnectError::InvalidKeepAliveConfig(
+                "keep_alive_interval must be greater than zero when keep_alive is enabled"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(self.keep_alive_interval))
+    }
 }
 
 /// A shared SSH client instance with state machine tracking.
@@ -672,6 +721,12 @@ pub struct SharedSshClient {
 
     /// Character encoding used to decode SSH terminal output.
     output_encoding: TextEncoding,
+
+    /// Effective transport keepalive interval; `None` disables keepalives.
+    keep_alive_interval: Option<Duration>,
+
+    /// Wakes the command worker when this connection is explicitly closed.
+    shutdown: Arc<tokio::sync::Notify>,
 
     /// Optional session recorder bound to this connection.
     recorder: Option<SessionRecorder>,
@@ -1213,6 +1268,7 @@ pub struct ConnectionPoolConfig {
     /// Maximum number of connections kept in the pool.
     pub max_connections: u64,
     /// How long an idle connection stays pooled before it is closed.
+    /// Connections using [`ExecutionContext::keep_alive`] are exempt.
     ///
     /// Keep this below the exec/idle timeout configured on the devices
     /// themselves so the pool never hands out a connection the device
@@ -1242,8 +1298,20 @@ enum ConnectionCacheKey {
     },
 }
 
+impl ConnectionCacheKey {
+    fn device_addr(&self) -> &str {
+        match self {
+            Self::Shared(device_addr)
+            | Self::Recorded { device_addr, .. }
+            | Self::Recorder { device_addr, .. } => device_addr,
+        }
+    }
+}
+
+type CachedConnection<T> = (mpsc::Sender<CmdJob>, Arc<T>, bool);
+
 struct ConnectionPoolInner {
-    cache: Cache<ConnectionCacheKey, (mpsc::Sender<CmdJob>, Arc<RwLock<SharedSshClient>>)>,
+    cache: Cache<ConnectionCacheKey, CachedConnection<RwLock<SharedSshClient>>>,
     /// Whether the pool maintenance task has been started.
     maintenance_started: AtomicBool,
     /// Interval between pending-task maintenance runs.
@@ -1256,6 +1324,8 @@ struct ConnectionPoolInner {
 /// connection pooling. A connection is gracefully closed (running
 /// `before_disconnect` hooks) once its last command sender is gone — i.e.
 /// the pool evicted its handle and no caller still holds one.
+/// [`Self::close_connection`] and [`Self::close_all`] explicitly close pooled
+/// connections even when callers still hold command senders.
 #[derive(Clone)]
 pub struct SshConnectionManager {
     inner: Arc<ConnectionPoolInner>,
@@ -1432,7 +1502,9 @@ mod tests {
             .with_sys(Some("vsys1".to_string()))
             .with_connect_timeout(Duration::from_secs(12))
             .with_retry_policy(retry_policy)
-            .with_connection_mode(ConnectionMode::OneShot);
+            .with_connection_mode(ConnectionMode::OneShot)
+            .with_keep_alive(true)
+            .with_keep_alive_interval_secs(15);
         assert_eq!(
             context.security_options,
             ConnectionSecurityOptions::legacy_compatible()
@@ -1441,6 +1513,10 @@ mod tests {
         assert_eq!(context.connect_timeout, Duration::from_secs(12));
         assert_eq!(context.retry_policy, retry_policy);
         assert_eq!(context.connection_mode, ConnectionMode::OneShot);
+        assert_eq!(
+            context.effective_keep_alive_interval().unwrap(),
+            Some(Duration::from_secs(15))
+        );
     }
 
     #[test]
@@ -1456,6 +1532,16 @@ mod tests {
             Duration::from_secs(7)
         );
         assert_eq!(ExecutionContext::new().retry_policy, RetryPolicy::default());
+        assert_eq!(
+            ExecutionContext::new().keep_alive_interval,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            ExecutionContext::new()
+                .effective_keep_alive_interval()
+                .unwrap(),
+            None
+        );
         assert_eq!(
             ExecutionContext::new().connection_mode,
             ConnectionMode::Pooled

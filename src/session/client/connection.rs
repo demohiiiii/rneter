@@ -34,10 +34,15 @@ async fn connect_ssh_transport(
     server_check: ServerCheckMethod,
     preferred: Preferred,
     connect_timeout: Duration,
+    keep_alive_interval: Option<Duration>,
 ) -> Result<Client, ConnectError> {
     let config = Config {
         preferred,
-        inactivity_timeout: Some(Duration::from_secs(60)),
+        inactivity_timeout: keep_alive_interval
+            .is_none()
+            .then_some(Duration::from_secs(60)),
+        keepalive_interval: keep_alive_interval,
+        keepalive_max: 3,
         ..Default::default()
     };
 
@@ -61,6 +66,7 @@ pub(super) fn connect_ssh_with_legacy_host_key_fallback<'a>(
     auth: AuthMethod,
     security_options: &'a ConnectionSecurityOptions,
     connect_timeout: Duration,
+    keep_alive_interval: Option<Duration>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Client, ConnectError>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -75,6 +81,7 @@ pub(super) fn connect_ssh_with_legacy_host_key_fallback<'a>(
             security_options.server_check.clone(),
             security_options.preferred(),
             connect_timeout,
+            keep_alive_interval,
         )
         .await;
 
@@ -110,6 +117,7 @@ pub(super) fn connect_ssh_with_legacy_host_key_fallback<'a>(
             security_options.server_check.clone(),
             preferred,
             fallback_timeout,
+            keep_alive_interval,
         )
         .await?;
         match fallback {
@@ -244,7 +252,7 @@ impl SharedSshClient {
         true
     }
 
-    /// Safely closes the connection.
+    /// Run cleanup hooks and disconnect the SSH transport.
     pub async fn close(&mut self) -> Result<(), ConnectError> {
         if self.closed {
             return Ok(());
@@ -273,15 +281,13 @@ impl SharedSshClient {
 
         self.recv.close();
 
-        if self.is_connected() {
-            if let Err(e) = self.sender.send("exit\n".to_string()).await {
-                debug!("Failed to send exit command: {:?}", e);
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
         self.closed = true;
+        self.shutdown.notify_one();
+        if !self.client.is_closed() {
+            self.client.disconnect().await.map_err(|error| {
+                ConnectError::ssh2_stage("disconnect", self.device_addr.clone(), error)
+            })?;
+        }
         debug!("SSH connection safely closed");
         Ok(())
     }
@@ -298,6 +304,7 @@ impl SharedSshClient {
         security_options: ConnectionSecurityOptions,
         output_encoding: TextEncoding,
         connect_timeout: Duration,
+        keep_alive_interval: Option<Duration>,
         recorder: Option<SessionRecorder>,
     ) -> Result<SharedSshClient, ConnectError> {
         let device_addr = format!("{user}@{addr}:{port}");
@@ -312,6 +319,7 @@ impl SharedSshClient {
             transport_auth,
             &security_options,
             connect_timeout,
+            keep_alive_interval,
         )
         .await?;
         debug!("{} TCP connection successful", device_addr);
@@ -525,6 +533,8 @@ impl SharedSshClient {
             enable_password_hash,
             security_options,
             output_encoding,
+            keep_alive_interval,
+            shutdown: Arc::new(tokio::sync::Notify::new()),
             recorder,
             closed: false,
         };
@@ -836,6 +846,7 @@ mod tests {
             async_ssh2_tokio::client::AuthMethod::with_password("test-password"),
             &security_options,
             Duration::from_secs(1),
+            None,
         );
 
         assert_eq!(

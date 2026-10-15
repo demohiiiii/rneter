@@ -1327,6 +1327,61 @@ The `SshConnectionManager` provides a singleton connection pool accessible via t
 - Reconnects on connection failure
 - Manages up to 100 concurrent connections
 
+Enable persistent keepalives with `ExecutionContext::with_keep_alive(true)`;
+the default is disabled:
+
+```rust,no_run
+use rneter::session::{Command, ConnectionRequest, ExecutionContext, SshConnectionManager};
+
+async fn example(request: ConnectionRequest) -> Result<(), rneter::error::ConnectError> {
+    let manager = SshConnectionManager::new();
+    let context = ExecutionContext::new()
+        .with_keep_alive(true)
+        .with_keep_alive_interval_secs(15);
+    manager.execute_command_with_context(
+        request.clone(),
+        Command {
+            mode: "Enable".to_string(),
+            command: "show version".to_string(),
+            ..Command::default()
+        },
+        context,
+    ).await?;
+
+    manager.close_connection(&request).await?; // All pooled variants for this user/address/port
+    manager.close_all().await?;               // All connections in this manager's shared pool
+    Ok(())
+}
+```
+
+When enabled, SSH sends a protocol keepalive after the configured interval without
+incoming server traffic and tolerates up to three unanswered keepalives. The
+interval defaults to 30 seconds. Use `with_keep_alive_interval_secs(15)` for seconds
+or `with_keep_alive_interval(Duration::from_millis(500))` for subsecond intervals
+(`Duration` is from `std::time`). Setting an interval does not enable keepalives.
+When enabled, a zero interval returns `ConnectError::InvalidKeepAliveConfig`.
+Enabling keepalives disables the
+local 60-second SSH inactivity timeout and exempts this connection from the pool's
+`idle_timeout`. Keepalives do not write blank lines or commands to the CLI. Remote
+CLI idle policies and the pool's `max_connections` capacity limit still apply.
+In `OneShot` mode, keepalives last only for the operation's lifetime. Use
+`.with_keep_alive(false)` to restore the default policy. Changing the switch or
+an enabled interval
+creates a replacement on the next pool request; connections held by old senders
+close once those senders are released.
+
+`close_connection` includes ordinary connections and every recording variant for
+the device. `close_all` affects the pool shared by this manager and its clones.
+Both wait for active operations, run `before_disconnect` hooks, and disconnect SSH,
+stopping caller-held senders too. Closing a connection does not automatically send
+a CLI exit command; device-specific cleanup can be configured in the hooks.
+They return the number of closed
+connections; repeated calls return zero. Once connections are selected, shutdown
+runs in an independent task and completes even if the caller times out or cancels
+its wait. Later requests can reconnect. These APIs
+cover connections currently in the pool, excluding one-shot connections, already
+evicted connections, and new concurrent connections.
+
 ### State Machine
 
 The `DeviceHandler` implements a finite state machine that:

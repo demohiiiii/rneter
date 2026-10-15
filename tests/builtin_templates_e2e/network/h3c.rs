@@ -2,8 +2,8 @@
 
 use crate::support;
 use rneter::session::{
-    CmdJob, ConnectionMode, RollbackPolicy, SessionEvent, SessionRecordLevel, TxBlock, TxStep,
-    TxWorkflow,
+    CmdJob, ConnectionMode, RollbackPolicy, SessionEvent, SessionRecordLevel, SessionRecorder,
+    TxBlock, TxStep, TxWorkflow,
 };
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -175,13 +175,15 @@ async fn one_shot_mode_bypasses_the_connection_pool() {
     let context = device
         .execution_context()
         .with_connection_mode(ConnectionMode::OneShot);
+    let recorder = SessionRecorder::new(SessionRecordLevel::KeyEventsOnly);
 
     for _ in 0..2 {
         manager
-            .execute_command_with_context(
+            .execute_command_with_recorder_and_context(
                 device.connection_request().expect("request"),
                 support::command("Enable", "display version"),
                 context.clone(),
+                recorder.clone(),
             )
             .await
             .expect("one-shot command");
@@ -189,10 +191,11 @@ async fn one_shot_mode_bypasses_the_connection_pool() {
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let commands = device.received_commands();
-            if commands
+            if recorder
+                .entries()
+                .expect("entries")
                 .iter()
-                .filter(|command| command.as_str() == "exit")
+                .filter(|entry| matches!(entry.event, SessionEvent::ConnectionClosed { .. }))
                 .count()
                 >= 2
             {
@@ -204,6 +207,13 @@ async fn one_shot_mode_bypasses_the_connection_pool() {
     .await
     .expect("one-shot connections should close after each operation");
 
+    assert!(
+        !device
+            .received_commands()
+            .iter()
+            .any(|command| command == "exit"),
+        "closing one-shot connections must not send a CLI exit command"
+    );
     assert_eq!(
         device
             .received_commands()

@@ -724,6 +724,9 @@ impl SharedSshClient {
         interaction: &CommandInteraction,
     ) -> Result<Output, ConnectError> {
         let runtime_interaction = RuntimeCommandInteraction::build(interaction)?;
+        if !self.is_connected() {
+            return Err(ConnectError::ConnectClosedError);
+        }
         let handler = &mut self.handler;
 
         let recv = &mut self.recv;
