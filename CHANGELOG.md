@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.3] - 2026-10-16
+
+### New Features
+
+- Added opt-in SSH protocol keepalives through `ExecutionContext::with_keep_alive(...)`, with a configurable interval via `with_keep_alive_interval(...)` or `with_keep_alive_interval_secs(...)`. Enabled connections bypass local SSH inactivity timeouts and pool idle expiration; the default interval is 30 seconds and keepalives are disabled by default.
+- Added `SshConnectionManager::close_connection(...)` and `close_all(...)` to close pooled connections, including recording variants and caller-held senders. Shutdown waits for active operations, runs `before_disconnect` hooks, and continues after caller cancellation.
+- Added `TemplateDetectReport::linux_shell_flavor`, exposing `DeviceShellFlavor::Fish` or `DeviceShellFlavor::Posix` when Linux shell probes identify the shell.
+
+### Optimizations
+
+- Improved autodetection of dynamic Linux shell prompts that add command-status markers while preserving strict network-device state matching.
+- Removed the fixed CLI `exit` command and its 100-millisecond delay from connection shutdown. Cleanup hooks run before directly disconnecting the SSH transport.
+- Replaced the deprecated atomic update API in testkit authentication with a compare-and-exchange loop, allowing strict Clippy checks on Rust 1.99 while retaining Rust 1.88 support.
+
+### API Changes
+
+- Added `ExecutionContext::keep_alive` and `keep_alive_interval`; struct-literal callers must initialize both fields or use constructors and builders. An enabled zero interval returns `ConnectError::InvalidKeepAliveConfig`.
+- Removed standalone `execute_tx_block`, `execute_tx_block_with_context`, and `execute_tx_block_with_recorder_and_context` entrypoints. Wrap each `TxBlock` in a `TxWorkflow` and use the corresponding workflow API; per-block `TxResult` values remain available in `TxWorkflowResult::block_results`.
+- Added the optional, defaulted `TemplateDetectReport::linux_shell_flavor` field; callers constructing reports with struct literals must initialize it.
+
+### Risks
+
+- This release removes transaction APIs and adds public struct fields. Downstream callers using those APIs or struct literals must migrate before upgrading.
+- SSH keepalives do not override remote CLI idle policies or pool capacity limits. Changing keepalive settings replaces a cached connection on its next lookup; an old connection held by a sender remains open until that sender is released.
+- Explicit close APIs cover connections currently in the pool, excluding one-shot connections, already evicted connections, and new concurrent connections. Device-specific CLI exit or cleanup commands must be configured in `before_disconnect` hooks.
+
 ## [0.5.2] - 2026-09-07
 
 ### New Features
